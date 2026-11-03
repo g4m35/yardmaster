@@ -25,6 +25,8 @@ import { HOOK_EVENTS, runHook } from './hook.ts';
 import { creatorPrompt, loadPlugins, scaffoldPlugin, testPlugin } from './plugins.ts';
 import { planGoal } from './planner.ts';
 import { VERSION } from './version.ts';
+import { inSea } from './assets.ts';
+import { runMockAgent } from './mockagent.ts';
 import { TIERS } from './config.ts';
 
 // ---------- tiny argument parser ----------
@@ -109,8 +111,8 @@ async function startHubInBackground(extra: string[] = []): Promise<string> {
   const existing = await runningHubUrl();
   if (existing) return existing;
   const log = openSync(paths.hubLog(), 'a');
-  const [node, cli] = selfCommand();
-  const child = spawn(node!, [cli!, 'hub', 'run', ...extra], { detached: true, stdio: ['ignore', log, log], env: process.env });
+  const [cmd, ...pre] = selfCommand();
+  const child = spawn(cmd!, [...pre, 'hub', 'run', ...extra], { detached: true, stdio: ['ignore', log, log], env: process.env });
   child.unref();
   closeSync(log);
   for (let i = 0; i < 50; i++) {
@@ -755,10 +757,13 @@ async function cmdDemo(a: Args) {
   ], 'demo');
   writeHubInfo(url);
   console.log(`${bold('Yardmaster demo')} running with a fake agent (no tokens spent).\n  Dashboard: ${cyan(`${url}/#token=${hub.token}`)}\n  Repo:      ${repo}\n  Press Ctrl+C to stop.`);
-  process.on('SIGINT', () => void hub.stop().then(() => process.exit(0)));
+  const stop = () => void hub.stop().then(() => process.exit(0));
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
 }
 
 async function main() {
+  if (process.argv[2] === '__mock-agent') return runMockAgent();
   const a = parseArgs(process.argv.slice(2));
   const cmd = a._[0];
   if (a.flags.version && !cmd) return console.log(VERSION);

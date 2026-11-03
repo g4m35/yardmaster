@@ -3,9 +3,11 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { run, which } from './proc.ts';
+import { inSea, readAsset } from './assets.ts';
 
 /** How agents should launch us: absolute paths, so it works regardless of the agent's PATH. */
 export function selfCommand(): string[] {
+  if (inSea) return [process.execPath];
   const cli = fileURLToPath(new URL('./cli' + (import.meta.url.endsWith('.ts') ? '.ts' : '.js'), import.meta.url));
   return [process.execPath, cli];
 }
@@ -145,11 +147,11 @@ export function installHooks(agent: 'claude' | 'codex'): string {
 
 /** Install the Yardmaster skill where each agent discovers skills. */
 export function installSkill(): string[] {
-  const src = fileURLToPath(new URL('../skills/yardmaster/SKILL.md', import.meta.url));
+  const text = readAsset('SKILL.md', inSea ? [] : [fileURLToPath(new URL('../skills/yardmaster/SKILL.md', import.meta.url))]);
   const targets = [join(homedir(), '.claude', 'skills', 'yardmaster'), join(homedir(), '.agents', 'skills', 'yardmaster')];
   for (const dir of targets) {
     mkdirSync(dir, { recursive: true });
-    copyFileSync(src, join(dir, 'SKILL.md'));
+    writeFileSync(join(dir, 'SKILL.md'), text);
   }
   return targets;
 }

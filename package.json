@@ -1,6 +1,6 @@
 {
   "name": "yardmaster",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Model-independent orchestration for the coding agents you already use (Claude Code, Codex, Cursor, OpenCode, Gemini, T3 Code). Parallel work without collisions, loops, or leftover mess.",
   "type": "module",
   "license": "MIT",
@@ -10,10 +10,10 @@
   },
   "files": [
     "dist",
-    "bin",
     "skills",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "engines": {
     "node": ">=22.16"
@@ -43,6 +43,8 @@
   "devDependencies": {
     "@modelcontextprotocol/client": "^2.4.0",
     "@types/node": "^24.19.2",
+    "esbuild": "^0.28.2",
+    "postject": "^1.0.0-alpha.6",
     "typescript": "^7.0.2"
   },
   "repository": {
