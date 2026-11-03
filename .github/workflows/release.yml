@@ -61,7 +61,8 @@ jobs:
     needs: binaries
     runs-on: ubuntu-latest
     env:
-      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # setup-node exports a placeholder NODE_AUTH_TOKEN when none is given, so test the secret itself.
+      HAS_NPM_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -72,8 +73,10 @@ jobs:
           registry-url: https://registry.npmjs.org
       - run: npm ci
       - name: Publish to npm
-        if: env.NODE_AUTH_TOKEN != ''
+        if: env.HAS_NPM_TOKEN == 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --provenance --access public
       - name: Skip npm (no NPM_TOKEN secret)
-        if: env.NODE_AUTH_TOKEN == ''
+        if: env.HAS_NPM_TOKEN != 'true'
         run: echo "No NPM_TOKEN secret set; skipping npm. See docs/PUBLISHING.md."
