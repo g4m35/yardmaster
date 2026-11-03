@@ -21,3 +21,14 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: npm test
+  binary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: node scripts/build-binary.mjs
+      - run: sh scripts/smoke-binary.sh release/yardmaster-linux-x64

@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
-import { closeSync, existsSync, openSync, readFileSync, statfsSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, statfsSync, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
-import { hostname, networkInterfaces } from 'node:os';
+import { createInterface as createLineReader } from 'node:readline';
+import { hostname, networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildMethods, localClient, remoteClient, type Client } from './api.ts';
 import { Coordinator } from './coordinator.ts';
@@ -25,6 +26,9 @@ import { HOOK_EVENTS, runHook } from './hook.ts';
 import { creatorPrompt, loadPlugins, scaffoldPlugin, testPlugin } from './plugins.ts';
 import { planGoal } from './planner.ts';
 import { VERSION } from './version.ts';
+import { serviceFiles, installService, uninstallService } from './service.ts';
+import { inSea } from './assets.ts';
+import { runMockAgent } from './mockagent.ts';
 import { TIERS } from './config.ts';
 
 // ---------- tiny argument parser ----------
@@ -109,8 +113,8 @@ async function startHubInBackground(extra: string[] = []): Promise<string> {
   const existing = await runningHubUrl();
   if (existing) return existing;
   const log = openSync(paths.hubLog(), 'a');
-  const [node, cli] = selfCommand();
-  const child = spawn(node!, [cli!, 'hub', 'run', ...extra], { detached: true, stdio: ['ignore', log, log], env: process.env });
+  const [cmd, ...pre] = selfCommand();
+  const child = spawn(cmd!, [...pre, 'hub', 'run', ...extra], { detached: true, stdio: ['ignore', log, log], env: process.env });
   child.unref();
   closeSync(log);
   for (let i = 0; i < 50; i++) {
@@ -404,7 +408,6 @@ async function cmdDisk(a: Args) {
 }
 
 async function cmdService(a: Args) {
-  const { serviceFiles, installService, uninstallService } = await import('./service.ts');
   const sub = a._[1] ?? 'status';
   const files = serviceFiles(flag(a, 'host'), flag(a, 'port'));
   if (sub === 'install') {
@@ -663,7 +666,7 @@ async function cmdPlugin(a: Args) {
     const spec = adapter.build({ prompt: creatorPrompt(name, kind, describe), cwd: dir, model: null, settings: { enabled: true, models: {}, maxParallel: 1, extraArgs: [], autonomy: 'workspace' } });
     const child = spawn(spec.command, spec.args, { cwd: dir, stdio: [spec.stdin !== undefined ? 'pipe' : 'ignore', 'pipe', 'inherit'], env: process.env });
     if (spec.stdin !== undefined) child.stdin?.end(spec.stdin);
-    const rl = (await import('node:readline')).createInterface({ input: child.stdout! });
+    const rl = createLineReader({ input: child.stdout! });
     rl.on('line', (line) => {
       for (const ev of adapter.parse(line)) if (ev.type === 'tool') console.log(dim(`  · ${ev.name}`));
     });
@@ -723,8 +726,6 @@ async function cmdDashboard(a: Args) {
 
 /** An isolated sandbox with a fake agent, so anyone can see how Yardmaster behaves without spending tokens. */
 async function cmdDemo(a: Args) {
-  const { mkdtempSync, writeFileSync, mkdirSync, realpathSync } = await import('node:fs');
-  const { tmpdir } = await import('node:os');
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'yardmaster-demo-')));
   process.env.YARDMASTER_HOME = join(base, 'home');
   process.env.YARDMASTER_ENABLE_MOCK = '1';
@@ -735,8 +736,9 @@ async function cmdDemo(a: Args) {
   const g = (args: string[]) => git(repo, args);
   await g(['init', '-q', '-b', 'main']);
   writeFileSync(join(repo, 'README.md'), '# Demo shop\n');
-  writeFileSync(join(repo, 'check.mjs'), "import { readdirSync, readFileSync } from 'node:fs';\nconst bad = readdirSync('.', { recursive: true }).filter((f) => !String(f).includes('.git') && String(f).endsWith('.js') && readFileSync(String(f), 'utf8').includes('TODO-BUG'));\nif (bad.length) { console.error('bug markers in ' + bad.join(', ')); process.exit(1); }\n");
-  writeFileSync(join(repo, PROJECT_CONFIG_FILE), JSON.stringify({ verify: ['node check.mjs'] }, null, 2));
+  // A plain shell check, so the demo works on machines without Node (the standalone binary's audience).
+  writeFileSync(join(repo, 'check.sh'), '#!/bin/sh\nif grep -rl "TODO-BUG" --include="*.js" . 2>/dev/null | grep -v "/.git/"; then echo "bug markers found" >&2; exit 1; fi\necho "checks ok"\n');
+  writeFileSync(join(repo, PROJECT_CONFIG_FILE), JSON.stringify({ verify: ['sh check.sh'] }, null, 2));
   await g(['add', '-A']);
   await g(['-c', 'user.name=Demo', '-c', 'user.email=demo@example.com', 'commit', '-qm', 'init']);
   const port = Number(flag(a, 'port') ?? 7788);
@@ -755,10 +757,13 @@ async function cmdDemo(a: Args) {
   ], 'demo');
   writeHubInfo(url);
   console.log(`${bold('Yardmaster demo')} running with a fake agent (no tokens spent).\n  Dashboard: ${cyan(`${url}/#token=${hub.token}`)}\n  Repo:      ${repo}\n  Press Ctrl+C to stop.`);
-  process.on('SIGINT', () => void hub.stop().then(() => process.exit(0)));
+  const stop = () => void hub.stop().then(() => process.exit(0));
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
 }
 
 async function main() {
+  if (process.argv[2] === '__mock-agent') return runMockAgent();
   const a = parseArgs(process.argv.slice(2));
   const cmd = a._[0];
   if (a.flags.version && !cmd) return console.log(VERSION);

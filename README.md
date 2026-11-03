@@ -17,14 +17,22 @@ Run several coding agents at once (Claude Code, Codex, Cursor, OpenCode, Gemini 
 
 ## Install
 
-Needs Node.js 22.16 or newer, git, and at least one coding agent you are signed in to.
+Needs git and at least one coding agent you are signed in to.
+
+**No Node needed** (macOS on Apple Silicon, Linux):
 
 ```sh
-npm install -g yardmaster                    # from npm: provides `ym` and `yardmaster`
-npm install -g github:g4m35/yardmaster       # or straight from GitHub (builds on install)
+curl -fsSL https://raw.githubusercontent.com/g4m35/yardmaster/main/install.sh | sh
 ```
 
-Or try it without installing: `npx yardmaster demo`.
+**With Node 22.16+** (everyone else, and Intel Macs):
+
+```sh
+npm install -g yardmaster                    # once it's on npm (see docs/PUBLISHING.md)
+npm install -g github:g4m35/yardmaster       # straight from GitHub (builds on install)
+```
+
+Then try it with a fake agent, spending no tokens: `ym demo`.
 
 ## Five-minute start
 

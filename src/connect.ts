@@ -3,9 +3,11 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { run, which } from './proc.ts';
+import { inSea, readAsset } from './assets.ts';
 
 /** How agents should launch us: absolute paths, so it works regardless of the agent's PATH. */
 export function selfCommand(): string[] {
+  if (inSea) return [process.execPath];
   const cli = fileURLToPath(new URL('./cli' + (import.meta.url.endsWith('.ts') ? '.ts' : '.js'), import.meta.url));
   return [process.execPath, cli];
 }
@@ -129,14 +131,21 @@ export function hookPlan(agent: 'claude' | 'codex'): { file: string; hooks: Reco
   };
 }
 
+const OUR_HOOK = /(?:^|[\s"'])(?:\S*yardmaster\S*|\S*cli\.(?:js|ts)"?|\S*\/ym"?|ym)\s+hook\s+(?:session-start|prompt|pre-edit|post-edit|claude-pretool)"?\s*$/;
+
+/** A hook group is ours if every command in it is a Yardmaster hook command (npm, source, or standalone install). */
+export function isOurHookGroup(group: unknown): boolean {
+  const hooks = (group as { hooks?: { command?: unknown }[] })?.hooks;
+  return Array.isArray(hooks) && hooks.length > 0 && hooks.every((h) => typeof h.command === 'string' && OUR_HOOK.test(h.command));
+}
+
 export function installHooks(agent: 'claude' | 'codex'): string {
   const { file, hooks } = hookPlan(agent);
   backupAndWriteJson(file, (cfg) => {
     const existing = (cfg.hooks ?? {}) as Record<string, unknown[]>;
     for (const [event, groups] of Object.entries(hooks)) {
       // Re-running connect replaces our entries and leaves everyone else's alone.
-      const mine = /yardmaster|cli\.(js|ts)"? hook /;
-      existing[event] = [...(existing[event] ?? []).filter((g) => !mine.test(JSON.stringify(g)) || !JSON.stringify(g).includes(' hook ')), ...groups];
+      existing[event] = [...(existing[event] ?? []).filter((g) => !isOurHookGroup(g)), ...groups];
     }
     cfg.hooks = existing;
   });
@@ -145,11 +154,11 @@ export function installHooks(agent: 'claude' | 'codex'): string {
 
 /** Install the Yardmaster skill where each agent discovers skills. */
 export function installSkill(): string[] {
-  const src = fileURLToPath(new URL('../skills/yardmaster/SKILL.md', import.meta.url));
+  const text = readAsset('SKILL.md', inSea ? [] : [fileURLToPath(new URL('../skills/yardmaster/SKILL.md', import.meta.url))]);
   const targets = [join(homedir(), '.claude', 'skills', 'yardmaster'), join(homedir(), '.agents', 'skills', 'yardmaster')];
   for (const dir of targets) {
     mkdirSync(dir, { recursive: true });
-    copyFileSync(src, join(dir, 'SKILL.md'));
+    writeFileSync(join(dir, 'SKILL.md'), text);
   }
   return targets;
 }

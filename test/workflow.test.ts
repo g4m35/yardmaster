@@ -2,7 +2,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { sandbox, sh, until } from './helpers.ts';
+import { sandbox, sh, tempDir, until } from './helpers.ts';
 import { Hub } from '../src/hub.ts';
 import { openDb } from '../src/db.ts';
 import { planCleanup, runCleanup } from '../src/janitor.ts';
@@ -238,4 +238,31 @@ test('cleanup never deletes unmerged or user-owned work', async () => {
   assert.ok(existsSync(join(userWt, 'wip.txt')));
   assert.equal(readFileSync(join(userWt, 'wip.txt'), 'utf8'), 'uncommitted user work');
   assert.ok(sh(s.repo, 'git', ['branch', '--list', `yardmaster/${exp.id}`]).length > 0, 'unmerged branch survives');
+});
+
+test('merging works on a machine where git has no name or email configured', async () => {
+  const prev = { g: process.env.GIT_CONFIG_GLOBAL, n: process.env.GIT_CONFIG_NOSYSTEM };
+  // Simulate a fresh machine: no identity anywhere, and git not allowed to guess one from the hostname
+  // (macOS git guesses, Linux git usually can't; useConfigOnly makes every OS behave like the strict case).
+  const gitconfig = join(tempDir('ym-gitcfg-'), 'gitconfig');
+  writeFileSync(gitconfig, '[user]\n\tuseConfigOnly = true\n');
+  process.env.GIT_CONFIG_GLOBAL = gitconfig;
+  process.env.GIT_CONFIG_NOSYSTEM = '1';
+  try {
+    const s = await startHub();
+    sh(s.repo, 'git', ['config', '--unset', 'user.name']);
+    sh(s.repo, 'git', ['config', '--unset', 'user.email']);
+    const { created } = s.add([
+      { title: 'Add the first page', prompt: '@mock write one.js 1', agent: 'mock' },
+      { title: 'Add the second page', prompt: '@mock write two.js 2', agent: 'mock' },
+    ]);
+    const final = await s.settle(created.map((t) => t.id));
+    assert.deepEqual(final.map((t) => t.status), ['done', 'done'], JSON.stringify(final.map((t) => t.attention)));
+    assert.equal(fileOnIntegration(s.repo, 'two.js'), '2');
+  } finally {
+    if (prev.g === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+    else process.env.GIT_CONFIG_GLOBAL = prev.g;
+    if (prev.n === undefined) delete process.env.GIT_CONFIG_NOSYSTEM;
+    else process.env.GIT_CONFIG_NOSYSTEM = prev.n;
+  }
 });

@@ -1,6 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
+import { inSea } from '../assets.ts';
 import { type Adapter, type AgentEvent, WRITE_TOOL, arr, commonFailure, num, obj, safeJson, str } from './types.ts';
 
 const toolEvent = (name: string, input: unknown): AgentEvent => ({ type: 'tool', name, input, write: WRITE_TOOL.test(name) });
@@ -210,10 +211,14 @@ export const gemini: Adapter = {
   classifyFailure: commonFailure,
 };
 
-function mockAgentPath(): string {
+/** The mock agent is part of Yardmaster itself: a tiny entry file from npm, a hidden subcommand in the binary. */
+function mockAgentArgs(): string[] {
+  if (inSea) return ['__mock-agent'];
   const here = dirname(fileURLToPath(import.meta.url));
-  for (const p of [join(here, '../../bin/mock-agent.mjs'), join(here, '../bin/mock-agent.mjs')]) if (existsSync(p)) return p;
-  throw new Error('mock-agent.mjs not found');
+  const ext = import.meta.url.endsWith('.ts') ? '.ts' : '.js';
+  const entry = join(here, '..', `mockagent-main${ext}`);
+  if (!existsSync(entry)) throw new Error('mock agent entry not found in this install');
+  return [entry];
 }
 
 /** Deterministic fake agent driven by `@mock` directives in the prompt. Powers tests and `--dry-run` demos. */
@@ -222,7 +227,7 @@ export const mock: Adapter = {
   label: 'Mock agent (tests and demos)',
   binary: process.execPath,
   build(ctx) {
-    return { command: process.execPath, args: [mockAgentPath()], stdin: ctx.prompt };
+    return { command: process.execPath, args: mockAgentArgs(), stdin: ctx.prompt };
   },
   parse(line) {
     const j = safeJson(line);

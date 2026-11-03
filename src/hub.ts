@@ -13,6 +13,7 @@ import { WorkerLoop } from './worker.ts';
 import { Semaphore } from './runner.ts';
 import { recover, planCleanup, runCleanup } from './janitor.ts';
 import { Supervisor } from './supervisor.ts';
+import { inSea, readAsset } from './assets.ts';
 import { importGraph } from './imports.ts';
 import { loadConfig } from './config.ts';
 import { detectAgents } from './adapters/index.ts';
@@ -224,16 +225,20 @@ export class Hub {
   }
 
   private serveDashboard(res: ServerResponse) {
-    const here = fileURLToPath(new URL('.', import.meta.url));
-    const file = [join(here, 'dashboard', 'index.html'), join(here, '..', 'src', 'dashboard', 'index.html')].find((f) => existsSync(f));
-    if (!file) return json(res, 500, { ok: false, error: 'dashboard missing from install' });
+    let html: string;
+    try {
+      const here = inSea ? '' : fileURLToPath(new URL('.', import.meta.url));
+      html = readAsset('dashboard.html', inSea ? [] : [join(here, 'dashboard', 'index.html'), join(here, '..', 'src', 'dashboard', 'index.html')]);
+    } catch {
+      return json(res, 500, { ok: false, error: 'dashboard missing from install' });
+    }
     res.writeHead(200, {
       'content-type': 'text/html; charset=utf-8',
       'cache-control': 'no-store',
       'content-security-policy': "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'",
       'referrer-policy': 'no-referrer',
     });
-    res.end(readFileSync(file));
+    res.end(html);
   }
 
   private stream(req: IncomingMessage, res: ServerResponse, after: number) {

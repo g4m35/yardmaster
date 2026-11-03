@@ -1,0 +1,79 @@
+name: release
+# Push a tag like v0.3.0 (or run manually) to build standalone binaries, attach them to a GitHub release,
+# and publish to npm when an NPM_TOKEN repository secret is set.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build (must already exist)
+        required: true
+permissions:
+  contents: write
+  id-token: write
+jobs:
+  binaries:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: node scripts/build-binary.mjs
+      - name: Smoke test the binary
+        run: sh scripts/smoke-binary.sh "$(ls release/yardmaster-* | grep -v sha256)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.os }}
+          path: release/yardmaster-*
+  github-release:
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist-bin
+          merge-multiple: true
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          cp install.sh dist-bin/
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist-bin/* --clobber
+          else
+            gh release create "$TAG" dist-bin/* --title "Yardmaster $TAG" --generate-notes
+          fi
+  npm:
+    needs: binaries
+    runs-on: ubuntu-latest
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - name: Publish to npm
+        if: env.NODE_AUTH_TOKEN != ''
+        run: npm publish --provenance --access public
+      - name: Skip npm (no NPM_TOKEN secret)
+        if: env.NODE_AUTH_TOKEN == ''
+        run: echo "No NPM_TOKEN secret set; skipping npm. See docs/PUBLISHING.md."

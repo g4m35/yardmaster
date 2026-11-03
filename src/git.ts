@@ -10,8 +10,28 @@ export class GitError extends Error {
   }
 }
 
+const COMMIT_MAKING = new Set(['commit', 'merge', 'cherry-pick', 'revert', 'am']);
+
+/**
+ * Commands that create commits need a name and email. Many people (and every fresh CI machine) never set one;
+ * git then refuses, and the whole merge queue stalls. Use the user's identity when it exists, a neutral one if not.
+ */
+async function identityFor(cwd: string, args: string[]): Promise<string[]> {
+  if (!COMMIT_MAKING.has(args[0] ?? '')) return [];
+  const env = cleanEnv({ GIT_TERMINAL_PROMPT: '0' });
+  const [name, email] = await Promise.all([
+    run('git', ['config', 'user.name'], { cwd, env, timeoutMs: 10_000 }),
+    run('git', ['config', 'user.email'], { cwd, env, timeoutMs: 10_000 }),
+  ]);
+  const out: string[] = [];
+  if (name.code !== 0 || !name.stdout.trim()) out.push('-c', 'user.name=Yardmaster');
+  if (email.code !== 0 || !email.stdout.trim()) out.push('-c', 'user.email=yardmaster@localhost');
+  return out;
+}
+
 export async function git(cwd: string, args: string[], opts: { allowFail?: boolean; timeoutMs?: number; input?: string } = {}) {
-  const r = await run('git', args, { cwd, env: cleanEnv({ GIT_TERMINAL_PROMPT: '0', GIT_EDITOR: 'true', GIT_MERGE_AUTOEDIT: 'no' }), timeoutMs: opts.timeoutMs ?? 120_000, input: opts.input });
+  const full = [...(await identityFor(cwd, args)), ...args];
+  const r = await run('git', full, { cwd, env: cleanEnv({ GIT_TERMINAL_PROMPT: '0', GIT_EDITOR: 'true', GIT_MERGE_AUTOEDIT: 'no' }), timeoutMs: opts.timeoutMs ?? 120_000, input: opts.input });
   if (r.code !== 0 && !opts.allowFail) throw new GitError(args, r.stderr || r.stdout);
   return r;
 }
@@ -153,10 +173,8 @@ export async function commitAll(cwd: string, message: string): Promise<boolean> 
   const merging = (await git(cwd, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], { allowFail: true })).code === 0;
   const staged = await git(cwd, ['diff', '--cached', '--quiet'], { allowFail: true });
   if (staged.code === 0 && !merging) return false;
-  const name = await git(cwd, ['config', 'user.name'], { allowFail: true });
-  const identity = name.code === 0 && name.stdout.trim() ? [] : ['-c', 'user.name=Yardmaster', '-c', 'user.email=yardmaster@localhost'];
   // Repo commit hooks still run: they are often the owner's only enforcement that every agent goes through.
-  await git(cwd, [...identity, 'commit', '-q', '-m', message]);
+  await git(cwd, ['commit', '-q', '-m', message]);
   return true;
 }
 
