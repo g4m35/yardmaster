@@ -1,0 +1,80 @@
+import type { AgentSettings } from '../config.ts';
+
+/** Every agent CLI's output is normalized into these events, so the watchdog and budget logic are agent-independent. */
+export type AgentEvent =
+  | { type: 'tool'; name: string; input: unknown; write: boolean }
+  | { type: 'tool_result'; ok: boolean; text: string }
+  | { type: 'text'; text: string }
+  | { type: 'usage'; tokensIn: number; tokensOut: number; cachedIn?: number; costUsd?: number; cumulative: boolean }
+  | { type: 'result'; ok: boolean; text: string }
+  | { type: 'error'; text: string };
+
+export interface AdapterContext {
+  prompt: string;
+  cwd: string;
+  model: string | null;
+  settings: AgentSettings;
+  /** Read-only planning runs (used by `ym plan`). */
+  readOnly?: boolean;
+}
+
+export interface LaunchSpec {
+  command: string;
+  args: string[];
+  /** Sent on stdin, then stdin is closed. Some CLIs (codex) block waiting on an open stdin. */
+  stdin?: string;
+  env?: Record<string, string>;
+}
+
+export type FailureClass = 'auth' | 'rate_limit' | 'missing_binary' | 'context' | null;
+
+export interface Adapter {
+  name: string;
+  label: string;
+  /** Executable looked up on PATH to decide whether this agent is installed. */
+  binary: string;
+  build(ctx: AdapterContext): LaunchSpec;
+  parse(line: string): AgentEvent[];
+  classifyFailure?(output: string): FailureClass;
+  /** Shown to the user when this agent cannot run. Plain language. */
+  setupHint?: string;
+}
+
+export const WRITE_TOOL = /^(edit|write|multiedit|notebookedit|apply_patch|file_change|str_replace|create|patch|replace|write_file|edit_file)/i;
+
+export function commonFailure(output: string): FailureClass {
+  const o = output.toLowerCase();
+  if (/not logged in|please log in|authentication|unauthorized|invalid api key|401\b|login required|run .*login/.test(o)) return 'auth';
+  if (/rate limit|too many requests|429\b|usage limit|quota|overloaded|capacity/.test(o)) return 'rate_limit';
+  if (/context (length|window)|prompt is too long|maximum context/.test(o)) return 'context';
+  return null;
+}
+
+export function safeJson(line: string): Record<string, unknown> | null {
+  const t = line.trim();
+  if (!t.startsWith('{')) return null;
+  try {
+    const v: unknown = JSON.parse(t);
+    return typeof v === 'object' && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function str(v: unknown): string {
+  if (typeof v === 'string') return v;
+  if (v === undefined || v === null) return '';
+  return JSON.stringify(v);
+}
+
+export function num(v: unknown): number {
+  return typeof v === 'number' && Number.isFinite(v) ? v : 0;
+}
+
+export function obj(v: unknown): Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+}
+
+export function arr(v: unknown): unknown[] {
+  return Array.isArray(v) ? v : [];
+}

@@ -1,0 +1,159 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { inferScope, matches, patternsOverlap, scopesOverlap } from '../src/scope.ts';
+import { findCycle } from '../src/graph.ts';
+import { Watchdog } from '../src/watchdog.ts';
+import { errorFingerprint, jaccard, wordSet } from '../src/text.ts';
+import { chooseAgent, escalate, inferTier } from '../src/router.ts';
+import { resolveConfig } from '../src/config.ts';
+import { claude, codex, opencode } from '../src/adapters/builtin.ts';
+
+const wd = { repeatThreshold: 4, oscillationCycles: 3, sameToolErrorLimit: 3, stallMinutes: 1, awaitingInputMinutes: 0.5, maxRuntimeMinutes: 10 };
+
+test('glob matching', () => {
+  assert.ok(matches('src/auth/login.ts', 'src/auth/**'));
+  assert.ok(matches('src/auth/login.ts', 'src/auth'));
+  assert.ok(matches('src/a.ts', 'src/*.ts'));
+  assert.ok(!matches('src/x/a.ts', 'src/*.ts'));
+  assert.ok(matches('packages/web/src/x.tsx', '**/*.tsx'));
+  assert.ok(matches('a/b.json', 'a/{b,c}.json'));
+});
+
+test('scope overlap is conservative but not blind', () => {
+  assert.ok(patternsOverlap('src/auth/**', 'src/auth/login.ts'));
+  assert.ok(patternsOverlap('src/**', 'src/ui/**'));
+  assert.ok(patternsOverlap('**/*.ts', 'docs/x.ts'));
+  assert.ok(!patternsOverlap('src/auth/**', 'src/ui/**'));
+  assert.ok(!patternsOverlap('README.md', 'src/index.ts'));
+  assert.deepEqual(scopesOverlap(['a/**'], ['b/**', 'c.txt']), []);
+});
+
+test('scope inference from plain-language requests', () => {
+  assert.deepEqual(inferScope('Fix the typo in README.md and update docs/setup.md'), ['README.md', 'docs/setup.md']);
+  assert.deepEqual(inferScope('Refactor src/auth/ to use JWT'), ['src/auth/**']);
+  assert.deepEqual(inferScope('make the login page nicer, e.g. bigger buttons'), []);
+});
+
+test('dependency cycles are found', () => {
+  assert.equal(findCycle(new Map([['a', ['b']], ['b', ['c']]])), null);
+  assert.deepEqual(findCycle(new Map([['a', ['b']], ['b', ['c']], ['c', ['a']]])), ['a', 'b', 'c', 'a']);
+});
+
+test('watchdog: identical consecutive calls are a loop', () => {
+  const w = new Watchdog(wd, 0);
+  let v = null;
+  for (let i = 0; i < 4 && !v; i++) v = w.feed({ type: 'tool', name: 'Read', input: { file_path: 'a' }, write: false }, i);
+  assert.equal(v?.kind, 'loop');
+});
+
+test('watchdog: re-reading a file between edits is not a loop', () => {
+  const w = new Watchdog(wd, 0);
+  for (let i = 0; i < 12; i++) {
+    assert.equal(w.feed({ type: 'tool', name: 'Read', input: { file_path: 'a' }, write: false }, i), null);
+    assert.equal(w.feed({ type: 'tool', name: 'Edit', input: { file_path: 'a', n: i }, write: true }, i), null);
+  }
+});
+
+test('watchdog: A-B-A-B oscillation', () => {
+  const w = new Watchdog(wd, 0);
+  let v = null;
+  for (let i = 0; i < 6 && !v; i++) v = w.feed({ type: 'tool', name: 'Bash', input: { command: i % 2 ? 'undo' : 'do' }, write: false }, i);
+  assert.equal(v?.kind, 'oscillation');
+});
+
+test('watchdog: same tool error repeatedly, with a permission hint', () => {
+  const w = new Watchdog(wd, 0);
+  let v = null;
+  for (let i = 0; i < 3 && !v; i++) v = w.feed({ type: 'tool_result', ok: false, text: `Permission denied: npm test (attempt at 12:0${i}:01)` }, i);
+  assert.equal(v?.kind, 'repeated_error');
+  assert.match(v!.message, /permission/i);
+});
+
+test('watchdog: stall, question, and runtime limit', () => {
+  const w = new Watchdog(wd, 0);
+  w.feed({ type: 'text', text: 'Should I also migrate the database?' }, 1000);
+  assert.equal(w.tick(20_000), null);
+  assert.equal(w.tick(40_000)?.kind, 'awaiting_input');
+  const s = new Watchdog(wd, 0);
+  s.feed({ type: 'tool', name: 'Bash', input: 'npm test', write: false }, 0);
+  assert.equal(s.tick(61_000)?.kind, 'stall');
+  assert.equal(new Watchdog(wd, 0).tick(11 * 60_000)?.kind, 'timeout');
+});
+
+test('error fingerprints ignore timing noise', () => {
+  const a = 'FAIL src/a.test.ts:12:5\n  expected 1 to be 2\nTests: 1 failed (312ms) at 2026-11-03T10:00:00Z';
+  const b = 'FAIL src/a.test.ts:14:9\n  expected 1 to be 2\nTests: 1 failed (95ms) at 2026-11-03T10:05:12Z';
+  assert.equal(errorFingerprint(a), errorFingerprint(b));
+  assert.notEqual(errorFingerprint(a), errorFingerprint('totally different failure'));
+});
+
+test('duplicate detection via word overlap', () => {
+  assert.ok(jaccard(wordSet('Add dark mode toggle to settings page'), wordSet('add a dark-mode toggle to the settings page')) >= 0.6);
+  assert.ok(jaccard(wordSet('Add dark mode'), wordSet('Fix login redirect bug')) < 0.2);
+});
+
+test('tier inference and escalation', () => {
+  assert.equal(inferTier('Fix typo in README'), 'cheap');
+  assert.equal(inferTier('Redesign the authentication architecture'), 'strong');
+  assert.equal(inferTier('Add a CSV export button'), 'standard');
+  assert.equal(escalate('cheap'), 'standard');
+  assert.equal(escalate('strong'), 'strong');
+});
+
+test('routing skips busy and consistently failing agents', () => {
+  const config = resolveConfig([{ routing: { standard: ['claude', 'codex'] }, agents: { claude: { maxParallel: 1 } } }]);
+  const base = { config, tier: 'standard' as const, forced: null, installed: ['claude', 'codex'] };
+  assert.equal(chooseAgent({ ...base, runningByAgent: {}, stats: {} })?.agent, 'claude');
+  assert.equal(chooseAgent({ ...base, runningByAgent: { claude: 1 }, stats: {} })?.agent, 'codex');
+  assert.equal(chooseAgent({ ...base, runningByAgent: {}, stats: { claude: { runs: 5, verified: 0 } } })?.agent, 'codex');
+  assert.equal(chooseAgent({ ...base, installed: [], runningByAgent: {}, stats: {} }), null);
+});
+
+test('presets layer under user config', () => {
+  const c = resolveConfig([{ preset: 'careful', maxParallel: 4 }]);
+  assert.equal(c.integration.requireApproval, true);
+  assert.equal(c.maxParallel, 4);
+  assert.equal(resolveConfig([{ preset: 'frugal' }]).defaultTier, 'cheap');
+  assert.throws(() => resolveConfig([{ preset: 'turbo' }]), /Unknown preset/);
+});
+
+const fixture = (f: string) => readFileSync(join(import.meta.dirname, 'fixtures/agent-samples', f), 'utf8').split('\n').filter(Boolean);
+
+test('claude adapter parses real stream-json', () => {
+  const events = fixture('claude.jsonl').flatMap((l) => claude.parse(l));
+  assert.ok(events.some((e) => e.type === 'tool' && e.name === 'Read'));
+  const result = events.find((e) => e.type === 'result');
+  assert.deepEqual(result, { type: 'result', ok: true, text: 'DONE' });
+  const final = events.filter((e) => e.type === 'usage' && e.cumulative);
+  assert.equal(final.length, 1);
+  assert.ok(final[0]!.type === 'usage' && final[0]!.costUsd! > 0);
+});
+
+test('codex adapter parses real exec --json', () => {
+  const events = fixture('codex.jsonl').flatMap((l) => codex.parse(l));
+  assert.equal(events.filter((e) => e.type === 'tool' && e.name === 'shell').length, 2);
+  assert.ok(events.some((e) => e.type === 'tool_result' && e.ok));
+  assert.ok(events.some((e) => e.type === 'text' && e.text === 'DONE'));
+  const usage = events.find((e) => e.type === 'usage');
+  assert.ok(usage && usage.type === 'usage' && usage.cachedIn === 35072);
+});
+
+test('opencode adapter parses real run --format json', () => {
+  const events = fixture('oc.jsonl').flatMap((l) => opencode.parse(l));
+  assert.ok(events.some((e) => e.type === 'text' && e.text === 'DONE'));
+  const usage = events.find((e) => e.type === 'usage');
+  assert.ok(usage && usage.type === 'usage' && usage.costUsd! > 0);
+});
+
+test('adapters never put prompts through a shell and close stdin for codex', () => {
+  const settings = { enabled: true, models: {}, maxParallel: 1, extraArgs: [], autonomy: 'workspace' as const };
+  const spec = codex.build({ prompt: 'rm -rf / $(evil)', cwd: '/tmp/x', model: null, settings });
+  assert.equal(spec.stdin, 'rm -rf / $(evil)');
+  assert.equal(spec.args.at(-1), '-');
+  assert.ok(spec.args.includes('workspace-write'));
+  const c = claude.build({ prompt: 'p', cwd: '/tmp/x', model: 'haiku', settings });
+  assert.ok(c.args.includes('acceptEdits'));
+  assert.ok(!c.args.includes('--bare'), 'user config, hooks and MCP servers must be preserved');
+});

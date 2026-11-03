@@ -1,0 +1,701 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Yardmaster</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231C2A28'/%3E%3Ccircle cx='16' cy='10' r='4' fill='%23E0A019'/%3E%3Ccircle cx='16' cy='22' r='4' fill='%232F8A5B'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #E4EAE8;
+    --panel: #F6F8F7;
+    --ink: #1C2A28;
+    --ink-2: #4A5856;
+    --steel: #7B8886;
+    --rule: #C9D3D0;
+    --amber: #E0A019;
+    --amber-wash: #FBF1D9;
+    --green: #2F8A5B;
+    --red: #C3352C;
+    --red-wash: #F8E1DF;
+    --blue: #2B6CB0;
+    --sign: "DIN Alternate", "DIN Next", "Bahnschrift", "D-DIN", "Roboto Condensed", "Arial Narrow", sans-serif;
+    --body: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --r-sm: 4px;
+    --r-md: 8px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body { background: var(--bg); color: var(--ink); font: 15px/1.5 var(--body); -webkit-font-smoothing: antialiased; }
+  button, input, textarea, select { font: inherit; color: inherit; }
+  :focus-visible { outline: 3px solid var(--blue); outline-offset: 2px; border-radius: var(--r-sm); }
+  .num { font-family: var(--sign); font-variant-numeric: tabular-nums; }
+
+  /* ---- top bar ---- */
+  header.bar { display: flex; align-items: center; gap: 20px; padding: 14px 28px; background: var(--ink); color: #EEF3F1; flex-wrap: wrap; }
+  .brand { display: flex; align-items: center; gap: 10px; font-family: var(--sign); font-size: 22px; letter-spacing: .01em; }
+  .brand .lamps { display: grid; gap: 3px; }
+  .brand .lamps i { width: 8px; height: 8px; border-radius: 50%; display: block; }
+  .bar select { background: #2A3B38; border: 1px solid #3E504D; border-radius: var(--r-sm); padding: 5px 8px; color: #EEF3F1; }
+  .bar .spacer { flex: 1; }
+  .meter { display: grid; gap: 4px; min-width: 190px; font-size: 13px; color: #C5D1CE; }
+  .meter .track { height: 6px; background: #34463F; border-radius: 3px; overflow: hidden; }
+  .meter .fill { height: 100%; background: var(--green); width: 0; transition: width .4s; }
+  .meter .fill.warn { background: var(--amber); }
+  .meter .fill.over { background: var(--red); }
+  .meter b { color: #fff; font-weight: 600; }
+  .conn { font-size: 13px; color: #C5D1CE; display: flex; align-items: center; gap: 6px; }
+  .conn i { width: 8px; height: 8px; border-radius: 50%; background: var(--steel); }
+  .conn.live i { background: #4CC38A; }
+  .btn { border: 1px solid var(--rule); background: var(--panel); border-radius: var(--r-sm); padding: 6px 12px; cursor: pointer; font-weight: 550; }
+  .btn:hover { border-color: var(--steel); }
+  .btn.primary { background: var(--amber); border-color: var(--amber); color: #231A04; }
+  .btn.primary:hover { background: #EBAE2A; }
+  .btn.go { background: var(--green); border-color: var(--green); color: #fff; }
+  .btn.danger { color: var(--red); }
+  .btn:disabled { opacity: .5; cursor: default; }
+
+  main { max-width: 1320px; margin: 0 auto; padding: 24px 28px 64px; display: grid; gap: 28px; }
+  h2 { font-family: var(--sign); font-weight: 600; font-size: 20px; margin: 0 0 12px; letter-spacing: .005em; }
+  h2 small { font-family: var(--body); font-size: 13px; font-weight: 400; color: var(--ink-2); margin-left: 8px; }
+
+  /* ---- needs you ---- */
+  #attention { border-left: 6px solid var(--amber); background: var(--amber-wash); border-radius: var(--r-md); padding: 16px 20px; }
+  #attention[hidden] { display: none; }
+  .need { display: grid; grid-template-columns: 1fr auto; gap: 6px 18px; padding: 12px 0; border-top: 1px solid #EAD9AE; }
+  .need:first-of-type { border-top: 0; }
+  .need .t { font-weight: 650; }
+  .need .why { color: #4B3A12; max-width: 78ch; }
+  .need .acts { display: flex; gap: 8px; align-items: start; flex-wrap: wrap; justify-content: end; grid-row: span 2; }
+
+  #paused { border-left: 6px solid var(--steel); background: #DCE3E1; border-radius: var(--r-md); padding: 12px 20px; display: flex; gap: 16px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+  #paused[hidden], #headsup[hidden], #pause-ask[hidden] { display: none; }
+  .pause-ask { border-left: 6px solid var(--ink); background: var(--panel); border: 1px solid var(--rule); border-left-width: 6px; border-radius: var(--r-md); padding: 12px 20px; display: flex; gap: 16px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+  .pause-ask b { font-family: var(--sign); font-size: 18px; font-weight: 600; margin-right: 6px; }
+  #headsup a { text-decoration: none; }
+  #headsup a:hover { text-decoration: underline; }
+  #paused b { font-family: var(--sign); font-size: 18px; font-weight: 600; }
+  #headsup { border-left: 6px solid var(--blue); background: #E3ECF5; border-radius: var(--r-md); padding: 14px 20px; }
+  #headsup h2 { font-size: 18px; margin-bottom: 6px; }
+  #headsup ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+  #headsup a { color: inherit; }
+  .bar .btn.ghost { background: transparent; color: #EEF3F1; border-color: #3E504D; }
+  .bar .btn.ghost:hover { border-color: #9FB0AC; }
+  .meter small { color: #E9C46A; display: block; }
+  .disk { grid-column: 2 / -1; display: grid; gap: 3px; font-size: 12.5px; color: var(--ink-2); }
+  .disk .track { height: 5px; background: #DCE3E1; border-radius: 3px; overflow: hidden; }
+  .disk .fill { height: 100%; background: var(--steel); }
+  .disk.low { color: var(--red); }
+  .disk.low .fill { background: var(--red); }
+  .redirect { display: grid; gap: 6px; }
+  .redirect textarea { width: 100%; min-height: 64px; border: 1px solid var(--rule); border-radius: var(--r-sm); padding: 8px 10px; background: #fff; resize: vertical; }
+
+  /* ---- the line: board of stations ---- */
+  .line { position: relative; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 14px; }
+  .line::before { content: ""; position: absolute; left: 10%; right: 10%; top: 13px; height: 4px; background: repeating-linear-gradient(90deg, var(--steel) 0 14px, transparent 14px 20px); opacity: .55; }
+  .station { position: relative; display: grid; align-content: start; gap: 10px; min-width: 0; }
+  .station > header { display: grid; justify-items: center; gap: 6px; margin-bottom: 4px; }
+  .station > header .stop { width: 30px; height: 30px; border-radius: 50%; background: var(--panel); border: 4px solid var(--steel); position: relative; z-index: 1; }
+  .station[data-s="running"] .stop, .station[data-s="verifying"] .stop { border-color: var(--blue); }
+  .station[data-s="ready"] .stop { border-color: var(--amber); }
+  .station[data-s="done"] .stop { border-color: var(--green); background: var(--green); }
+  .station > header span { font-family: var(--sign); font-size: 17px; }
+  .station > header em { font-style: normal; color: var(--ink-2); font-size: 13px; }
+  .ticket { text-align: left; width: 100%; background: var(--panel); border: 1px solid var(--rule); border-radius: var(--r-sm); padding: 10px 12px 10px 14px; position: relative; cursor: pointer; display: grid; gap: 4px; }
+  .ticket:hover { border-color: var(--steel); }
+  .ticket::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 3px; border-radius: 2px; background: var(--steel); }
+  .ticket[data-s="running"]::before, .ticket[data-s="verifying"]::before { background: var(--blue); }
+  .ticket[data-s="ready"]::before, .ticket[data-s="merging"]::before { background: var(--amber); }
+  .ticket[data-s="done"]::before { background: var(--green); }
+  .ticket .t { font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
+  .ticket .m { font-size: 12.5px; color: var(--ink-2); display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .ticket .d { font-size: 12.5px; color: var(--ink-2); overflow-wrap: anywhere; }
+  .lamp { width: 9px; height: 9px; border-radius: 50%; background: var(--steel); display: inline-block; flex: none; }
+  .ticket[data-s="running"] .lamp { background: var(--blue); animation: pulse 1.8s ease-in-out infinite; }
+  .ticket[data-s="verifying"] .lamp { background: var(--blue); }
+  .ticket[data-s="ready"] .lamp, .ticket[data-s="merging"] .lamp { background: var(--amber); }
+  .ticket[data-s="done"] .lamp { background: var(--green); }
+  @keyframes pulse { 50% { opacity: .35; } }
+  @media (prefers-reduced-motion: reduce) { .ticket .lamp { animation: none !important; } .meter .fill { transition: none; } }
+  .empty-station { font-size: 13px; color: var(--steel); text-align: center; padding: 8px 4px; }
+  .board-empty { grid-column: 1 / -1; text-align: center; color: var(--ink-2); padding: 18px; }
+
+  /* ---- lower panels ---- */
+  .lower { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: 28px; align-items: start; }
+  .panel { background: var(--panel); border: 1px solid var(--rule); border-radius: var(--r-md); padding: 18px 20px; }
+  .feed { list-style: none; margin: 0; padding: 0; max-height: 420px; overflow: auto; }
+  .feed li { display: grid; grid-template-columns: 70px 1fr; gap: 10px; padding: 6px 0; border-top: 1px solid #E3E9E7; font-size: 14px; }
+  .feed li:first-child { border-top: 0; }
+  .feed time { color: var(--steel); font-family: var(--sign); font-variant-numeric: tabular-nums; }
+  .feed li[data-l="warn"] span { color: #7A5300; }
+  .feed li[data-l="error"] span { color: var(--red); }
+  .feed li[data-l="success"] span { color: #1F6A43; }
+  .feed a { color: inherit; text-decoration: none; }
+  .feed a:hover { text-decoration: underline; }
+  .machines { display: grid; gap: 10px; margin: 0 0 22px; }
+  .machine { display: grid; grid-template-columns: auto 1fr auto; gap: 4px 10px; align-items: center; }
+  .machine .lamp.on { background: var(--green); }
+  .machine .n { font-weight: 600; }
+  .machine .a { grid-column: 2 / -1; font-size: 13px; color: var(--ink-2); }
+  .slots { display: flex; gap: 3px; }
+  .slots i { width: 10px; height: 14px; border-radius: 2px; border: 1px solid var(--steel); }
+  .slots i.used { background: var(--blue); border-color: var(--blue); }
+  .clean-list { font-size: 13.5px; margin: 8px 0 12px; padding-left: 18px; color: var(--ink-2); }
+  .clean-list li { margin: 3px 0; overflow-wrap: anywhere; }
+  .clean-list.keep li::marker { color: var(--amber); }
+  .muted { color: var(--ink-2); font-size: 13.5px; }
+
+  /* ---- add work dialog ---- */
+  dialog { border: 0; border-radius: var(--r-md); padding: 0; width: min(620px, calc(100vw - 32px)); background: var(--panel); color: var(--ink); box-shadow: 0 30px 80px rgba(20, 35, 32, .35); }
+  dialog::backdrop { background: rgba(28, 42, 40, .45); }
+  form.add { display: grid; gap: 16px; padding: 22px 24px; }
+  form.add label { display: grid; gap: 6px; font-weight: 600; }
+  form.add label small { font-weight: 400; color: var(--ink-2); }
+  form.add textarea, form.add input[type=text], form.add select { width: 100%; border: 1px solid var(--rule); border-radius: var(--r-sm); padding: 9px 11px; background: #fff; font-weight: 400; }
+  form.add textarea { min-height: 120px; resize: vertical; }
+  .choice { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; border: 0; padding: 0; margin: 0; }
+  .choice legend { font-weight: 600; margin-bottom: 6px; padding: 0; }
+  .choice label { border: 1px solid var(--rule); border-radius: var(--r-sm); padding: 8px 10px; font-weight: 500; cursor: pointer; display: grid; gap: 2px; background: #fff; }
+  .choice label small { font-size: 12px; }
+  .choice input { position: absolute; opacity: 0; pointer-events: none; }
+  .choice label:has(input:checked) { border-color: var(--ink); box-shadow: inset 0 0 0 1px var(--ink); }
+  .choice label:has(input:focus-visible) { outline: 3px solid var(--blue); outline-offset: 2px; }
+  .form-acts { display: flex; justify-content: end; gap: 10px; }
+  .form-msg { font-size: 14px; min-height: 1.5em; }
+
+  /* ---- drawer ---- */
+  aside.drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(560px, 100vw); background: var(--panel); border-left: 1px solid var(--rule); transform: translateX(100%); visibility: hidden; transition: transform .22s ease-out, visibility 0s linear .22s; display: grid; grid-template-rows: auto auto 1fr; z-index: 20; }
+  aside.drawer.open { transform: none; visibility: visible; box-shadow: -24px 0 60px rgba(20, 35, 32, .18); transition: transform .22s ease-out; }
+  @media (prefers-reduced-motion: reduce) { aside.drawer { transition: none; } }
+  .drawer .head { padding: 18px 22px 12px; border-bottom: 1px solid var(--rule); display: grid; gap: 8px; }
+  .drawer .head h3 { font-family: var(--sign); font-size: 21px; font-weight: 600; margin: 0; line-height: 1.25; padding-right: 36px; }
+  .drawer .close { position: absolute; top: 14px; right: 16px; border: 0; background: none; font-size: 22px; cursor: pointer; line-height: 1; padding: 4px 8px; }
+  .facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; font-size: 14px; margin: 0; }
+  .facts dt { color: var(--ink-2); }
+  .facts dd { margin: 0; overflow-wrap: anywhere; }
+  .drawer .acts { display: flex; gap: 8px; flex-wrap: wrap; padding: 12px 22px; border-bottom: 1px solid var(--rule); }
+  .drawer .body { overflow: auto; padding: 14px 22px 30px; display: grid; gap: 16px; align-content: start; }
+  .callout { border-radius: var(--r-sm); padding: 10px 12px; font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .callout.amber { background: var(--amber-wash); border-left: 4px solid var(--amber); }
+  .callout.red { background: var(--red-wash); border-left: 4px solid var(--red); }
+  .callout.plain { background: #EDF2F0; }
+  pre.log { margin: 0; background: var(--ink); color: #D7E2DF; border-radius: var(--r-sm); padding: 12px 14px; font: 12.5px/1.55 ui-monospace, "SF Mono", Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 46vh; overflow: auto; }
+  h4 { margin: 0 0 6px; font-size: 14px; }
+
+  /* ---- auth gate ---- */
+  .gate { max-width: 560px; margin: 12vh auto; background: var(--panel); border: 1px solid var(--rule); border-radius: var(--r-md); padding: 28px 30px; }
+  .gate h1 { font-family: var(--sign); margin: 0 0 8px; font-weight: 600; }
+  .gate code { background: #E4EAE8; padding: 2px 6px; border-radius: 3px; }
+
+  .toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); background: var(--ink); color: #fff; padding: 9px 16px; border-radius: var(--r-sm); font-size: 14px; z-index: 30; }
+  .toast[hidden] { display: none; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
+  @media (max-width: 1000px) {
+    .line { grid-template-columns: 1fr; }
+    .line::before { left: 14px; right: auto; top: 10px; bottom: 10px; width: 4px; height: auto; background: repeating-linear-gradient(180deg, var(--steel) 0 14px, transparent 14px 20px); }
+    .station > header { grid-template-columns: auto auto 1fr; justify-items: start; align-items: center; gap: 10px; }
+    .station { padding-left: 0; }
+    .ticket, .empty-station { margin-left: 44px; width: calc(100% - 44px); }
+    .empty-station { text-align: left; }
+    .lower { grid-template-columns: 1fr; }
+    .choice { grid-template-columns: 1fr 1fr; }
+    header.bar { padding: 12px 16px; gap: 12px; }
+    main { padding: 18px 16px 48px; }
+  }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div class="toast" id="toast" role="status" hidden></div>
+
+<template id="tpl-gate">
+  <div class="gate">
+    <h1>Open this page from Yardmaster</h1>
+    <p>This dashboard needs the access key for your hub. Run this in a terminal and use the link it prints:</p>
+    <p><code>ym dashboard</code></p>
+    <p class="muted">The key stays in this browser only and is never sent anywhere except your own hub.</p>
+  </div>
+</template>
+
+<template id="tpl-main">
+  <header class="bar">
+    <div class="brand"><span class="lamps" aria-hidden="true"><i style="background:#E0A019"></i><i style="background:#4CC38A"></i></span>Yardmaster</div>
+    <label><span class="sr">Project</span><select id="project"></select></label>
+    <div class="spacer"></div>
+    <div class="conn" id="conn"><i></i><span>Connecting</span></div>
+    <div class="meter" id="meter" aria-live="polite">
+      <div><b class="num" id="spent">$0</b> spent today <span id="budget-of"></span></div>
+      <div class="track"><div class="fill" id="fill"></div></div>
+      <small id="burn" hidden></small>
+    </div>
+    <button class="btn ghost" id="pause-btn" type="button">Pause new work</button>
+    <button class="btn primary" id="open-add" type="button">Add work</button>
+  </header>
+  <main>
+    <section id="pause-ask" hidden aria-labelledby="pa-h" class="pause-ask">
+      <div><b id="pa-h">Pause new work?</b> Agents that are running right now can finish, or stop now and keep their work for later.</div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap">
+        <button class="btn primary" id="pause-soft" type="button">Pause, let them finish</button>
+        <button class="btn" id="pause-now" type="button">Pause and stop them now</button>
+        <button class="btn" id="pause-cancel" type="button">Keep going</button>
+      </div>
+    </section>
+    <section id="paused" hidden role="status">
+      <div><b>Paused</b> <span id="paused-by"></span> No new work starts until you resume.</div>
+      <div style="display:flex; gap:8px"><button class="btn go" id="resume-btn" type="button">Resume</button></div>
+    </section>
+    <section id="attention" hidden aria-labelledby="att-h">
+      <h2 id="att-h">Needs you <small id="att-count"></small></h2>
+      <div id="att-list"></div>
+    </section>
+    <section id="headsup" hidden aria-labelledby="hu-h">
+      <h2 id="hu-h">Heads up</h2>
+      <ul id="hu-list"></ul>
+    </section>
+    <section aria-labelledby="board-h">
+      <h2 id="board-h" class="sr">Work in progress</h2>
+      <div class="line" id="board"></div>
+    </section>
+    <div class="lower">
+      <section class="panel" aria-labelledby="feed-h">
+        <h2 id="feed-h">What just happened</h2>
+        <ol class="feed" id="feed" aria-live="polite"></ol>
+      </section>
+      <div style="display:grid; gap:28px">
+        <section class="panel" aria-labelledby="mach-h">
+          <h2 id="mach-h">Machines</h2>
+          <div class="machines" id="machines"></div>
+          <p class="muted" id="sessions"></p>
+        </section>
+        <section class="panel" aria-labelledby="clean-h">
+          <h2 id="clean-h">Cleanup</h2>
+          <p class="muted">Finished worktrees, merged branches and expired reservations are removed. Anything with unsaved or unmerged work is always kept.</p>
+          <div id="clean"></div>
+          <div style="display:flex; gap:8px"><button class="btn" id="clean-preview" type="button">Check what can be removed</button><button class="btn go" id="clean-run" type="button" hidden>Clean up now</button></div>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <dialog id="add-dialog" aria-labelledby="add-h">
+    <form class="add" id="add-form" method="dialog">
+      <h2 id="add-h">Add work</h2>
+      <label>What should be done?
+        <small>Write it like you would to a colleague. Mention files if you know them.</small>
+        <textarea name="text" required placeholder="Add a dark mode toggle to the settings page and remember the choice"></textarea>
+      </label>
+      <label>Files it will change <small>Optional. Separate with commas, for example src/settings/**, README.md</small>
+        <input type="text" name="files" autocomplete="off">
+      </label>
+      <fieldset class="choice">
+        <legend>Speed and cost</legend>
+        <label><input type="radio" name="tier" value="" checked>Let it decide<small>Picks a model size from the request</small></label>
+        <label><input type="radio" name="tier" value="cheap">Cheapest<small>Small fixes, docs</small></label>
+        <label><input type="radio" name="tier" value="standard">Balanced<small>Most features</small></label>
+        <label><input type="radio" name="tier" value="strong">Best quality<small>Tricky or risky work</small></label>
+      </fieldset>
+      <label>Do this after <small>Optional. Waits until the chosen task is merged.</small>
+        <select name="after"><option value="">Start as soon as possible</option></select>
+      </label>
+      <div class="form-msg" id="add-msg" role="status"></div>
+      <div class="form-acts">
+        <button class="btn" type="button" id="add-cancel">Cancel</button>
+        <button class="btn primary" type="submit" id="add-submit">Queue work</button>
+      </div>
+    </form>
+  </dialog>
+
+  <aside class="drawer" id="drawer" aria-hidden="true" aria-labelledby="d-title">
+    <div class="head">
+      <button class="close" id="d-close" type="button" aria-label="Close details">×</button>
+      <h3 id="d-title"></h3>
+      <dl class="facts" id="d-facts"></dl>
+    </div>
+    <div class="acts" id="d-acts"></div>
+    <div class="body" id="d-body"></div>
+  </aside>
+</template>
+
+<script>
+(() => {
+  const STATIONS = [
+    { s: 'queued', name: 'Waiting', match: ['queued'] },
+    { s: 'running', name: 'Working', match: ['running'] },
+    { s: 'verifying', name: 'Checking', match: ['verifying'] },
+    { s: 'ready', name: 'Ready to merge', match: ['ready', 'merging'] },
+    { s: 'done', name: 'Done', match: ['done'] },
+  ];
+  const LABEL = { queued: 'Waiting', running: 'Working', verifying: 'Checking', ready: 'Ready to merge', merging: 'Merging', done: 'Done', needs_human: 'Needs you', failed: 'Failed', canceled: 'Canceled' };
+
+  // The key arrives in the URL fragment (never sent to servers or logs), then lives in localStorage.
+  const fromHash = new URLSearchParams(location.hash.slice(1)).get('token');
+  if (fromHash) { localStorage.setItem('ym-token', fromHash); history.replaceState(null, '', location.pathname); }
+  const token = localStorage.getItem('ym-token');
+  const app = document.getElementById('app');
+  if (!token) { app.append(document.getElementById('tpl-gate').content.cloneNode(true)); return; }
+  app.append(document.getElementById('tpl-main').content.cloneNode(true));
+
+  const $ = (id) => document.getElementById(id);
+  const el = (tag, props = {}, ...kids) => {
+    const n = document.createElement(tag);
+    for (const [k, v] of Object.entries(props)) {
+      if (v === undefined || v === null || v === false) continue;
+      if (k === 'class') n.className = v;
+      else if (k === 'text') n.textContent = v;
+      else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
+      else n.setAttribute(k, v === true ? '' : v);
+    }
+    for (const kid of kids.flat()) if (kid !== null && kid !== undefined && kid !== false) n.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+    return n;
+  };
+  const usd = (n) => !n ? '$0' : n < 0.01 ? '<$0.01' : '$' + n.toFixed(2);
+  const clip = (s, n) => !s ? '' : s.length > n ? s.slice(0, n - 1) + '…' : s;
+  const time = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+  let projectId = localStorage.getItem('ym-project') || '';
+  let board = null;
+  let openTask = null;
+
+  async function rpc(method, params = {}) {
+    const res = await fetch('/api/rpc/' + method, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token }, body: JSON.stringify(params) });
+    if (res.status === 401) { localStorage.removeItem('ym-token'); location.reload(); }
+    const body = await res.json();
+    if (!body.ok) throw new Error(body.error || 'Request failed');
+    return body.result;
+  }
+
+  let toastTimer;
+  function toast(msg) {
+    const t = $('toast');
+    t.textContent = msg; t.hidden = false;
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => (t.hidden = true), 3500);
+  }
+
+  async function act(id, action, label) {
+    try {
+      await rpc('task.control', { id, action, by: 'dashboard' });
+      toast(label);
+      refresh();
+      if (openTask === id) showTask(id);
+    } catch (e) { toast(e.message); }
+  }
+
+  // ---------- rendering ----------
+  function renderProjects() {
+    const sel = $('project');
+    const cur = sel.value;
+    sel.replaceChildren(el('option', { value: '', text: 'All projects' }), ...board.projects.map((p) => el('option', { value: p.id, text: p.name })));
+    sel.value = projectId && board.projects.some((p) => p.id === projectId) ? projectId : cur && board.projects.some((p) => p.id === cur) ? cur : '';
+    sel.hidden = board.projects.length < 2 && !projectId;
+  }
+
+  function renderSupervision() {
+    const p = board.paused;
+    $('paused').hidden = !p.paused;
+    $('paused-by').textContent = p.paused ? `by ${p.by}.` : '';
+    $('pause-btn').hidden = p.paused;
+    const ws = board.warnings;
+    $('headsup').hidden = !ws.length;
+    $('hu-list').replaceChildren(...ws.map((w) => el('li', {}, w.taskId ? el('a', { href: '#', onclick: (e) => { e.preventDefault(); showTask(w.taskId); } }, w.message) : w.message)));
+    const burn = $('burn');
+    burn.hidden = !board.budgetRunsOutAt;
+    if (board.budgetRunsOutAt) burn.textContent = 'At this pace it runs out around ' + new Date(board.budgetRunsOutAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+
+  function renderMeter() {
+    $('spent').textContent = usd(board.spentToday);
+    const cap = board.dailyBudget;
+    $('budget-of').textContent = cap ? `of $${cap}` : '';
+    const pct = cap ? Math.min(100, (board.spentToday / cap) * 100) : 0;
+    const fill = $('fill');
+    fill.style.width = pct + '%';
+    fill.className = 'fill' + (pct >= 100 ? ' over' : pct >= 75 ? ' warn' : '');
+  }
+
+  function actionButtons(t, compact) {
+    const s = t.status;
+    const out = [];
+    if (s === 'needs_human' || s === 'failed' || s === 'canceled') out.push(el('button', { class: 'btn primary', type: 'button', text: 'Try again', onclick: () => act(t.id, 'retry', 'Queued to try again') }));
+    if (s === 'ready' && t.attention) out.push(el('button', { class: 'btn go', type: 'button', text: 'Approve and merge', onclick: () => act(t.id, 'approve', 'Approved. Merging now.') }));
+    if (s === 'running' || s === 'verifying') out.push(el('button', { class: 'btn', type: 'button', text: 'Stop', onclick: () => act(t.id, 'stop', 'Stopping') }));
+    if (!['done', 'canceled', 'failed'].includes(s)) {
+      // Two clicks instead of a blocking dialog: the first arms the button for a few seconds.
+      const b = el('button', { class: 'btn danger', type: 'button', text: 'Cancel task' });
+      let armed = null;
+      b.addEventListener('click', () => {
+        if (armed) { clearTimeout(armed); act(t.id, 'cancel', 'Canceled. Its work is kept until cleanup confirms nothing is lost.'); return; }
+        b.textContent = 'Click again to cancel';
+        armed = setTimeout(() => { armed = null; b.textContent = 'Cancel task'; }, 4000);
+      });
+      out.push(b);
+    }
+    if (compact) out.push(el('button', { class: 'btn', type: 'button', text: 'Details', onclick: () => showTask(t.id) }));
+    return out;
+  }
+
+  function renderAttention() {
+    const box = $('attention');
+    box.hidden = !board.attention.length;
+    $('att-count').textContent = board.attention.length > 1 ? `${board.attention.length} items` : '';
+    $('att-list').replaceChildren(...board.attention.map((a) => el('div', { class: 'need' },
+      el('div', { class: 't' }, a.title),
+      el('div', { class: 'acts' }, actionButtons(a, true)),
+      el('div', { class: 'why' }, clip(a.why, 420)),
+    )));
+  }
+
+  function ticket(t) {
+    const who = t.assignee && t.assignee.startsWith('session:') ? t.assignee.slice(8) + ' (in its own session)' : t.agent;
+    const detail = t.waiting || t.lastActivity || t.summary || '';
+    return el('button', { class: 'ticket', type: 'button', 'data-s': t.status, onclick: () => showTask(t.id), 'aria-label': `${t.title}, ${LABEL[t.status] || t.status}` },
+      el('span', { class: 't' }, clip(t.title, 90)),
+      el('span', { class: 'm' }, el('span', { class: 'lamp', 'aria-hidden': 'true' }), who ? el('span', {}, who) : null, t.cost ? el('span', { class: 'num' }, usd(t.cost)) : null, t.status === 'merging' ? el('span', {}, 'merging') : null),
+      detail ? el('span', { class: 'd' }, clip(detail, 120)) : null,
+    );
+  }
+
+  function renderBoard() {
+    const items = [...board.active, ...board.recentDone.map((d) => ({ ...d, status: 'done' }))];
+    const root = $('board');
+    if (!items.length && !board.attention.length) {
+      root.replaceChildren(...STATIONS.map(stationHead), el('p', { class: 'board-empty' }, 'Nothing queued. Choose “Add work”, or ask your coding agent to split a job into parallel tasks with Yardmaster.'));
+      return;
+    }
+    root.replaceChildren(...STATIONS.map((st) => {
+      const here = items.filter((t) => st.match.includes(t.status));
+      const node = stationHead(st, here.length);
+      node.append(...(here.length ? here.map(ticket) : [el('div', { class: 'empty-station' }, st.s === 'queued' ? 'No waiting work' : 'Empty')]));
+      return node;
+    }));
+  }
+
+  function stationHead(st, n) {
+    return el('div', { class: 'station', 'data-s': st.s },
+      el('header', {}, el('span', { class: 'stop', 'aria-hidden': 'true' }), el('span', {}, st.name), el('em', { class: 'num' }, n === undefined ? '' : String(n))));
+  }
+
+  function diskBar(m) {
+    const used = m.worktreesGb || 0;
+    const free = m.diskFreeGb;
+    const low = free < 5;
+    const pct = Math.min(100, (used / Math.max(used + free, 0.001)) * 100);
+    return el('div', { class: 'disk' + (low ? ' low' : ''), title: 'Disk used by Yardmaster worktrees vs free space' },
+      el('span', {}, `${free.toFixed(1)} GB free · worktrees ${used < 1 ? Math.round(used * 1000) + ' MB' : used.toFixed(1) + ' GB'}${low ? ' · new work is on hold' : ''}`),
+      el('div', { class: 'track' }, el('div', { class: 'fill', style: `width:${Math.max(2, pct)}%` })));
+  }
+
+  function renderMachines() {
+    const ms = board.machines;
+    $('machines').replaceChildren(...(ms.length ? ms.map((m) => el('div', { class: 'machine' },
+      el('span', { class: 'lamp' + (m.online ? ' on' : ''), 'aria-hidden': 'true' }),
+      el('span', { class: 'n' }, m.name, m.online ? '' : ' (offline)'),
+      el('span', { class: 'slots', title: `${m.running} of ${m.maxParallel} agent slots in use`, 'aria-label': `${m.running} of ${m.maxParallel} slots in use` }, Array.from({ length: m.maxParallel }, (_, i) => el('i', { class: i < m.running ? 'used' : '' }))),
+      el('span', { class: 'a' }, m.agents.length ? 'Agents: ' + m.agents.join(', ') : 'No coding agents found on this machine'),
+      m.diskFreeGb === null ? null : diskBar(m),
+    )) : [el('p', { class: 'muted' }, 'No machines yet. Start the hub with “ym hub start”.')]));
+    const ss = board.sessions;
+    $('sessions').textContent = ss.length ? `Connected agent sessions: ${ss.map((s) => s.id.replace('session:', '')).join(', ')}` : 'No interactive agent sessions connected. Run “ym connect all” to use Yardmaster from Claude Code, Codex, Cursor and others.';
+  }
+
+  async function refresh() {
+    try {
+      board = await rpc('board.status', { projectId: projectId || null });
+      renderProjects(); renderMeter(); renderSupervision(); renderAttention(); renderBoard(); renderMachines();
+    } catch (e) { toast(e.message); }
+  }
+
+  // ---------- feed (live stream) ----------
+  const feed = [];
+  function pushEvents(evs) {
+    for (const e of evs) if (!projectId || !e.project_id || e.project_id === projectId) feed.unshift(e);
+    feed.splice(150);
+    $('feed').replaceChildren(...feed.map((e) => el('li', { 'data-l': e.level },
+      el('time', { datetime: new Date(e.ts).toISOString() }, time(e.ts)),
+      el('span', {}, e.task_id ? el('a', { href: '#', onclick: (ev) => { ev.preventDefault(); showTask(e.task_id); } }, e.message) : e.message),
+    )));
+  }
+
+  let refreshQueued = false;
+  async function stream() {
+    const conn = $('conn');
+    let last = 0;
+    try {
+      const initial = await rpc('events.since', { after: 0, limit: 60, projectId: projectId || null });
+      feed.length = 0; pushEvents(initial);
+      if (initial.length) last = initial[initial.length - 1].id;
+    } catch {}
+    for (;;) {
+      try {
+        const res = await fetch('/api/stream?after=' + last, { headers: { authorization: 'Bearer ' + token } });
+        conn.className = 'conn live'; conn.lastElementChild.textContent = 'Live';
+        const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+        let buf = '';
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += value;
+          let i;
+          while ((i = buf.indexOf('\n\n')) >= 0) {
+            const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
+            const data = chunk.split('\n').filter((l) => l.startsWith('data: ')).map((l) => l.slice(6)).join('');
+            if (!data || chunk.startsWith('event: hello')) continue;
+            const evs = JSON.parse(data);
+            if (Array.isArray(evs) && evs.length) {
+              last = evs[evs.length - 1].id;
+              pushEvents(evs);
+              if (!refreshQueued) { refreshQueued = true; setTimeout(() => { refreshQueued = false; refresh(); if (openTask) showTask(openTask, true); }, 250); }
+            }
+          }
+        }
+      } catch {}
+      conn.className = 'conn'; conn.lastElementChild.textContent = 'Reconnecting';
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+
+  // ---------- task drawer ----------
+  let logTimer;
+  async function showTask(id, quiet) {
+    openTask = id;
+    const drawer = $('drawer');
+    let d;
+    try { d = await rpc('task.get', { id }); } catch (e) { toast(e.message); return; }
+    const t = d.task;
+    const run = d.runs[d.runs.length - 1];
+    $('d-title').textContent = t.title;
+    const facts = [
+      ['Status', d.label],
+      d.waiting ? ['Waiting on', d.waiting] : null,
+      ['Agent', run ? `${run.agent}${run.model ? ' · ' + run.model : ''}` : t.agent || 'picked automatically'],
+      ['Attempt', `${t.attempts} of ${t.max_attempts}`],
+      ['Cost', usd(t.cost_usd + (run && run.status === 'running' ? run.cost_usd : 0)) + (run && run.cost_estimated ? ' (estimated)' : '')],
+      t.scope.length ? ['Files', t.scope.join(', ') + (t.scope_inferred ? ' (guessed from the request)' : '')] : null,
+      d.deps.length ? ['After', d.deps.map((x) => `${x.title} (${LABEL[x.status]})`).join(', ')] : null,
+      t.branch ? ['Branch', t.branch] : null,
+    ].filter(Boolean);
+    $('d-facts').replaceChildren(...facts.flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)]));
+    $('d-acts').replaceChildren(...actionButtons(t, false));
+    const body = [];
+    if (t.attention) body.push(el('div', { class: 'callout amber' }, t.attention));
+    else if (t.last_error && t.status !== 'done') body.push(el('div', { class: 'callout red' }, clip(t.last_error, 1500)));
+    if (t.summary) body.push(el('div', {}, el('h4', {}, 'What the agent says it did'), el('div', { class: 'callout plain' }, t.summary)));
+    if (t.prompt && t.prompt !== t.title) body.push(el('div', {}, el('h4', {}, 'Request'), el('div', { class: 'callout plain' }, clip(t.prompt, 1200))));
+    if (!['done', 'canceled', 'failed'].includes(t.status)) {
+      const ta = el('textarea', { id: 'd-note', 'data-task': id, placeholder: 'For example: use the existing date helper instead of adding a library' });
+      const send = el('button', { class: 'btn', type: 'button', text: t.status === 'running' ? 'Redirect now' : 'Add guidance', onclick: async () => {
+        const note = ta.value.trim();
+        if (!note) { ta.focus(); return; }
+        try { await rpc('task.control', { id, action: 'redirect', note, by: 'dashboard' }); toast(t.status === 'running' ? 'Redirected. The agent restarts with your guidance and keeps its work.' : 'Guidance saved for the next attempt.'); showTask(id, true); } catch (e) { toast(e.message); }
+      } });
+      body.push(el('div', { class: 'redirect' }, el('h4', {}, 'Tell the agent something'), ta, el('div', {}, send)));
+    }
+    const pre = el('pre', { class: 'log', id: 'd-log', 'aria-label': 'Activity log' }, 'Loading activity…');
+    body.push(el('div', {}, el('h4', {}, 'Activity'), pre));
+    // Live refreshes rebuild the drawer; keep whatever the person is typing.
+    const prev = $('d-note');
+    const same = prev && prev.dataset.task === id;
+    const draft = same ? prev.value : '';
+    const typing = same && document.activeElement === prev;
+    $('d-body').replaceChildren(...body);
+    const next = $('d-note');
+    if (next && draft) next.value = draft;
+    if (next && typing) next.focus();
+    if (!quiet) { drawer.classList.add('open'); drawer.setAttribute('aria-hidden', 'false'); $('d-close').focus(); }
+    const loadLog = async () => {
+      if (openTask !== id) return;
+      try {
+        const text = await rpc('task.logs', { id, lines: 300 });
+        const node = $('d-log'); if (!node) return;
+        const atBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 30;
+        node.textContent = text || 'No activity yet.';
+        if (atBottom) node.scrollTop = node.scrollHeight;
+      } catch {}
+    };
+    loadLog();
+    clearInterval(logTimer);
+    logTimer = setInterval(loadLog, 2000);
+  }
+  function closeDrawer() {
+    openTask = null; clearInterval(logTimer);
+    const drawer = $('drawer'); drawer.classList.remove('open'); drawer.setAttribute('aria-hidden', 'true');
+  }
+  $('d-close').addEventListener('click', closeDrawer);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && openTask) closeDrawer(); });
+
+  // ---------- add work ----------
+  const dlg = $('add-dialog');
+  $('open-add').addEventListener('click', () => {
+    if (!board || !board.projects.length) return toast('Run “ym init” in a repository first.');
+    const after = dlg.querySelector('select[name=after]');
+    after.replaceChildren(el('option', { value: '', text: 'Start as soon as possible' }), ...board.active.map((t) => el('option', { value: t.id, text: clip(t.title, 70) })));
+    $('add-msg').textContent = '';
+    dlg.showModal();
+  });
+  $('add-cancel').addEventListener('click', () => dlg.close());
+  $('add-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const text = String(f.get('text') || '').trim();
+    if (text.length < 3) { $('add-msg').textContent = 'Describe the change in a few words.'; return; }
+    const pid = projectId || (board.projects.length === 1 ? board.projects[0].id : '');
+    if (!pid) { $('add-msg').textContent = 'Pick a project at the top first.'; return; }
+    const files = String(f.get('files') || '').split(',').map((s) => s.trim()).filter(Boolean);
+    const task = { title: clip(text.split('\n')[0], 180), prompt: text };
+    if (files.length) task.files = files;
+    if (f.get('tier')) task.tier = f.get('tier');
+    if (f.get('after')) task.after = [f.get('after')];
+    $('add-submit').disabled = true;
+    try {
+      const r = await rpc('task.add', { projectId: pid, tasks: [task], createdBy: 'dashboard' });
+      if (r.created.length) { toast('Queued: ' + clip(r.created[0].title, 60)); dlg.close(); e.target.reset(); refresh(); }
+      else if (r.duplicates.length) $('add-msg').textContent = `This looks the same as “${r.duplicates[0].existingTitle}”, which is already queued.`;
+    } catch (err) { $('add-msg').textContent = err.message; }
+    finally { $('add-submit').disabled = false; }
+  });
+
+  // ---------- cleanup ----------
+  $('clean-preview').addEventListener('click', async () => {
+    try {
+      const plan = await rpc('clean.plan', projectId ? { projectId } : {});
+      const box = $('clean');
+      const parts = [];
+      const freed = plan.remove.reduce((n, i) => n + (i.bytes || 0), 0);
+      const size = freed >= 1e9 ? (freed / 1e9).toFixed(1) + ' GB' : Math.round(freed / 1e6) + ' MB';
+      parts.push(el('p', {}, plan.remove.length ? `${plan.remove.length} item(s) can be removed${freed > 1e6 ? `, freeing about ${size}` : ''}:` : 'Nothing to remove. Everything is tidy.'));
+      if (plan.remove.length) parts.push(el('ul', { class: 'clean-list' }, plan.remove.slice(0, 12).map((i) => el('li', {}, `${i.reason}`))));
+      if (plan.keep.length) parts.push(el('p', {}, `Kept on purpose (${plan.keep.length}):`), el('ul', { class: 'clean-list keep' }, plan.keep.slice(0, 12).map((i) => el('li', {}, `${clip(i.target.split('/').pop(), 40)}: ${i.reason}`))));
+      box.replaceChildren(...parts);
+      $('clean-run').hidden = !plan.remove.length;
+    } catch (e) { toast(e.message); }
+  });
+  $('clean-run').addEventListener('click', async () => {
+    try {
+      const r = await rpc('clean.run', projectId ? { projectId } : {});
+      toast(`Removed ${r.removed.length} item(s)` + (r.failed.length ? `, kept ${r.failed.length} that changed` : ''));
+      $('clean').replaceChildren(); $('clean-run').hidden = true;
+    } catch (e) { toast(e.message); }
+  });
+
+  const pauseAsk = $('pause-ask');
+  $('pause-btn').addEventListener('click', () => { pauseAsk.hidden = false; $('pause-soft').focus(); });
+  $('pause-cancel').addEventListener('click', () => { pauseAsk.hidden = true; $('pause-btn').focus(); });
+  const doPause = async (now) => {
+    pauseAsk.hidden = true;
+    try { await rpc('fleet.pause', { projectId: projectId || null, stopRunning: now, by: 'dashboard' }); toast(now ? 'Paused. Running agents saved their work and stopped.' : 'Paused. Running agents will finish first.'); refresh(); } catch (e) { toast(e.message); }
+  };
+  $('pause-soft').addEventListener('click', () => doPause(false));
+  $('pause-now').addEventListener('click', () => doPause(true));
+  $('resume-btn').addEventListener('click', async () => {
+    try { await rpc('fleet.resume', { projectId: projectId || null, by: 'dashboard' }); toast('Resumed'); refresh(); } catch (e) { toast(e.message); }
+  });
+
+  $('project').addEventListener('change', (e) => { projectId = e.target.value; localStorage.setItem('ym-project', projectId); feed.length = 0; refresh(); rpc('events.since', { after: 0, limit: 60, projectId: projectId || null }).then(pushEvents).catch(() => {}); });
+
+  refresh();
+  stream();
+  setInterval(refresh, 10000);
+})();
+</script>
+</body>
+</html>

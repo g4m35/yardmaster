@@ -1,0 +1,54 @@
+{
+  "name": "yardmaster",
+  "version": "0.1.0",
+  "description": "Model-independent orchestration for the coding agents you already use (Claude Code, Codex, Cursor, OpenCode, Gemini, T3 Code). Parallel work without collisions, loops, or leftover mess.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "yardmaster": "dist/cli.js",
+    "ym": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.16"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test --test-concurrency=4 'test/**/*.test.ts'",
+    "dev": "node src/cli.ts",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "orchestration",
+    "claude-code",
+    "codex",
+    "mcp",
+    "git-worktree",
+    "multi-agent"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.4.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "^2.4.0",
+    "@types/node": "^24.19.2",
+    "typescript": "^7.0.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/g4m35/yardmaster.git"
+  },
+  "homepage": "https://github.com/g4m35/yardmaster#readme",
+  "bugs": {
+    "url": "https://github.com/g4m35/yardmaster/issues"
+  }
+}
