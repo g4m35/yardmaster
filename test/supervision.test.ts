@@ -132,12 +132,15 @@ test('the supervisor explains stalls, frees abandoned reservations, flags slow a
   // A session reserved a file and vanished; a task needs that file.
   s.hub.coord.claimLocks(s.project.id, 'session:ghost', ['shared/config.js'], 'editing', 30);
   const [blocked] = s.add([{ title: 'Tune the shared config', prompt: '@mock write shared/config.js tuned', files: ['shared/config.js'], agent: 'mock' }]);
-  const [slow] = s.add([{ title: 'Investigate memory usage', prompt: '@mock cost 0.6\n@mock sleep 5000\n@mock write mem.js x', agent: 'mock' }]);
-  await new Promise((r) => setTimeout(r, 1200));
-  const warnings = s.hub.supervisor.check().map((w) => w.message).join('\n');
+  const [slow] = s.add([{ title: 'Investigate memory usage', prompt: '@mock cost 0.6\n@mock sleep 8000\n@mock write mem.js x', agent: 'mock' }]);
+  // Wait for each condition rather than a fixed delay: CI machines vary a lot in speed.
+  const warnings = await until(
+    () => s.hub.supervisor.check().map((w) => w.message).join('\n'),
+    (w) => /no online machine has aider/.test(w) && /Investigate memory usage" has run .* without changing any files/.test(w) && /budget runs out around/.test(w),
+    20_000,
+    'all three supervisor warnings',
+  );
   assert.match(warnings, /Port to the new framework" is ready but hasn't started: no online machine has aider/);
-  assert.match(warnings, /Investigate memory usage" has run .* without changing any files/);
-  assert.match(warnings, /budget runs out around/);
   assert.ok(s.hub.coord.eventsSince(0, null, 300).some((e) => e.kind === 'supervisor.released'), 'abandoned reservation released');
   const b = await s.wait(blocked!.id, settled, 'blocked task done');
   assert.equal(b.status, 'done');
