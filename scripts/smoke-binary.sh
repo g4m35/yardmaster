@@ -29,5 +29,12 @@ for i in $(seq 1 30); do
   sleep 2
 done
 cat "$home/demo.log"
+echo "--- board"
+curl -fs -X POST -H "authorization: Bearer $token" -H 'content-type: application/json' -d '{}' http://127.0.0.1:7793/api/rpc/board.text || true
+echo
+echo "--- events"
+curl -fs -X POST -H "authorization: Bearer $token" -H 'content-type: application/json' -d '{"after":0,"limit":40}' http://127.0.0.1:7793/api/rpc/events.since | tr '}' '\n' | grep -o '"message":"[^"]*"' || true
+echo "--- logs"
+for f in "$home"/logs/*.log; do [ -f "$f" ] && { echo "$f"; tail -5 "$f"; }; done
 echo "demo never finished a task" >&2
 exit 1
