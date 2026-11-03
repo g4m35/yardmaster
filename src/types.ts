@@ -65,6 +65,12 @@ export interface Task {
   started_at: number | null;
   finished_at: number | null;
   ready_at: number | null;
+  review: 'always' | 'never' | null;
+  review_rounds: number;
+  race_group: string | null;
+  guidance: string | null;
+  needs_approval: boolean;
+  policies: string[];
 }
 
 export interface Project {
@@ -96,6 +102,10 @@ export interface Run {
   touched: string[];
   started_at: number;
   ended_at: number | null;
+  role: 'implement' | 'review';
+  tier: string | null;
+  lessons: string[];
+  verdict: string | null;
 }
 
 export interface YardEvent {
@@ -142,6 +152,8 @@ export const NewTaskSchema = z.object({
   priority: z.number().int().min(-10).max(10).optional(),
   budgetUsd: z.number().positive().optional(),
   allowNoChanges: z.boolean().optional().describe('True for research/review tasks that may not edit files.'),
+  bestOf: z.number().int().min(1).max(4).optional().describe('Race this many agents on the same task; the first verified result wins.'),
+  review: z.enum(['always', 'never']).optional().describe('Force or skip a cross-model review before merging.'),
 });
 export type NewTask = z.infer<typeof NewTaskSchema>;
 

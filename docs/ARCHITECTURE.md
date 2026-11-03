@@ -48,6 +48,17 @@ queued ──claim──▶ running ──agent exits──▶ verifying ──c
 - **Fencing**: runners write task state with `updateTaskIfOwner` (attempt number + assignee + running/verifying). Stale runners find out on their next poll and stop without writing. Uploaded bundles are accepted only from the owning machine and only if they contain the exact verified commit, and they land in `refs/yardmaster/incoming/*`, never in a checked-out branch.
 - **Integration lock**: one mutex per project around every operation on the integration worktree; merges use the verified commit SHA; a marker in the database records the pre-merge head so an interrupted merge rolls back exactly; uncommitted changes without that marker are treated as a person's and are never reset.
 
+## Making agents better (0.2)
+
+- **Policies** (`src/policies.ts`) are applied when a task is created; the matched rule names are stored on the task and shown in `ym show`.
+- **Review gate** (`src/review.ts`): after verification, `shouldReview` decides (strong tier, hot files, big diffs, or forced). `chooseReviewer` prefers a different model family. The reviewer runs read-only in the task's worktree and must answer with a JSON verdict; unreadable answers never block. Blocking issues requeue the task with the issues as its note (a review round, not a failed attempt).
+- **Lessons** (`src/lessons.ts`): created on success after a failure (`lessonFromFix`), from review points that were then addressed, from redirects (widened to the folder), and by agents (`yard_learn`). `lessonsFor` ranks by file overlap, word similarity, source and track record; runs record which lessons they were given, and `creditLessons` rewards first-try successes and retires lessons that keep appearing in struggling tasks.
+- **Learned routing** (`chooseAgent`): Laplace-smoothed verified rate per agent and tier on this project, list order as a weak prior, divided by relative cost^costWeight, with epsilon exploration of agents with little history.
+- **Critical path**: queued tasks are ordered by priority, then the length of the longest chain of open dependents, then age.
+- **Races**: `bestOf` creates N tasks in one `race_group` (distinct agents where available). Race members don't block each other's scopes; dependencies on any member are satisfied by the first one done; the integrator cancels the rest when one is ready.
+- **Merge trains**: when two or more ready tasks were verified against an older base, the integrator merges them together and runs checks once; a failed train falls back to one-at-a-time.
+- **Coupling** (`src/imports.ts`): the hub rebuilds an import graph per project when HEAD moves; `coupling()` finds direct import edges between scopes. In `warn` mode briefs get a "keep these signatures stable" note; in `serialize` mode the later task waits.
+
 ## Disk management
 
 `src/disk.ts` measures free space and directory sizes (`du`, cached). Workers gate new claims on `disk.minFreeGb` and `disk.maxWorktreesGb` and, on the hub, trigger a cleanup pass. The cleanup planner adds `artifacts` items: allow-listed directory names that `git check-ignore` confirms are ignored and `git ls-files` confirms are untracked, inside worktrees that are kept but idle. Remote workers remove their own worktrees once the hub reports the task done.

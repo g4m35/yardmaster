@@ -107,7 +107,16 @@ test('routing skips busy and consistently failing agents', () => {
   const base = { config, tier: 'standard' as const, forced: null, installed: ['claude', 'codex'] };
   assert.equal(chooseAgent({ ...base, runningByAgent: {}, stats: {} })?.agent, 'claude');
   assert.equal(chooseAgent({ ...base, runningByAgent: { claude: 1 }, stats: {} })?.agent, 'codex');
-  assert.equal(chooseAgent({ ...base, runningByAgent: {}, stats: { claude: { runs: 5, verified: 0 } } })?.agent, 'codex');
+  const st = (runs: number, verified: number, cost: number) => ({ runs, verified, cost, ms: 0, byTier: { standard: { runs, verified, cost } } });
+  // Learned routing: claude keeps failing here, codex keeps passing.
+  assert.equal(chooseAgent({ ...base, runningByAgent: {}, stats: { claude: st(5, 0, 1), codex: st(5, 5, 1) }, random: () => 0.99 })?.agent, 'codex');
+  // Equal success: the cheaper agent wins.
+  const pick = chooseAgent({ ...base, runningByAgent: {}, stats: { claude: st(6, 6, 6), codex: st(6, 6, 1) }, random: () => 0.99 });
+  assert.equal(pick?.agent, 'codex');
+  assert.match(pick!.reason, /6\/6 verified/);
+  // Exploration gives an agent with no history a chance.
+  const cfg2 = resolveConfig([{ routing: { standard: ['claude', 'codex'] }, learning: { explore: 0.5 } }]);
+  assert.equal(chooseAgent({ ...base, config: cfg2, runningByAgent: {}, stats: { claude: st(6, 6, 1) }, random: () => 0.1 })?.agent, 'codex');
   assert.equal(chooseAgent({ ...base, installed: [], runningByAgent: {}, stats: {} }), null);
 });
 

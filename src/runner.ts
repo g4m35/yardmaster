@@ -15,6 +15,7 @@ import type { Project, Task } from './types.ts';
 import { Watchdog, type Verdict } from './watchdog.ts';
 import type { Client } from './api.ts';
 import type { TaskPatch } from './coordinator.ts';
+import { changedLineCount, formatIssues, runReview, shouldReview } from './review.ts';
 
 export class Semaphore {
   private queue: (() => void)[] = [];
@@ -48,6 +49,8 @@ export interface RunContext {
   /** Commit new worktrees start from (the integration branch head). */
   startPoint: string;
   verifySlots: Semaphore;
+  /** Agents installed on this machine (for picking a reviewer). */
+  installed?: string[];
   onSpawn?: (stop: (reason: StopReason, message: string) => void) => void;
 }
 
@@ -75,7 +78,7 @@ function verifyCommands(task: Task, config: Config): string[] {
   return task.verify ?? config.verify;
 }
 
-function buildPrompt(ctx: RunContext, extra: { deps: { id: string; title: string; summary: string }[]; others: { id: string; title: string; scope: string[] }[]; messages: { from: string; body: string }[]; conflicts: string[] }): string {
+function buildPrompt(ctx: RunContext, extra: { deps: { id: string; title: string; summary: string }[]; others: { id: string; title: string; scope: string[] }[]; messages: { from: string; body: string }[]; conflicts: string[]; guidance?: string | null; coupling?: string[]; lessons?: string }): string {
   const { task, config } = ctx;
   const parts: string[] = [];
   parts.push(`You are working on one task in an isolated git worktree managed by Yardmaster (task ${task.id}). Other agents may be working on other tasks in parallel.`);
@@ -87,6 +90,11 @@ function buildPrompt(ctx: RunContext, extra: { deps: { id: string; title: string
   if (others.length) {
     parts.push(`## Do not edit (other agents are changing these right now)\n${others.map((o) => `- ${o.scope.join(', ')} (${o.id} "${clip(o.title, 50)}")`).join('\n')}`);
   }
+  if (extra.coupling?.length) {
+    parts.push(`## Coordinate: code you touch is linked to work in progress\n${extra.coupling.map((c) => `- ${c}`).join('\n')}\nKeep exported names and signatures those files rely on stable. If you must change one, say exactly what changed in your final summary so the other agent can adapt.`);
+  }
+  if (extra.guidance) parts.push(`## House rules for this kind of change\n${extra.guidance}`);
+  if (extra.lessons) parts.push(`## Lessons from earlier work in this repo\n${extra.lessons}`);
   if (extra.deps.length) {
     parts.push(`## Finished work you build on\n${extra.deps.map((d) => `- ${d.id} "${clip(d.title, 60)}": ${d.summary || 'done'}`).join('\n')}`);
   }
@@ -206,7 +214,7 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   const spec = adapter.build({ prompt, cwd: wt, model: ctx.model, settings });
 
   const rawLog = join(paths.logs(), `${task.id}-${task.attempts}.jsonl`);
-  const runId = await api['run.start']({ taskId: task.id, machineId: ctx.machineId, agent: ctx.agent, model: ctx.model, logPath: rawLog });
+  const runId = await api['run.start']({ taskId: task.id, machineId: ctx.machineId, agent: ctx.agent, model: ctx.model, logPath: rawLog, lessons: context.lessonIds });
   const log = new LogBuffer(api, runId);
   log.push(`start ${adapter.label}${ctx.model ? ` (${ctx.model})` : ''} in ${wt}`);
 
@@ -467,10 +475,58 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   } else {
     await event(ctx, 'warn', 'task.unverified', 'No checks are configured, so this work was not tested. Add "verify" commands to yardmaster.json.');
   }
+  // ---- second opinion: a different model family reviews what tests can't judge ----
+  let reviewNote = '';
+  const lines = await changedLineCount(wt, baseSha!);
+  const why = shouldReview(task, config, files, lines);
+  if (why) {
+    log.push(`review requested: ${why}`);
+    await event(ctx, 'info', 'task.review', `Getting a second opinion on "${task.title}" (${why})`);
+    const outcome = await runReview({ task, config, implementer: ctx.agent, installed: ctx.installed ?? [ctx.agent], cwd: wt, base: baseSha! });
+    if ('skipped' in outcome) {
+      log.push(`review skipped: ${outcome.skipped}`);
+      await event(ctx, 'warn', 'task.review_skipped', `Review skipped: ${outcome.skipped}.`);
+    } else {
+      const reviewRun = await api['run.start']({ taskId: task.id, machineId: ctx.machineId, agent: outcome.reviewer, model: null, logPath: '', role: 'review' });
+      await api['run.update']({ runId: reviewRun, patch: { status: 'succeeded', cost_usd: outcome.costUsd, tokens_in: outcome.tokensIn, tokens_out: outcome.tokensOut, ended_at: Date.now(), verdict: JSON.stringify(outcome.review) } });
+      await api['task.usage']({ id: task.id, costUsd: outcome.costUsd, tokensIn: outcome.tokensIn, tokensOut: outcome.tokensOut });
+      const issues = formatIssues(outcome.blocking);
+      log.push(`review by ${outcome.reviewer}: ${outcome.review.verdict}${issues.length ? ` (${issues.length} issue${issues.length > 1 ? 's' : ''})` : ''}`);
+      if (issues.length && task.review_rounds < config.review.maxRounds) {
+        await finishRun('succeeded');
+        await update(ctx, {
+          status: 'queued', attempts: Math.max(0, task.attempts - 1), review_rounds: task.review_rounds + 1, assignee: null, machine_id: null, lease_until: null, not_before: null,
+          retry_note: `A reviewer (${outcome.reviewer}) asked for changes before merging. Address each point, keep the rest of your work:\n${issues.map((i) => `- ${i}`).join('\n')}`,
+        });
+        await event(ctx, 'warn', 'task.review_changes', `${outcome.reviewer} asked for changes to "${task.title}": ${clip(issues.join(' '), 200)}`);
+        return { status: 'queued', message: 'review requested changes' };
+      }
+      if (issues.length) {
+        if (config.review.onUnresolved === 'needs_human') {
+          await finishRun('succeeded');
+          return finishNeedsHuman(ctx, `Checks pass, but the reviewer (${outcome.reviewer}) still has concerns: ${clip(issues.join(' '), 600)}`);
+        }
+        reviewNote = ` Reviewer still noted: ${clip(issues.join(' '), 300)}`;
+        await event(ctx, 'warn', 'task.review_unresolved', `"${task.title}" goes ahead with open review notes: ${clip(issues.join(' '), 200)}`);
+      }
+    }
+  }
+
   await finishRun('succeeded');
-  const needsApproval = config.integration.requireApproval && !task.approved;
+  // Learn from this attempt: what fixed an earlier failure, which review points were addressed.
+  // Every earlier review point counts as resolved now, except the latest one if it was waved through unresolved.
+  const reviews = task.review_rounds > 0 || why ? (await api['task.get']({ id: task.id })).runs.filter((r) => r.role === 'review' && r.verdict) : [];
+  const resolved = (reviewNote ? reviews.slice(0, -1) : reviews).flatMap((r) => {
+    try {
+      return formatIssues((JSON.parse(r.verdict!) as { issues: Parameters<typeof formatIssues>[0] }).issues.filter((i) => i.severity !== 'minor'));
+    } catch {
+      return [];
+    }
+  });
+  await api['lesson.outcome']({ taskId: task.id, runId, summary: summary || 'completed', failureBefore: task.attempts > 1 ? task.last_error : null, reviewIssues: resolved.slice(0, 5) }).catch((err: Error) => { if (process.env.YARDMASTER_DEBUG) console.error('lesson.outcome', err.message); });
+  const needsApproval = (config.integration.requireApproval || task.needs_approval) && !task.approved;
   await update(ctx, {
-    status: 'ready', ready_at: Date.now(), head_sha: head, summary, attention: needsApproval ? 'Waiting for your approval to merge' : null,
+    status: 'ready', ready_at: Date.now(), head_sha: head, summary: clip(summary + reviewNote, 1500), attention: needsApproval ? 'Waiting for your approval to merge' : null,
     last_error: null, error_fp: null, same_error_count: 0, retry_note: null, lease_until: null,
   });
   await event(ctx, 'success', 'task.ready', `"${task.title}" passed checks (${files.length} file${files.length === 1 ? '' : 's'} changed, ${formatUsd(task.cost_usd + cost)})${needsApproval ? '. Waiting for your approval to merge.' : ''}`);

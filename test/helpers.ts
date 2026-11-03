@@ -35,6 +35,9 @@ export function sandbox(globalConfig: Record<string, unknown> = {}) {
       retry: { backoffSeconds: 0 },
       liveOverlapIntervalSeconds: 0.5,
       resources: { maxLoadPerCpu: 1000, minFreeMemMb: 0 },
+      // Tests must never start real agents that happen to be installed on the machine.
+      agents: { claude: { enabled: false }, codex: { enabled: false }, opencode: { enabled: false }, cursor: { enabled: false }, gemini: { enabled: false } },
+      review: { reviewers: ['mock'], crossFamily: false },
       ...globalConfig,
     }),
   );

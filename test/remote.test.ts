@@ -85,7 +85,7 @@ test('the MCP server lets an interactive agent queue, wait for, and coordinate w
   cleanups.push(() => mcp.close());
 
   const tools = (await mcp.listTools()).tools.map((t) => t.name).sort();
-  assert.deepEqual(tools, ['yard_add_tasks', 'yard_claim_files', 'yard_control', 'yard_finish_task', 'yard_inbox', 'yard_release_files', 'yard_send', 'yard_status', 'yard_take_task', 'yard_task', 'yard_wait', 'yard_who']);
+  assert.deepEqual(tools, ['yard_add_tasks', 'yard_claim_files', 'yard_control', 'yard_finish_task', 'yard_inbox', 'yard_learn', 'yard_release_files', 'yard_send', 'yard_status', 'yard_take_task', 'yard_task', 'yard_wait', 'yard_who']);
   const textOf = (r: Awaited<ReturnType<typeof mcp.callTool>>) => (r.content as { type: string; text: string }[]).map((c) => c.text).join('\n');
 
   // The interactive session reserves a file first; background work on that file must wait for it.

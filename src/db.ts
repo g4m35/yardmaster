@@ -51,6 +51,24 @@ const MIGRATIONS: string[] = [
     id TEXT PRIMARY KEY, name TEXT NOT NULL, agent TEXT, project_id TEXT, cwd TEXT, machine_id TEXT, last_seen INTEGER NOT NULL
   );
   `,
+  `
+  ALTER TABLE tasks ADD COLUMN review TEXT;
+  ALTER TABLE tasks ADD COLUMN review_rounds INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE tasks ADD COLUMN race_group TEXT;
+  ALTER TABLE tasks ADD COLUMN guidance TEXT;
+  ALTER TABLE tasks ADD COLUMN needs_approval INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE tasks ADD COLUMN policies TEXT NOT NULL DEFAULT '[]';
+  ALTER TABLE runs ADD COLUMN role TEXT NOT NULL DEFAULT 'implement';
+  ALTER TABLE runs ADD COLUMN tier TEXT;
+  ALTER TABLE runs ADD COLUMN lessons TEXT NOT NULL DEFAULT '[]';
+  ALTER TABLE runs ADD COLUMN verdict TEXT;
+  CREATE TABLE lessons (
+    id TEXT PRIMARY KEY, project_id TEXT NOT NULL, scope TEXT NOT NULL DEFAULT '[]', text TEXT NOT NULL,
+    source TEXT NOT NULL, task_id TEXT, words TEXT NOT NULL, uses INTEGER NOT NULL DEFAULT 0, wins INTEGER NOT NULL DEFAULT 0,
+    disabled INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, last_used INTEGER
+  );
+  CREATE INDEX lessons_project ON lessons(project_id);
+  `,
 ];
 
 export type Db = DatabaseSync;
