@@ -562,7 +562,7 @@
     let d;
     try { d = await rpc('task.get', { id }); } catch (e) { toast(e.message); return; }
     const t = d.task;
-    const run = d.runs[d.runs.length - 1];
+    const run = [...d.runs].reverse().find((r) => r.role !== 'review') || d.runs[d.runs.length - 1];
     $('d-title').textContent = t.title;
     const facts = [
       ['Status', d.label],
@@ -573,6 +573,13 @@
       t.scope.length ? ['Files', t.scope.join(', ') + (t.scope_inferred ? ' (guessed from the request)' : '')] : null,
       d.deps.length ? ['After', d.deps.map((x) => `${x.title} (${LABEL[x.status]})`).join(', ')] : null,
       t.branch ? ['Branch', t.branch] : null,
+      t.policies && t.policies.length ? ['Rules', t.policies.join(', ')] : null,
+      t.race_group ? ['Race', 'Several agents are trying this; the first verified result wins'] : null,
+      (() => {
+        const reviews = d.runs.filter((r) => r.role === 'review' && r.verdict).map((r) => { try { return `${r.agent}: ${JSON.parse(r.verdict).verdict === 'approve' ? 'approved' : 'asked for changes'}`; } catch { return null; } }).filter(Boolean);
+        return reviews.length ? ['Reviews', reviews.join(' · ')] : null;
+      })(),
+      run && run.lessons && run.lessons.length ? ['Briefed with', `${run.lessons.length} lesson(s) from earlier work`] : null,
     ].filter(Boolean);
     $('d-facts').replaceChildren(...facts.flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)]));
     $('d-acts').replaceChildren(...actionButtons(t, false));

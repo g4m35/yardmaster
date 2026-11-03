@@ -20,6 +20,32 @@ export type AgentSettings = z.infer<typeof AgentSettingsSchema>;
 
 const PriceSchema = z.object({ inPerM: z.number(), outPerM: z.number(), cachedInPerM: z.number().optional() });
 
+export const PolicySchema = z.object({
+  name: z.string().optional(),
+  when: z
+    .object({
+      files: z.array(z.string()).optional().describe('Matches if the task scope overlaps any of these globs.'),
+      text: z.string().optional().describe('Case-insensitive regex tested against title and prompt.'),
+      tier: TierSchema.optional(),
+      createdBy: z.string().optional(),
+    })
+    .default({}),
+  set: z.object({
+    tier: TierSchema.optional(),
+    agent: z.string().optional(),
+    review: z.enum(['always', 'never']).optional(),
+    bestOf: z.number().int().min(1).max(4).optional(),
+    verify: z.array(z.string()).optional(),
+    requireApproval: z.boolean().optional(),
+    budgetUsd: z.number().positive().optional(),
+    priority: z.number().int().min(-10).max(10).optional(),
+    maxAttempts: z.number().int().min(1).max(10).optional(),
+    /** House rules added to the agent's brief for matching work. */
+    guidance: z.string().max(2000).optional(),
+  }),
+});
+export type Policy = z.infer<typeof PolicySchema>;
+
 export const ConfigSchema = z.object({
   preset: z.enum(['frugal', 'balanced', 'fast', 'careful']).default('balanced'),
   baseBranch: z.string().optional(),
@@ -30,8 +56,10 @@ export const ConfigSchema = z.object({
       requireApproval: z.boolean().default(false),
       maxConflictRounds: z.number().int().min(0).default(2),
       syncBase: z.boolean().default(true),
+      /** Merge up to this many verified tasks together and run checks once (1 = one at a time). */
+      trainSize: z.number().int().min(1).max(10).default(4),
     })
-    .default({ mode: 'branch', branch: 'yardmaster/integration', requireApproval: false, maxConflictRounds: 2, syncBase: true }),
+    .default({ mode: 'branch', branch: 'yardmaster/integration', requireApproval: false, maxConflictRounds: 2, syncBase: true, trainSize: 4 }),
   verify: z.array(z.string()).default([]),
   verifyTimeoutMinutes: z.number().default(20),
   verifyParallel: z.number().int().min(1).default(1),
@@ -104,6 +132,37 @@ export const ConfigSchema = z.object({
       budgetWarnMinutes: z.number().positive().default(60),
     })
     .default({ slowProgressMinutes: 8, queueStallMinutes: 3, idleLockMinutes: 20, budgetWarnMinutes: 60 }),
+  /** Rules that adjust tasks by what they touch or say. First match wins per field; later rules fill gaps. */
+  policies: z.array(PolicySchema).default([]),
+  review: z
+    .object({
+      /** auto: review strong-tier work, hot files, and big diffs. always / never are what they say. */
+      mode: z.enum(['auto', 'always', 'never']).default('auto'),
+      minChangedLines: z.number().int().min(1).default(200),
+      maxRounds: z.number().int().min(0).max(3).default(1),
+      /** Preferred reviewers; a different model family from the implementer is chosen when possible. */
+      reviewers: z.array(z.string()).default(['claude', 'codex', 'gemini', 'cursor', 'opencode']),
+      crossFamily: z.boolean().default(true),
+      /** If the reviewer still objects after the last round: proceed with a note, or stop for a person. */
+      onUnresolved: z.enum(['proceed', 'needs_human']).default('proceed'),
+    })
+    .default({ mode: 'auto', minChangedLines: 200, maxRounds: 1, reviewers: ['claude', 'codex', 'gemini', 'cursor', 'opencode'], crossFamily: true, onUnresolved: 'proceed' }),
+  learning: z
+    .object({
+      /** Pick agents by their verified track record on this repo, not just list order. */
+      routing: z.boolean().default(true),
+      /** Chance of trying an agent with little history so the stats stay honest. */
+      explore: z.number().min(0).max(0.5).default(0.1),
+      /** How much cost matters relative to success rate (0 = only quality). */
+      costWeight: z.number().min(0).max(3).default(0.5),
+      minRuns: z.number().int().min(1).default(3),
+      /** Capture lessons from fixed failures, reviews and your redirects, and brief future agents with them. */
+      lessons: z.boolean().default(true),
+      maxLessonsPerBrief: z.number().int().min(0).max(12).default(4),
+    })
+    .default({ routing: true, explore: 0.1, costWeight: 0.5, minRuns: 3, lessons: true, maxLessonsPerBrief: 4 }),
+  /** Import-graph awareness: tasks editing files that import each other are warned (or kept apart). */
+  coupling: z.enum(['off', 'warn', 'serialize']).default('warn'),
   notify: z.boolean().default(true),
   hub: z
     .object({ host: z.string().default('127.0.0.1'), port: z.number().int().default(7777) })
@@ -237,3 +296,6 @@ export function writeProjectConfig(root: string, cfg: Record<string, unknown>): 
 export function worktreeRootOf(config: Pick<Config, 'worktreeRoot'>): string {
   return config.worktreeRoot ? expandHome(config.worktreeRoot) : join(yardHome(), 'worktrees');
 }
+
+/** Model family per agent, used to pick a reviewer that doesn't share the implementer's blind spots. */
+export const AGENT_FAMILY: Record<string, string> = { claude: 'anthropic', codex: 'openai', gemini: 'google', cursor: 'mixed', opencode: 'mixed', mock: 'mock' };

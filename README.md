@@ -10,6 +10,9 @@ Run several coding agents at once (Claude Code, Codex, Cursor, OpenCode, Gemini 
 - **Cleans up after itself.** Finished worktrees, merged branches, stale reservations and orphaned processes are removed. Anything unmerged or yours is kept and listed.
 - **You stay in charge.** Pause new work (or park running agents with their work saved), redirect a running agent with one sentence, and see "heads up" notes when something is slow, stuck in the queue, or about to blow the budget.
 - **Disk-aware.** New worktrees wait when the disk is low or Yardmaster's quota is used. Finished worktrees, old logs, and rebuildable build output (`node_modules`, `dist`, `target`, ...) in kept worktrees are cleaned automatically.
+- **Agents get better here over time.** A second model from a different family reviews risky changes before they merge. Fixed failures, review findings and your redirects become lessons that brief future agents on related files. The router learns which agent and model actually pass checks on this repo, and at what cost.
+- **Smarter scheduling.** Work on the critical path starts first. Tasks editing files that import each other are warned (or kept apart). Several verified tasks merge together with one check run. Hard tasks can be raced by two agents, and the first verified result wins.
+- **Your rules.** Policies like "anything under `src/auth` uses a strong model, gets reviewed, and needs my approval" or "docs tasks are cheap" apply automatically.
 - **Many machines.** Run `ym worker` on a laptop, desktop or server and they share one queue. Work moves between them as git bundles, so you don't need GitHub or SSH between them.
 
 ## Install
@@ -55,7 +58,31 @@ Want to see it first without spending tokens? `ym demo` starts an isolated sandb
 | `ym doctor` | Check your setup |
 | `ym presets` | `frugal`, `balanced`, `fast`, `careful` |
 
-`ym add` options: `--files a,b` (what it will change), `--after t-123`, `--agent codex`, `--tier cheap|standard|strong`, `--verify "npm test"`, `--budget 1.5`, `--no-changes-ok` (for reviews and research).
+`ym add` options: `--files a,b` (what it will change), `--after t-123`, `--agent codex`, `--tier cheap|standard|strong`, `--verify "npm test"`, `--budget 1.5`, `--best-of 2`, `--review always|never`, `--no-changes-ok` (for reviews and research).
+
+## Making agents better
+
+| Feature | What happens | Configure |
+|---|---|---|
+| Cross-model review | After checks pass, a reviewer from a different model family reads the diff. Blocking issues go back to the implementer (keeping its work); approval lets it merge. | `review.mode` (`auto`/`always`/`never`), `review.reviewers`, `review.maxRounds` |
+| Lessons | Learned from fixed failures, accepted review points and your redirects; injected into briefs of related tasks; retired automatically if they don't help. | `learning.lessons`, `ym learn "..."`, `ym lessons` |
+| Learned routing | Picks the agent with the best verified-per-dollar record for that kind of work on this repo, and explores now and then. | `learning.routing`, `learning.costWeight`, `learning.explore` |
+| Best-of-N | `--best-of 2` (or a policy) races agents on the same task in separate worktrees; the first verified one merges, the rest stop. | `bestOf` on a task or policy |
+| Critical path | Tasks that unblock long chains start first. | automatic |
+| Coupling | An import graph finds tasks that touch files importing each other; their briefs say what to keep stable, or they wait. | `coupling` (`warn`/`serialize`/`off`) |
+| Merge trains | Several verified tasks merge together and are checked once; on failure they go one at a time to find the culprit. | `integration.trainSize` |
+| Policies | Rules matched by files, wording, tier or creator set model size, agent, review, races, checks, budgets, approval and house rules. | `policies` |
+
+```json
+{
+  "policies": [
+    { "name": "auth is sensitive", "when": { "files": ["src/auth/**"] },
+      "set": { "tier": "strong", "review": "always", "requireApproval": true, "guidance": "Never log tokens or passwords." } },
+    { "name": "docs are cheap", "when": { "text": "readme|docs?\\b" }, "set": { "tier": "cheap", "review": "never" } },
+    { "name": "hard bugs get two tries at once", "when": { "text": "race condition|flaky|deadlock" }, "set": { "bestOf": 2 } }
+  ]
+}
+```
 
 ## From inside your agent
 
@@ -69,9 +96,10 @@ After `ym connect`, your agent has these tools:
 | `yard_claim_files`, `yard_release_files`, `yard_who` | Reserve files you are editing by hand so background agents stay away |
 | `yard_take_task`, `yard_finish_task` | Do a queued task yourself in this session |
 | `yard_send`, `yard_inbox` | Short handoff notes between agents |
-| `yard_control` | Retry, cancel, stop, approve |
+| `yard_control` | Retry, cancel, stop, approve, or redirect with a note |
+| `yard_learn` | Save repo knowledge for future agents |
 
-For Claude Code there's also hard enforcement: `ym connect claude --with-hook` adds an edit guard that blocks writes to files another agent holds. If the hub isn't running, edits are always allowed.
+`ym connect` also installs a short skill that teaches agents when and how to fan out. Add `--with-hooks` for Claude Code and Codex to coordinate with zero tool calls: a briefing at session start, board changes before a prompt (only when something changed), automatic reservation of files the agent edits, and a guard on edits to files another agent holds. Hooks fail open: if the hub isn't running, nothing is blocked. Why this layering beats MCP alone: [docs/INTEGRATION.md](docs/INTEGRATION.md).
 
 ## More machines
 
@@ -151,7 +179,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). For the research behind it (Ga
 
 ## Status
 
-Early (0.1). Tested end to end with the mock agent (43 tests: parallel scheduling, scopes, dependencies, loops, budgets, retries, conflicts, edit-time overlap, approval, cleanup safety, a two-machine run, the MCP server, pause/redirect, supervisor warnings, disk holds and artifact trimming, and regression tests for cancel-during-verify, stale attempts, detached HEADs and hand edits in the integration worktree). Smoke-tested with real Claude Code and Codex. The Cursor and Gemini adapters follow their documented stream formats but haven't been run against live sessions yet.
+Early (0.2). Tested end to end with the mock agent (53 tests: policies, cross-model review rounds, lessons and their credit, critical-path ordering, races, merge trains, import-graph coupling, hooks, the minimal MCP profile, and parallel scheduling, scopes, dependencies, loops, budgets, retries, conflicts, edit-time overlap, approval, cleanup safety, a two-machine run, the MCP server, pause/redirect, supervisor warnings, disk holds and artifact trimming, and regression tests for cancel-during-verify, stale attempts, detached HEADs and hand edits in the integration worktree). Smoke-tested with real Claude Code and Codex. The Cursor and Gemini adapters follow their documented stream formats but haven't been run against live sessions yet.
 
 ## License
 

@@ -36,6 +36,8 @@ export class Integrator {
   private readonly busy = new Set<string>();
   private readonly lastGood = new Map<string, string>();
   private readonly warned = new Map<string, string>();
+  /** Tasks whose batch failed checks; they go through one at a time to find the culprit. */
+  private readonly trainFailed = new Set<string>();
 
   constructor(coord: Coordinator, verifySlots: Semaphore) {
     this.coord = coord;
@@ -120,7 +122,7 @@ export class Integrator {
     const config = this.coord.configFor(projectId);
     const ready = this.coord
       .listTasks(projectId, ['ready'])
-      .filter((t) => !config.integration.requireApproval || t.approved)
+      .filter((t) => !(config.integration.requireApproval || t.needs_approval) || t.approved)
       .sort((a, b) => b.priority - a.priority || (a.ready_at ?? 0) - (b.ready_at ?? 0));
     let task: Task | undefined;
     for (const t of ready) {
@@ -134,6 +136,33 @@ export class Integrator {
       }
     }
     if (!task) return false;
+    if (config.integration.trainSize > 1 && !task.race_group) {
+      const train: Task[] = [];
+      for (const t of ready) {
+        if (train.length >= config.integration.trainSize) break;
+        if (t.race_group || t.verify || this.trainFailed.has(t.id) || !t.head_sha || !(await commitExists(project.root, t.head_sha))) continue;
+        train.push(t);
+      }
+      if (train.length >= 2) {
+        this.busy.add(projectId);
+        try {
+          const ok = await this.lock.run(projectId, () => this.integrateTrain(project, train, config));
+          if (ok) return true;
+        } catch (err) {
+          this.coord.event(projectId, null, 'warn', 'integration.train_error', `Batch merge failed (${clip((err as Error).message, 200)}); merging one at a time.`);
+          for (const t of train) this.trainFailed.add(t.id);
+        } finally {
+          this.busy.delete(projectId);
+        }
+      }
+    }
+    if (task.race_group) {
+      // Best-of-N: the first verified attempt wins; stop the others so they don't spend more.
+      for (const rival of this.coord.listTasks(projectId).filter((t) => t.race_group === task!.race_group && t.id !== task!.id && !['done', 'failed', 'canceled'].includes(t.status))) {
+        this.coord.control(rival.id, 'cancel', 'the race');
+        this.coord.event(projectId, rival.id, 'info', 'race.lost', `"${task.title}" finished first; stopped "${rival.title}".`);
+      }
+    }
     this.busy.add(projectId);
     try {
       await this.lock.run(projectId, () => this.integrate(project, task!, config));
@@ -203,9 +232,60 @@ export class Integrator {
     }
     this.coord.setMeta(`integrating:${project.id}`, null);
     this.lastGood.set(project.id, after!);
+    await this.tidy(project, task, config, sha).catch(() => undefined);
     this.coord.updateTask(task.id, { status: 'done', finished_at: Date.now(), head_sha: after, attention: null });
     this.coord.event(project.id, task.id, 'success', 'task.done', `Merged "${task.title}" into ${config.integration.branch}`);
-    await this.tidy(project, task, config, sha);
+  }
+
+  /**
+   * Merge train: merge several verified tasks into the integration branch and run the checks once. When the
+   * base hasn't moved for a task there is nothing to re-check, so trains only pay off when several tasks were
+   * verified against an older base, exactly the pile-up that makes merge queues slow with many agents.
+   */
+  private async integrateTrain(project: Project, train: Task[], config: Config): Promise<boolean> {
+    const ensured = await this.ensureLocked(project);
+    if (!ensured) return true;
+    const { path, head: before } = ensured;
+    const fresh = train.map((t) => this.coord.getTask(t.id)).filter((t): t is Task => !!t && t.status === 'ready' && !!t.head_sha);
+    const needsCheck = fresh.filter((t) => t.base_sha !== before);
+    if (fresh.length < 2 || needsCheck.length < 2 || !config.verify.length) return false;
+    this.coord.setMeta(`integrating:${project.id}`, before);
+    for (const t of fresh) this.coord.updateTask(t.id, { status: 'merging' });
+    const merged: Task[] = [];
+    for (const t of fresh) {
+      const m = await git(path, ['merge', '--no-ff', '--no-edit', '-m', `yardmaster: ${t.title} (${t.id})`, t.head_sha!], { allowFail: true });
+      if (m.code !== 0) {
+        // Any conflict: undo the whole batch and let the one-at-a-time path deal with each task properly.
+        await git(path, ['merge', '--abort'], { allowFail: true });
+        await git(path, ['reset', '--hard', before]);
+        this.coord.setMeta(`integrating:${project.id}`, null);
+        for (const x of fresh) this.coord.updateTask(x.id, { status: 'ready' });
+        for (const x of fresh) this.trainFailed.add(x.id);
+        return false;
+      }
+      merged.push(t);
+    }
+    this.coord.event(project.id, null, 'info', 'integration.train', `Checking ${merged.length} finished tasks together in one run: ${merged.map((t) => `"${clip(t.title, 40)}"`).join(', ')}`);
+    const result = await this.verifySlots.use(() => runVerify(path, config.verify, config.verifyTimeoutMinutes));
+    const stillMerging = merged.every((t) => this.coord.getTask(t.id)?.status === 'merging');
+    if (!result.ok || !stillMerging) {
+      await git(path, ['reset', '--hard', before]);
+      this.coord.setMeta(`integrating:${project.id}`, null);
+      for (const t of merged) if (this.coord.getTask(t.id)?.status === 'merging') this.coord.updateTask(t.id, { status: 'ready' });
+      for (const t of merged) this.trainFailed.add(t.id);
+      if (!result.ok) this.coord.event(project.id, null, 'warn', 'integration.train_failed', `The combined checks failed; merging those ${merged.length} tasks one at a time to find which one breaks.`);
+      return false;
+    }
+    const after = (await revParse(path, 'HEAD'))!;
+    this.coord.setMeta(`integrating:${project.id}`, null);
+    this.lastGood.set(project.id, after);
+    for (const t of merged) await this.tidy(project, t, config, t.head_sha!).catch(() => undefined);
+    for (const t of merged) {
+      this.coord.updateTask(t.id, { status: 'done', finished_at: Date.now(), attention: null });
+      this.coord.event(project.id, t.id, 'success', 'task.done', `Merged "${t.title}" into ${config.integration.branch} (batch of ${merged.length})`);
+    }
+    this.coord.event(project.id, null, 'success', 'integration.train_merged', `Merged ${merged.length} tasks with one check run instead of ${merged.length}.`);
+    return true;
   }
 
   private async onConflict(project: Project, task: Task, config: Config, files: string[]): Promise<void> {

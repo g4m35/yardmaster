@@ -295,7 +295,7 @@ export async function recover(coord: Coordinator, machineId: string, activeTaskI
   }
 
   for (const t of coord.listTasks(null, ['queued'])) {
-    const dead = coord.depsOf(t.id).find((d) => d.status === 'failed' || d.status === 'canceled');
+    const dead = coord.depsOf(t.id).find((d) => coord.depState(d) === 'dead');
     if (dead) {
       coord.updateTask(t.id, { status: 'needs_human', attention: `It depends on ${dead.id} "${clip(dead.title, 50)}", which ${dead.status === 'failed' ? 'failed' : 'was canceled'}. Retry that task, or cancel this one.` });
       coord.event(t.project_id, t.id, 'warn', 'task.blocked', `"${t.title}" can't start because ${dead.id} ${dead.status}.`);

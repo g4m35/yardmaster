@@ -90,6 +90,18 @@ async function exec(words) {
   }
 }
 
+// Acting as a reviewer: answer from `@mock-review <round> <approve|changes> <note...>` lines in the request.
+if (prompt.includes('YARDMASTER-REVIEW')) {
+  const round = Number(process.env.YARDMASTER_REVIEW_ROUND ?? '0');
+  const rules = prompt.split('\n').map((l) => l.trim()).filter((l) => l.startsWith('@mock-review '));
+  const rule = rules.map((l) => l.split(/\s+/)).find((w) => Number(w[1]) === round);
+  const verdict = rule && rule[2] === 'changes' ? 'request_changes' : 'approve';
+  const issues = verdict === 'request_changes' ? [{ severity: 'major', file: 'n/a', note: rule.slice(3).join(' ') || 'please fix' }] : [];
+  emit({ type: 'usage', tokensIn: 300, tokensOut: 40, costUsd: 0.002, cumulative: false });
+  emit({ type: 'result', ok: true, text: JSON.stringify({ verdict, issues, summary: 'mock review' }) });
+  process.exit(0);
+}
+
 emit({ type: 'text', text: `mock agent starting (attempt ${attempt})` });
 for (const line of lines) await exec(line.slice(6).split(/\s+/));
 emit({ type: 'usage', tokensIn: 500, tokensOut: 50, cumulative: false });

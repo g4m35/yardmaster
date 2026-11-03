@@ -202,7 +202,7 @@ export class WorkerLoop {
         if (this.transport && !(await revParse(repoPath, claim.startPoint))) await this.transport.fetchBase(project, repoPath, claim.startPoint);
         const outcome = await runAttempt({
           api: this.client, machineId: this.machineId, task, project, repoPath, agent: route.agent, model: route.model, config,
-          startPoint: claim.startPoint, verifySlots: this.verifySlots, onSpawn: (stop) => (entry.stop = stop),
+          startPoint: claim.startPoint, verifySlots: this.verifySlots, onSpawn: (stop) => (entry.stop = stop), installed: this.agents(),
         });
         if (outcome.status === 'ready' && this.transport) {
           const fresh = (await this.client['task.get']({ id: task.id })).task;

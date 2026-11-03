@@ -13,6 +13,7 @@ import { WorkerLoop } from './worker.ts';
 import { Semaphore } from './runner.ts';
 import { recover, planCleanup, runCleanup } from './janitor.ts';
 import { Supervisor } from './supervisor.ts';
+import { importGraph } from './imports.ts';
 import { loadConfig } from './config.ts';
 import { detectAgents } from './adapters/index.ts';
 import { hubToken, machineId, paths } from './paths.ts';
@@ -132,10 +133,23 @@ export class Hub {
       for (const p of this.coord.listProjects()) if (existsSync(p.root)) void this.integrator.step(p.id);
       if (n % 4 === 0) await recover(this.coord, this.machineId, new Set(this.worker.active.keys()));
       if (n % 7 === 0) this.supervisor.check();
+      if (n % 20 === 1) void this.refreshGraphs();
       if (n % 400 === 0 && loadConfig().cleanup.auto) await runCleanup(this.coord, await planCleanup(this.coord));
       this.dispatchNotifications();
     } finally {
       this.looping = false;
+    }
+  }
+
+  /** Import graphs feed coupling warnings in briefs and (optionally) scheduling. Rebuilt only when HEAD moves. */
+  private async refreshGraphs(): Promise<void> {
+    for (const p of this.coord.listProjects()) {
+      if (!existsSync(p.root) || this.coord.configFor(p.id).coupling === 'off') continue;
+      try {
+        this.coord.graphs.set(p.id, await importGraph(p.root));
+      } catch {
+        // A repo we can't read right now: coupling hints are simply skipped.
+      }
     }
   }
 

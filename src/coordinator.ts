@@ -2,6 +2,9 @@ import { tx, type Db } from './db.ts';
 import { loadConfig, routingFor, type Config, type Tier } from './config.ts';
 import { findCycle } from './graph.ts';
 import { chooseAgent, inferTier, type AgentStats, type RouteChoice } from './router.ts';
+import { applyPolicies } from './policies.ts';
+import { coupling, type ImportGraph } from './imports.ts';
+import { addLesson, widenScope } from './lessons.ts';
 import { inferScope, normalizePattern, scopesOverlap } from './scope.ts';
 import { clip, jaccard, shortId, taskFingerprint, wordSet } from './text.ts';
 import {
@@ -33,11 +36,13 @@ function toTask(r: Row): Task {
     allow_no_changes: Boolean(r.allow_no_changes),
     pending_rebase: Boolean(r.pending_rebase),
     approved: Boolean(r.approved),
+    needs_approval: Boolean(r.needs_approval),
+    policies: JSON.parse(String(r.policies ?? '[]')) as string[],
   };
 }
 
 function toRun(r: Row): Run {
-  return { ...(r as unknown as Run), touched: JSON.parse(String(r.touched ?? '[]')) as string[], cost_estimated: Boolean(r.cost_estimated) };
+  return { ...(r as unknown as Run), touched: JSON.parse(String(r.touched ?? '[]')) as string[], lessons: JSON.parse(String(r.lessons ?? '[]')) as string[], cost_estimated: Boolean(r.cost_estimated) };
 }
 
 const TASK_COLUMNS = new Set([
@@ -45,9 +50,10 @@ const TASK_COLUMNS = new Set([
   'tokens_in', 'tokens_out', 'assignee', 'machine_id', 'branch', 'worktree', 'base_sha', 'head_sha', 'lease_until',
   'not_before', 'wait_for', 'pending_rebase', 'control', 'summary', 'last_error', 'retry_note', 'error_fp',
   'same_error_count', 'conflict_rounds', 'attention', 'approved', 'started_at', 'finished_at', 'ready_at', 'prompt', 'title',
+  'review', 'review_rounds', 'race_group', 'guidance', 'needs_approval', 'policies', 'scope_inferred',
 ]);
 
-const RUN_COLUMNS = new Set(['pid', 'proc_started', 'status', 'stop_reason', 'exit_code', 'cost_usd', 'tokens_in', 'tokens_out', 'cost_estimated', 'last_activity', 'touched', 'ended_at']);
+const RUN_COLUMNS = new Set(['pid', 'proc_started', 'status', 'stop_reason', 'exit_code', 'cost_usd', 'tokens_in', 'tokens_out', 'cost_estimated', 'last_activity', 'touched', 'ended_at', 'lessons', 'verdict']);
 
 export class StaleAttemptError extends Error {
   constructor(id: string, status: string) {
@@ -79,6 +85,8 @@ export interface AddResult {
 export class Coordinator {
   readonly db: Db;
   private readonly configCache = new Map<string, { at: number; cfg: Config }>();
+  /** Import graphs per project, refreshed by the hub in the background (see Hub.refreshGraphs). */
+  readonly graphs = new Map<string, ImportGraph>();
   private budgetWarnedDay = '';
 
   constructor(db: Db) {
@@ -160,32 +168,51 @@ export class Coordinator {
         return { input, prompt, id };
       });
 
+      const raceVariants: { id: string; of: string }[] = [];
       for (const plan of plans) {
         if (!plan) continue;
         const { input, prompt, id } = plan;
         const explicit = input.files?.map(normalizePattern) ?? [];
         const scope = explicit.length ? explicit : inferScope(`${input.title}\n${prompt}`);
-        const tier: Tier = input.tier ?? inferTier(`${input.title} ${prompt}`, cfg.defaultTier ?? 'standard');
-        this.db
-          .prepare(
-            `INSERT INTO tasks (id, project_id, title, prompt, fingerprint, status, priority, tier, agent, scope, scope_inferred, verify,
-              allow_no_changes, max_attempts, budget_usd, created_by, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .run(
-            id, projectId, input.title.trim(), prompt, taskFingerprint(input.title, prompt), input.priority ?? 0, tier, input.agent ?? null,
-            JSON.stringify(scope), explicit.length ? 0 : 1, input.verify ? JSON.stringify(input.verify) : null,
-            input.allowNoChanges ? 1 : 0, cfg.retry.maxAttempts, input.budgetUsd ?? cfg.budget.perTaskUsd, createdBy, now, now,
-          );
+        const guessed: Tier = input.tier ?? inferTier(`${input.title} ${prompt}`, cfg.defaultTier ?? 'standard');
+        const { effects, matched } = applyPolicies(cfg, { title: input.title, prompt, scope, tier: guessed, createdBy });
+        const tier: Tier = input.tier ?? effects.tier ?? guessed;
+        const bestOf = input.bestOf ?? effects.bestOf ?? 1;
+        const insert = (taskId: string, title: string, agent: string | null, raceGroup: string | null) =>
+          this.db
+            .prepare(
+              `INSERT INTO tasks (id, project_id, title, prompt, fingerprint, status, priority, tier, agent, scope, scope_inferred, verify,
+                allow_no_changes, max_attempts, budget_usd, created_by, created_at, updated_at, review, race_group, guidance, needs_approval, policies)
+               VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+              taskId, projectId, title, prompt, taskFingerprint(title, prompt), input.priority ?? effects.priority ?? 0, tier, agent,
+              JSON.stringify(scope), explicit.length ? 0 : 1, (input.verify ?? effects.verify) ? JSON.stringify(input.verify ?? effects.verify) : null,
+              input.allowNoChanges ? 1 : 0, effects.maxAttempts ?? cfg.retry.maxAttempts, input.budgetUsd ?? effects.budgetUsd ?? cfg.budget.perTaskUsd,
+              createdBy, now, now, input.review ?? effects.review ?? null, raceGroup, effects.guidance ?? null, effects.requireApproval ? 1 : 0, JSON.stringify(matched),
+            );
+        if (bestOf < 2) {
+          insert(id, input.title.trim(), input.agent ?? effects.agent ?? null, null);
+          continue;
+        }
+        // Best-of-N: the same work raced by different agents; the first verified (and reviewed) result wins.
+        const agents = this.raceAgents(cfg, tier, bestOf, input.agent ?? effects.agent ?? null);
+        insert(id, input.title.trim(), agents[0] ?? null, id);
+        for (let i = 1; i < bestOf; i++) {
+          const vid = shortId('t');
+          insert(vid, `${input.title.trim()} (try ${i + 1})`, agents[i] ?? null, id);
+          raceVariants.push({ id: vid, of: id });
+        }
       }
 
       for (const plan of plans) {
         if (!plan) continue;
+        const members = [plan.id, ...raceVariants.filter((v) => v.of === plan.id).map((v) => v.id)];
         for (const ref of plan.input.after ?? []) {
           const dep = keyToId.get(ref) ?? ref;
           if (!this.getTask(dep)) throw new Error(`"${plan.input.title}" depends on ${ref}, which does not exist.`);
           if (dep === plan.id) throw new Error(`"${plan.input.title}" cannot depend on itself.`);
-          this.db.prepare('INSERT OR IGNORE INTO deps (task_id, depends_on) VALUES (?, ?)').run(plan.id, dep);
+          for (const m of members) this.db.prepare('INSERT OR IGNORE INTO deps (task_id, depends_on) VALUES (?, ?)').run(m, dep);
         }
       }
 
@@ -197,11 +224,50 @@ export class Coordinator {
         const t = this.getTask(plan.id)!;
         created.push(t);
         const scopeNote = t.scope.length ? ` (files: ${t.scope.join(', ')})` : '';
-        this.event(projectId, t.id, 'info', 'task.created', `New task "${t.title}"${scopeNote}`, { tier: t.tier, by: createdBy });
+        const ruleNote = t.policies.length ? ` [rules: ${t.policies.join(', ')}]` : '';
+        const race = raceVariants.filter((v) => v.of === t.id).length;
+        this.event(projectId, t.id, 'info', 'task.created', `New task "${t.title}"${scopeNote}${ruleNote}${race ? ` raced by ${race + 1} agents` : ''}`, { tier: t.tier, by: createdBy });
       }
+      for (const v of raceVariants) created.push(this.getTask(v.id)!);
       for (const d of duplicates) this.event(projectId, d.existing, 'warn', 'task.duplicate', `Skipped "${d.title}": it duplicates ${d.existing} "${d.existingTitle}"`);
       return { created, duplicates };
     });
+  }
+
+  /** Distinct agents for a race, from the tier's preference list, preferring ones some online machine has. */
+  private raceAgents(cfg: Config, tier: Tier, n: number, forced: string | null): (string | null)[] {
+    const online = new Set(this.listMachines().filter((m) => Date.now() - m.last_seen < 120_000).flatMap((m) => m.info.agents));
+    const prefs = routingFor(cfg, tier).filter((a) => online.has(a));
+    const pool = forced ? [forced, ...prefs.filter((a) => a !== forced)] : prefs;
+    return Array.from({ length: n }, (_, i) => pool[i] ?? null);
+  }
+
+  /** A dependency on a raced task is satisfied as soon as any member of the race is done. */
+  depState(dep: Task): 'done' | 'dead' | 'pending' {
+    const group = dep.race_group ? this.listTasks(dep.project_id).filter((t) => t.race_group === dep.race_group) : [dep];
+    if (group.some((t) => t.status === 'done')) return 'done';
+    if (group.every((t) => t.status === 'failed' || t.status === 'canceled')) return 'dead';
+    return 'pending';
+  }
+
+  /** Length of the longest chain of open tasks waiting on this one: work on the critical path starts first. */
+  criticalPath(projectId: string): Map<string, number> {
+    const open = this.listTasks(projectId).filter((t) => !TERMINAL_STATUSES.includes(t.status));
+    const ids = new Set(open.map((t) => t.id));
+    const dependents = new Map<string, string[]>();
+    const rows = this.db.prepare('SELECT d.task_id, d.depends_on FROM deps d JOIN tasks t ON t.id = d.task_id WHERE t.project_id = ?').all(projectId) as { task_id: string; depends_on: string }[];
+    for (const r of rows) if (ids.has(r.task_id) && ids.has(r.depends_on)) dependents.set(r.depends_on, [...(dependents.get(r.depends_on) ?? []), r.task_id]);
+    const memo = new Map<string, number>();
+    const depth = (id: string, seen: Set<string>): number => {
+      if (memo.has(id)) return memo.get(id)!;
+      if (seen.has(id)) return 0;
+      seen.add(id);
+      const d = Math.max(0, ...(dependents.get(id) ?? []).map((c) => 1 + depth(c, seen)));
+      memo.set(id, d);
+      return d;
+    };
+    for (const t of open) depth(t.id, new Set());
+    return memo;
   }
 
   dependencyCycle(projectId: string): string[] | null {
@@ -286,6 +352,7 @@ export class Coordinator {
       case 'redirect': {
         const text = note?.trim();
         if (!text) throw new Error('Say what the agent should do differently.');
+        if (this.configFor(t.project_id).learning.lessons) addLesson(this, t.project_id, text, 'you', widenScope(t.scope), t.id);
         if (TERMINAL_STATUSES.includes(t.status)) throw new Error(`${id} is ${t.status}; retry it instead.`);
         const guidance = clip(`${by} says: ${text}`, 2000);
         const running = t.status === 'running';
@@ -362,7 +429,9 @@ export class Coordinator {
   // ---------- scheduling ----------
 
   activeScopes(projectId: string, excludeId?: string): { task: Task; scope: string[] }[] {
-    const active = this.listTasks(projectId, ACTIVE_STATUSES).filter((t) => t.id !== excludeId);
+    // Members of the same race intentionally work on the same files in separate worktrees.
+    const group = excludeId ? this.getTask(excludeId)?.race_group ?? null : null;
+    const active = this.listTasks(projectId, ACTIVE_STATUSES).filter((t) => t.id !== excludeId && (!group || t.race_group !== group));
     return active.map((task) => {
       const touched = this.latestRun(task.id)?.touched ?? [];
       return { task, scope: [...new Set([...this.effectiveScope(task), ...touched])] };
@@ -387,14 +456,28 @@ export class Coordinator {
     return r.s;
   }
 
+  /** Verified track record per agent on this project (overall and per tier), used by the learned router. */
   agentStats(projectId: string): Record<string, AgentStats> {
     const rows = this.db
       .prepare(
-        `SELECT r.agent, COUNT(*) AS runs, SUM(CASE WHEN r.status = 'succeeded' THEN 1 ELSE 0 END) AS verified
-         FROM runs r JOIN tasks t ON t.id = r.task_id WHERE t.project_id = ? AND r.status IN ('succeeded', 'failed', 'stopped') GROUP BY r.agent`,
+        `SELECT r.agent, COALESCE(r.tier, t.tier) AS tier, COUNT(*) AS runs,
+                SUM(CASE WHEN r.status = 'succeeded' THEN 1 ELSE 0 END) AS verified,
+                SUM(r.cost_usd) AS cost, SUM(CASE WHEN r.status = 'succeeded' THEN (r.ended_at - r.started_at) ELSE 0 END) AS ms
+         FROM runs r JOIN tasks t ON t.id = r.task_id
+         WHERE t.project_id = ? AND r.role = 'implement' AND r.status IN ('succeeded', 'failed', 'stopped')
+         GROUP BY r.agent, COALESCE(r.tier, t.tier)`,
       )
-      .all(projectId) as { agent: string; runs: number; verified: number }[];
-    return Object.fromEntries(rows.map((r) => [r.agent, { runs: r.runs, verified: r.verified }]));
+      .all(projectId) as { agent: string; tier: string; runs: number; verified: number; cost: number; ms: number }[];
+    const out: Record<string, AgentStats> = {};
+    for (const r of rows) {
+      const a = (out[r.agent] ??= { runs: 0, verified: 0, cost: 0, ms: 0, byTier: {} });
+      a.runs += r.runs;
+      a.verified += r.verified;
+      a.cost += r.cost ?? 0;
+      a.ms += r.ms ?? 0;
+      a.byTier[r.tier] = { runs: r.runs, verified: r.verified, cost: r.cost ?? 0 };
+    }
+    return out;
   }
 
   /** Why a queued task is not running yet, in plain language. Null means it can start now. */
@@ -402,11 +485,11 @@ export class Coordinator {
     const pause = this.pausedState(task.project_id);
     if (pause.paused) return `Paused by ${pause.by ?? 'you'}. Resume to start new work.`;
     if (task.not_before && task.not_before > now) return `Retrying in ${Math.ceil((task.not_before - now) / 1000)}s`;
-    const deps = this.depsOf(task.id).filter((d) => d.status !== 'done');
+    const deps = this.depsOf(task.id).filter((d) => this.depState(d) !== 'done');
     if (deps.length) {
       const d = deps[0]!;
       const more = deps.length > 1 ? ` and ${deps.length - 1} more` : '';
-      return d.status === 'failed' || d.status === 'canceled'
+      return this.depState(d) === 'dead'
         ? `Blocked: it needs ${d.id} "${clip(d.title, 40)}", which ${d.status === 'failed' ? 'failed' : 'was canceled'}`
         : `Waiting for ${d.id} "${clip(d.title, 40)}"${more} to finish`;
     }
@@ -416,9 +499,12 @@ export class Coordinator {
     }
     const mine = this.effectiveScope(task);
     if (mine.length) {
+      const graph = this.configFor(task.project_id).coupling === 'serialize' ? this.graphs.get(task.project_id) : undefined;
       for (const { task: other, scope } of this.activeScopes(task.project_id, task.id)) {
         const hits = scopesOverlap(mine, scope);
         if (hits.length) return `Waiting: ${other.id} "${clip(other.title, 40)}" is changing overlapping files (${clip(hits[0], 50)})`;
+        const tied = graph ? coupling(graph, mine, scope)[0] : undefined;
+        if (tied) return `Waiting: ${other.id} "${clip(other.title, 40)}" is changing ${tied.theirs}, which ${tied.mine} ${tied.direction === 'imports' ? 'imports' : 'is imported by'}`;
       }
       for (const lock of this.activeLocks(task.project_id)) {
         if (lock.holder === task.id) continue;
@@ -436,6 +522,13 @@ export class Coordinator {
     return tx(this.db, () => {
       const now = Date.now();
       const queued = (this.db.prepare("SELECT * FROM tasks WHERE status = 'queued' AND assignee IS NULL ORDER BY priority DESC, created_at ASC").all() as Row[]).map(toTask);
+      const paths = new Map<string, Map<string, number>>();
+      const cp = (t: Task) => {
+        if (!paths.has(t.project_id)) paths.set(t.project_id, this.criticalPath(t.project_id));
+        return paths.get(t.project_id)!.get(t.id) ?? 0;
+      };
+      // Priority first, then the task that unblocks the most downstream work, then age.
+      queued.sort((a, b) => b.priority - a.priority || cp(b) - cp(a) || a.created_at - b.created_at);
       for (const task of queued) {
         if (!req.repos[task.project_id]) continue;
         if (this.blocker(task, now)) continue;
@@ -484,10 +577,10 @@ export class Coordinator {
 
   // ---------- runs ----------
 
-  startRun(task: Task, machineId: string, agent: string, model: string | null, logPath: string): Run {
+  startRun(task: Task, machineId: string, agent: string, model: string | null, logPath: string, role: 'implement' | 'review' = 'implement'): Run {
     const id = shortId('r');
-    this.db.prepare('INSERT INTO runs (id, task_id, attempt, machine_id, agent, model, log_path, status, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(id, task.id, task.attempts, machineId, agent, model, logPath, 'running', Date.now());
+    this.db.prepare('INSERT INTO runs (id, task_id, attempt, machine_id, agent, model, log_path, status, started_at, role, tier) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(id, task.id, task.attempts, machineId, agent, model, logPath, 'running', Date.now(), role, task.tier);
     return this.getRun(id)!;
   }
 
@@ -497,7 +590,7 @@ export class Coordinator {
   }
 
   latestRun(taskId: string): Run | null {
-    const r = this.db.prepare('SELECT * FROM runs WHERE task_id = ? ORDER BY started_at DESC LIMIT 1').get(taskId) as Row | undefined;
+    const r = this.db.prepare("SELECT * FROM runs WHERE task_id = ? AND role = 'implement' ORDER BY started_at DESC, rowid DESC LIMIT 1").get(taskId) as Row | undefined;
     return r ? toRun(r) : null;
   }
 

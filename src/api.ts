@@ -9,6 +9,8 @@ import { revParse } from './git.ts';
 import type { Config } from './config.ts';
 import type { Supervisor } from './supervisor.ts';
 import { diskReport } from './janitor.ts';
+import { addLesson, creditLessons, lessonFromFix, lessonsFor, listLessons, markUsed, renderLessons } from './lessons.ts';
+import { coupling } from './imports.ts';
 
 /**
  * The single API surface. The hub serves it over HTTP, the CLI and MCP server call it locally or
@@ -157,10 +159,23 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
     'task.context': method(z.object({ id: Id }), (p) => {
       const task = coord.getTask(p.id);
       if (!task) throw new Error(`No task ${p.id}`);
+      const cfg = coord.configFor(task.project_id);
+      // A raced dependency is represented by whichever member won.
+      const winner = (d: Task) => (d.race_group ? coord.listTasks(d.project_id, ['done']).find((x) => x.race_group === d.race_group) ?? d : d);
+      const others = coord.activeScopes(task.project_id, task.id).map(({ task: o, scope }) => ({ id: o.id, title: o.title, scope }));
+      const graph = cfg.coupling !== 'off' ? coord.graphs.get(task.project_id) : undefined;
+      const coupled = graph && task.scope.length
+        ? others.flatMap((o) => coupling(graph, task.scope, o.scope).slice(0, 2).map((c) => `${c.mine} ${c.direction === 'imports' ? 'imports' : 'is imported by'} ${c.theirs}, which ${o.id} "${clip(o.title, 40)}" is changing`))
+        : [];
+      const lessons = cfg.learning.lessons ? lessonsFor(coord, task, cfg.learning.maxLessonsPerBrief) : [];
       return {
-        deps: coord.depsOf(task.id).filter((d) => d.status === 'done').map((d) => ({ id: d.id, title: d.title, summary: clip(d.summary, 500) })),
-        others: coord.activeScopes(task.project_id, task.id).map(({ task: o, scope }) => ({ id: o.id, title: o.title, scope })),
+        deps: coord.depsOf(task.id).map(winner).filter((d) => d.status === 'done').map((d) => ({ id: d.id, title: d.title, summary: clip(d.summary, 500) })),
+        others,
         messages: coord.inbox(task.project_id, task.id),
+        guidance: task.guidance,
+        coupling: coupled.slice(0, 6),
+        lessons: lessons.length ? renderLessons(lessons) : '',
+        lessonIds: lessons.map((l) => l.id),
       };
     }),
     'task.usage': method(z.object({ id: TaskId, costUsd: z.number().min(0), tokensIn: z.number().int().min(0), tokensOut: z.number().int().min(0) }), (p) => coord.addUsage(p.id, p.costUsd, p.tokensIn, p.tokensOut)),
@@ -252,10 +267,35 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
         }
       },
     ),
-    'run.start': method(z.object({ taskId: TaskId, machineId: Id, agent: Id, model: z.string().nullish(), logPath: z.string() }), (p) => {
+    'run.start': method(z.object({ taskId: TaskId, machineId: Id, agent: Id, model: z.string().nullish(), logPath: z.string(), role: z.enum(['implement', 'review']).default('implement'), lessons: z.array(z.string()).max(20).default([]) }), (p) => {
       const task = coord.getTask(p.taskId);
       if (!task) throw new Error(`No task ${p.taskId}`);
-      return coord.startRun(task, p.machineId, p.agent, p.model ?? null, p.logPath).id;
+      const run = coord.startRun(task, p.machineId, p.agent, p.model ?? null, p.logPath, p.role);
+      if (p.lessons.length) {
+        coord.updateRun(run.id, { lessons: p.lessons });
+        markUsed(coord, p.lessons);
+      }
+      return run.id;
+    }),
+    'lesson.add': method(z.object({ projectId: Id, text: z.string().min(12).max(1000), files: z.array(z.string()).default([]), source: z.enum(['you', 'agent', 'review', 'fix']).default('agent'), taskId: z.string().nullish() }), (p) =>
+      addLesson(coord, p.projectId, p.text, p.source, p.files, p.taskId ?? null),
+    ),
+    'lesson.list': method(z.object({ projectId: Id, all: z.boolean().default(false) }), (p) => listLessons(coord, p.projectId, p.all)),
+    'lesson.forget': method(z.object({ id: Id }), (p) => coord.db.prepare('UPDATE lessons SET disabled = 1 WHERE id = ?').run(p.id).changes),
+    /** Called by a runner when an attempt ends well: learn from what it fixed, and credit the lessons it was given. */
+    'lesson.outcome': method(z.object({ taskId: TaskId, runId: RunId, summary: z.string().max(4000), failureBefore: z.string().max(4000).nullish(), reviewIssues: z.array(z.string()).max(20).default([]) }), (p) => {
+      const task = coord.getTask(p.taskId);
+      if (!task) return null;
+      const cfg = coord.configFor(task.project_id);
+      const run = coord.getRun(p.runId);
+      creditLessons(coord, run?.lessons ?? [], task.attempts <= 1 && task.review_rounds === 0);
+      if (!cfg.learning.lessons) return null;
+      if (p.failureBefore) {
+        const text = lessonFromFix(task, p.failureBefore, p.summary);
+        if (text) addLesson(coord, task.project_id, text, 'fix', task.scope, task.id);
+      }
+      for (const issue of p.reviewIssues) addLesson(coord, task.project_id, `A reviewer flagged, and the fix was accepted: ${issue}`, 'review', task.scope, task.id);
+      return null;
     }),
     'run.update': method(z.object({ runId: RunId, patch: z.record(z.string(), z.unknown()) }), (p) => coord.updateRun(p.runId, p.patch as never)),
     'run.log': method(z.object({ runId: RunId, lines: z.array(z.string()).max(500) }), (p) => {

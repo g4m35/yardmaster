@@ -17,10 +17,10 @@ import { VERSION } from './version.ts';
 
 const INSTRUCTIONS = `Yardmaster coordinates several coding agents on one repo so they don't collide.
 - Big or parallelizable request? Split it with yard_add_tasks (give each task the files it will touch), then yard_wait.
-- Before editing shared files yourself, call yard_claim_files; release with yard_release_files when done.
-- yard_status shows what everyone is doing and anything that needs the user.`;
+- Before editing shared files yourself, call yard_claim_files (automatic when Yardmaster hooks are installed).
+- yard_status shows what everyone is doing and anything that needs the user. yard_learn saves repo knowledge for future agents.`;
 
-type Ctx = { client: Client; cwd: string; identity: string; agentName: string | null };
+type Ctx = { client: Client; cwd: string; identity: string; agentName: string | null; profile?: 'full' | 'minimal' };
 
 async function projectId(ctx: Ctx, repo?: string): Promise<{ id: string; root: string }> {
   const cwd = repo ?? ctx.cwd;
@@ -43,15 +43,16 @@ export function buildMcpServer(ctx: Ctx): McpServer {
   const repoArg = { repo: z.string().optional().describe('Path inside the repo; defaults to the current directory.') };
 
   // The SDK's overloads cannot infer through a generic schema parameter; the schema still validates every call at runtime.
-  const register = server.registerTool.bind(server) as unknown as (name: string, config: { description: string; inputSchema: z.ZodObject }, cb: (args: unknown) => Promise<unknown>) => void;
-  const tool = <S extends z.ZodObject>(name: string, description: string, schema: S, run: (args: z.infer<S>) => Promise<string>) =>
-    register(name, { description, inputSchema: schema }, async (args) => {
-      try {
-        return text(await run(args as z.infer<S>));
-      } catch (err) {
-        return fail(err);
-      }
-    });
+  const register = server.registerTool.bind(server) as unknown as (
+    name: string,
+    config: { description: string; inputSchema: z.ZodObject; annotations?: Record<string, boolean> },
+    cb: (args: unknown) => Promise<unknown>,
+  ) => void;
+  const handlers = new Map<string, { description: string; schema: z.ZodObject; run: (args: unknown) => Promise<string>; readOnly: boolean }>();
+  const READ_ONLY = new Set(['yard_status', 'yard_wait', 'yard_task', 'yard_who', 'yard_inbox']);
+  const tool = <S extends z.ZodObject>(name: string, description: string, schema: S, run: (args: z.infer<S>) => Promise<string>) => {
+    handlers.set(name, { description, schema, run: (a) => run(a as z.infer<S>), readOnly: READ_ONLY.has(name) });
+  };
 
   tool('yard_status', 'What every agent is doing on this repo, what is waiting and why, and what needs the user.', z.object(repoArg), async (a) => {
     const p = await projectId(ctx, a.repo);
@@ -142,6 +143,40 @@ export function buildMcpServer(ctx: Ctx): McpServer {
     return `${t.id} is now ${t.status}.`;
   });
 
+  tool('yard_learn', 'Record something future agents on this repo should know (a required build step, a convention, a trap). It is added to the briefing of related tasks.', z.object({ text: z.string().min(12).max(1000), files: z.array(z.string()).default([]), ...repoArg }), async (a) => {
+    const p = await projectId(ctx, a.repo);
+    const l = await ctx.client['lesson.add']({ projectId: p.id, text: a.text, files: a.files, source: 'agent', taskId: process.env.YARDMASTER_TASK_ID ?? null });
+    return l ? 'Saved. Related tasks will be briefed with it.' : 'Too short to be useful; add a bit more detail.';
+  });
+
+  if (ctx.profile === 'minimal') {
+    // One tool for clients that load every definition up front: a few hundred tokens instead of a dozen schemas.
+    const names = [...handlers.keys()].map((n) => n.replace(/^yard_/, ''));
+    register('yard', {
+      description: `Coordinate with other coding agents on this repo. action is one of: ${names.join(', ')}. input holds that action's fields, e.g. {"action":"add_tasks","input":{"tasks":[{"title":"...","files":["src/x/**"]}]}}, {"action":"wait","input":{"ids":["t-1"]}}, {"action":"claim_files","input":{"patterns":["src/a.ts"]}}.`,
+      inputSchema: z.object({ action: z.enum(names as [string, ...string[]]), input: z.record(z.string(), z.unknown()).default({}) }),
+    }, async (raw) => {
+      const { action, input } = raw as { action: string; input: Record<string, unknown> };
+      const h = handlers.get(`yard_${action}`)!;
+      const parsed = h.schema.safeParse(input);
+      if (!parsed.success) return fail(new Error(z.prettifyError(parsed.error)));
+      try {
+        return text(await h.run(parsed.data));
+      } catch (err) {
+        return fail(err);
+      }
+    });
+  } else {
+    for (const [name, h] of handlers) {
+      register(name, { description: h.description, inputSchema: h.schema, annotations: { readOnlyHint: h.readOnly, destructiveHint: false, openWorldHint: false } }, async (args) => {
+        try {
+          return text(await h.run(args));
+        } catch (err) {
+          return fail(err);
+        }
+      });
+    }
+  }
   return server;
 }
 
@@ -150,7 +185,7 @@ export async function runMcp(client: Client, opts: { cwd?: string } = {}): Promi
   const taskId = process.env.YARDMASTER_TASK_ID;
   const agentName = process.env.YARDMASTER_AGENT ?? null;
   const identity = taskId ?? `session:${process.env.YARDMASTER_SESSION ?? `${basename(cwd)}-${process.ppid}`}`;
-  const ctx: Ctx = { client, cwd, identity, agentName };
+  const ctx: Ctx = { client, cwd, identity, agentName, profile: process.env.YARDMASTER_MCP_PROFILE === 'minimal' ? 'minimal' : 'full' };
   if (!taskId) {
     const root = await mainRepoRoot(cwd).catch(() => null);
     let pid: string | null = null;

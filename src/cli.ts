@@ -20,8 +20,8 @@ import { WorkerLoop } from './worker.ts';
 import { Semaphore } from './runner.ts';
 import { httpTransport } from './transport.ts';
 import { runMcp } from './mcp.ts';
-import { applyConnect, connectPlan, installClaudeHook, selfCommand } from './connect.ts';
-import { claudePreTool } from './hook.ts';
+import { applyConnect, connectPlan, hookPlan, installHooks, installSkill, selfCommand } from './connect.ts';
+import { HOOK_EVENTS, runHook } from './hook.ts';
 import { creatorPrompt, loadPlugins, scaffoldPlugin, testPlugin } from './plugins.ts';
 import { planGoal } from './planner.ts';
 import { VERSION } from './version.ts';
@@ -63,7 +63,7 @@ function parseArgs(argv: string[]): Args {
 }
 
 const SHORT: Record<string, string> = { f: 'follow', n: 'lines', y: 'yes', j: 'json', h: 'help' };
-const BOOLEAN_FLAGS = new Set(['now', 'version', 'follow', 'yes', 'json', 'help', 'all', 'dry-run', 'foreground', 'force', 'no-changes-ok', 'watch', 'with-hook', 'no-hub', 'open']);
+const BOOLEAN_FLAGS = new Set(['with-hooks', 'no-skill', 'now', 'version', 'follow', 'yes', 'json', 'help', 'all', 'dry-run', 'foreground', 'force', 'no-changes-ok', 'watch', 'with-hook', 'no-hub', 'open']);
 
 const flag = (a: Args, k: string) => (typeof a.flags[k] === 'string' ? (a.flags[k] as string) : undefined);
 const list = (a: Args, k: string) => flag(a, k)?.split(',').map((s) => s.trim()).filter(Boolean);
@@ -152,7 +152,8 @@ const HELP = `${bold('Yardmaster')} ${VERSION}: run many coding agents at once w
 
 ${bold('Get started')}
   ym init                      set up this repo (detects your agents and test command)
-  ym connect [agent|all]       add Yardmaster tools to Claude Code, Codex, Cursor, OpenCode, Gemini
+  ym connect [agent|all]       add Yardmaster tools + skill to Claude Code, Codex, Cursor, OpenCode, Gemini
+                               (--with-hooks: zero-token coordination for Claude Code and Codex)
   ym add "what you want"       queue work (--files, --after, --agent, --tier cheap|standard|strong)
   ym plan "a bigger goal"      let an agent split a goal into parallel tasks (--yes to queue them)
   ym status                    what's happening (--watch, --all, --json)
@@ -164,6 +165,8 @@ ${bold('Manage work')}
   ym pause [--now] [--all]     stop new work from starting (--now also parks running agents)
   ym resume                    start queued work again
   ym disk                      what uses disk space and what can be freed
+  ym learn "..." [--files g]   teach every future agent something about this repo
+  ym lessons [--all]           what agents have learned here (forget <id> to retire one)
   ym land                      bring finished work into your branch (fast-forward only)
   ym clean [--yes]             remove finished worktrees/branches/locks; never unmerged work
 
@@ -240,6 +243,8 @@ async function cmdAdd(a: Args) {
       priority: flag(a, 'priority') ? Number(flag(a, 'priority')) : undefined,
       budgetUsd: flag(a, 'budget') ? Number(flag(a, 'budget')) : undefined,
       allowNoChanges: Boolean(a.flags['no-changes-ok']),
+      bestOf: flag(a, 'best-of') ? Number(flag(a, 'best-of')) : undefined,
+      review: flag(a, 'review') === 'always' || flag(a, 'review') === 'never' ? (flag(a, 'review') as 'always' | 'never') : undefined,
     }],
   });
   for (const t of res.created) console.log(green(`✔ Queued ${bold(t.id)}`) + ` ${t.title} ${dim(`[${t.tier}${t.scope.length ? `; files ${t.scope.join(', ')}` : ''}]`)}`);
@@ -329,7 +334,12 @@ async function cmdShow(a: Args) {
   if (t.last_error && t.status !== 'done') console.log(`\n${bold('Last problem')}\n${clip(t.last_error, 1500)}`);
   if (d.runs.length) {
     console.log(`\n${bold('Runs')}`);
-    for (const r of d.runs) console.log(`  #${r.attempt} ${r.agent}${r.model ? `/${r.model}` : ''} ${r.status}${r.stop_reason ? ` (${r.stop_reason})` : ''} ${formatUsd(r.cost_usd)}${r.cost_estimated ? dim(' est.') : ''} ${dim(`${ago(r.started_at)} ago on ${r.machine_id}`)}`);
+    for (const r of d.runs) {
+      const verdict = r.role === 'review' && r.verdict ? (JSON.parse(r.verdict) as { verdict: string }).verdict : null;
+      console.log(`  #${r.attempt} ${r.role === 'review' ? 'review by ' : ''}${r.agent}${r.model ? `/${r.model}` : ''} ${verdict ?? r.status}${r.stop_reason ? ` (${r.stop_reason})` : ''} ${formatUsd(r.cost_usd)}${r.cost_estimated ? dim(' est.') : ''}${r.lessons.length ? dim(` briefed with ${r.lessons.length} lesson(s)`) : ''} ${dim(`${ago(r.started_at)} ago on ${r.machine_id}`)}`);
+    }
+    if (t.policies.length) console.log(dim(`  rules applied: ${t.policies.join(', ')}`));
+    if (t.race_group) console.log(dim(`  part of a race: ${t.race_group}`));
   }
   console.log(`\n${bold('Recent events')}`);
   for (const e of d.events.slice(-12)) console.log(`  ${dim(new Date(e.ts).toLocaleTimeString())} ${e.message}`);
@@ -550,13 +560,19 @@ async function cmdConnect(a: Args) {
   const which_ = a._[1] ?? 'all';
   const agents = which_ === 'all' ? ['claude', 'codex', 'cursor', 'opencode', 'gemini'].filter((x) => x !== 'cursor' || which('cursor-agent') || existsSync(join(process.env.HOME ?? '', '.cursor'))).filter((x) => x !== 'gemini' || which('gemini')).filter((x) => x !== 'opencode' || which('opencode')) : which_.split(',');
   const steps = connectPlan(agents);
+  const withHooks = Boolean(a.flags['with-hooks'] || a.flags['with-hook']);
+  const hookTargets = (['claude', 'codex'] as const).filter((x) => agents.includes(x) && which(x));
   if (a.flags['dry-run']) {
     for (const s of steps) console.log(s.skipped ? dim(`- ${s.agent}: ${s.skipped}`) : `- ${bold(s.agent)}: ${s.action}\n    ${dim(s.command?.join(' ') ?? '')}`);
-    if (a.flags['with-hook']) console.log(`- ${bold('claude hook')}: add a PreToolUse hook to ~/.claude/settings.json that blocks edits to files other agents hold`);
+    console.log(`- ${bold('skill')}: copy the Yardmaster skill to ~/.claude/skills and ~/.agents/skills`);
+    if (withHooks) for (const t of hookTargets) console.log(`- ${bold(`${t} hooks`)}: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse in ${hookPlan(t).file}`);
     return;
   }
   for (const r of await applyConnect(steps)) console.log(r.ok ? green(`✔ ${r.step.agent}: ${r.detail || 'connected'}`) : dim(`- ${r.step.agent}: ${r.detail}`));
-  if (a.flags['with-hook']) console.log(green(`✔ claude: edit guard hook added to ${installClaudeHook()}`));
+  if (!a.flags['no-skill']) console.log(green(`✔ skill installed: ${installSkill().join(', ')}`));
+  if (withHooks) {
+    for (const t of hookTargets) console.log(green(`✔ ${t} hooks: ${installHooks(t)}`) + (t === 'codex' ? dim('  (approve them once with /hooks in Codex)') : ''));
+  } else console.log(dim('Tip: add --with-hooks for automatic file reservations and live board updates with no tool calls.'));
   console.log(dim('\nRestart open agent sessions to load the new tools. T3 Code picks these up through its Claude Code and Codex agents.'));
 }
 
@@ -573,17 +589,46 @@ async function cmdMcp(a: Args) {
 }
 
 async function cmdHook(a: Args) {
-  if (a._[1] !== 'claude-pretool') die('Unknown hook.');
+  const event = a._[1] ?? '';
+  if (![...HOOK_EVENTS, 'claude-pretool'].includes(event as never)) die(`Unknown hook "${event}". Events: ${HOOK_EVENTS.join(', ')}`);
   let stdin = '';
   for await (const chunk of process.stdin) stdin += chunk;
-  const r = await claudePreTool(stdin, async () => {
+  const r = await runHook(event, stdin, async () => {
     const remote = process.env.YARDMASTER_HUB;
     if (remote) return remoteClient(remote, process.env.YARDMASTER_TOKEN ?? hubToken());
     const url = await runningHubUrl();
     return url ? remoteClient(url, hubToken()) : null;
   });
-  if (r.message) process.stderr.write(r.message + '\n');
+  if (r.stdout) process.stdout.write(r.stdout + '\n');
+  if (r.stderr) process.stderr.write(r.stderr + '\n');
   process.exit(r.code);
+}
+
+async function cmdLearn(a: Args) {
+  const text = a._.slice(1).join(' ').trim();
+  if (text.length < 12) die('Write the lesson in a sentence, e.g. ym learn "Run npm run build before the e2e tests" --files "e2e/**"');
+  const client = await getClient(a);
+  const project = await currentProject(client);
+  const l = await client['lesson.add']({ projectId: project.id, text, files: list(a, 'files') ?? [], source: 'you' });
+  console.log(l ? green('✔ Saved. Agents working on related files will be briefed with it.') : yellow('Not saved: too short.'));
+}
+
+async function cmdLessons(a: Args) {
+  const client = await getClient(a);
+  const project = await currentProject(client);
+  if (a._[1] === 'forget') {
+    const id = a._[2] ?? die('ym lessons forget <id>');
+    await client['lesson.forget']({ id });
+    return console.log(green(`✔ ${id} will no longer be used.`));
+  }
+  const lessons = await client['lesson.list']({ projectId: project.id, all: Boolean(a.flags.all) });
+  if (a.flags.json) return console.log(JSON.stringify(lessons, null, 2));
+  if (!lessons.length) return console.log(dim('No lessons yet. They are learned from fixed failures, reviews and your redirects, or add one with ym learn "...".'));
+  const label: Record<string, string> = { you: 'you', review: 'review', fix: 'fix', agent: 'agent' };
+  for (const l of lessons) {
+    const track = l.uses ? dim(` helped ${l.wins}/${l.uses}`) : '';
+    console.log(`${bold(l.id)} ${cyan(`[${label[l.source] ?? l.source}]`)}${l.disabled ? red(' retired') : ''}${track}${l.scope.length ? dim(` ${l.scope.join(', ')}`) : ''}\n  ${l.text}`);
+  }
 }
 
 async function cmdPlugin(a: Args) {
@@ -731,6 +776,8 @@ async function main() {
     case 'pause': return cmdPause(a, true);
     case 'resume': return cmdPause(a, false);
     case 'tell': return cmdTell(a);
+    case 'learn': return cmdLearn(a);
+    case 'lessons': return cmdLessons(a);
     case 'disk': return cmdDisk(a);
     case 'service': return cmdService(a);
     case 'clean': return cmdClean(a);

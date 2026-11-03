@@ -106,22 +106,55 @@ export async function applyConnect(steps: ConnectStep[]): Promise<{ step: Connec
   return out;
 }
 
-/** Optional hard enforcement for Claude Code: a PreToolUse hook that blocks edits to files another agent holds. */
-export function claudeHookPlan(): { file: string; hook: Record<string, unknown> } {
+function hookCommand(event: string): string {
+  return [...selfCommand(), 'hook', event].map((p) => (/[\s"']/.test(p) ? `"${p.replace(/"/g, '\\"')}"` : p)).join(' ');
+}
+
+/**
+ * Hooks give zero-token coordination: a short briefing at session start, board changes before a prompt (only when
+ * something changed), automatic reservation of files the agent edits, and a guard on edits to files another agent
+ * holds. Claude Code and Codex read the same JSON shape (Codex from ~/.codex/hooks.json, approved once in /hooks).
+ */
+export function hookPlan(agent: 'claude' | 'codex'): { file: string; hooks: Record<string, unknown[]> } {
+  const edit = agent === 'claude' ? 'Edit|Write|MultiEdit|NotebookEdit' : 'Edit|Write';
+  const h = (event: string, timeout: number) => ({ type: 'command', command: hookCommand(event), timeout });
   return {
-    file: join(homedir(), '.claude', 'settings.json'),
-    hook: { matcher: 'Edit|Write|MultiEdit|NotebookEdit', hooks: [{ type: 'command', command: [...selfCommand(), 'hook', 'claude-pretool'].map((p) => (p.includes(' ') ? `"${p}"` : p)).join(' '), timeout: 10 }] },
+    file: agent === 'claude' ? join(homedir(), '.claude', 'settings.json') : join(homedir(), '.codex', 'hooks.json'),
+    hooks: {
+      SessionStart: [{ matcher: 'startup|resume|clear|compact', hooks: [h('session-start', 10)] }],
+      UserPromptSubmit: [{ hooks: [h('prompt', 5)] }],
+      PreToolUse: [{ matcher: edit, hooks: [h('pre-edit', 10)] }],
+      PostToolUse: [{ matcher: edit, hooks: [h('post-edit', 10)] }],
+    },
   };
 }
 
-export function installClaudeHook(): string {
-  const { file, hook } = claudeHookPlan();
+export function installHooks(agent: 'claude' | 'codex'): string {
+  const { file, hooks } = hookPlan(agent);
   backupAndWriteJson(file, (cfg) => {
-    const hooks = (cfg.hooks ?? {}) as Record<string, unknown[]>;
-    const pre = (hooks.PreToolUse ?? []).filter((h) => !JSON.stringify(h).includes('claude-pretool'));
-    pre.push(hook);
-    hooks.PreToolUse = pre;
-    cfg.hooks = hooks;
+    const existing = (cfg.hooks ?? {}) as Record<string, unknown[]>;
+    for (const [event, groups] of Object.entries(hooks)) {
+      // Re-running connect replaces our entries and leaves everyone else's alone.
+      const mine = /yardmaster|cli\.(js|ts)"? hook /;
+      existing[event] = [...(existing[event] ?? []).filter((g) => !mine.test(JSON.stringify(g)) || !JSON.stringify(g).includes(' hook ')), ...groups];
+    }
+    cfg.hooks = existing;
   });
   return file;
+}
+
+/** Install the Yardmaster skill where each agent discovers skills. */
+export function installSkill(): string[] {
+  const src = fileURLToPath(new URL('../skills/yardmaster/SKILL.md', import.meta.url));
+  const targets = [join(homedir(), '.claude', 'skills', 'yardmaster'), join(homedir(), '.agents', 'skills', 'yardmaster')];
+  for (const dir of targets) {
+    mkdirSync(dir, { recursive: true });
+    copyFileSync(src, join(dir, 'SKILL.md'));
+  }
+  return targets;
+}
+
+/** Kept for `ym connect --with-hook` from 0.1. */
+export function installClaudeHook(): string {
+  return installHooks('claude');
 }
