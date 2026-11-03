@@ -736,8 +736,9 @@ async function cmdDemo(a: Args) {
   const g = (args: string[]) => git(repo, args);
   await g(['init', '-q', '-b', 'main']);
   writeFileSync(join(repo, 'README.md'), '# Demo shop\n');
-  writeFileSync(join(repo, 'check.mjs'), "import { readdirSync, readFileSync } from 'node:fs';\nconst bad = readdirSync('.', { recursive: true }).filter((f) => !String(f).includes('.git') && String(f).endsWith('.js') && readFileSync(String(f), 'utf8').includes('TODO-BUG'));\nif (bad.length) { console.error('bug markers in ' + bad.join(', ')); process.exit(1); }\n");
-  writeFileSync(join(repo, PROJECT_CONFIG_FILE), JSON.stringify({ verify: ['node check.mjs'] }, null, 2));
+  // A plain shell check, so the demo works on machines without Node (the standalone binary's audience).
+  writeFileSync(join(repo, 'check.sh'), '#!/bin/sh\nif grep -rl "TODO-BUG" --include="*.js" . 2>/dev/null | grep -v "/.git/"; then echo "bug markers found" >&2; exit 1; fi\necho "checks ok"\n');
+  writeFileSync(join(repo, PROJECT_CONFIG_FILE), JSON.stringify({ verify: ['sh check.sh'] }, null, 2));
   await g(['add', '-A']);
   await g(['-c', 'user.name=Demo', '-c', 'user.email=demo@example.com', 'commit', '-qm', 'init']);
   const port = Number(flag(a, 'port') ?? 7788);
