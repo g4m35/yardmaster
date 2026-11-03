@@ -131,14 +131,21 @@ export function hookPlan(agent: 'claude' | 'codex'): { file: string; hooks: Reco
   };
 }
 
+const OUR_HOOK = /(?:^|[\s"'])(?:\S*yardmaster\S*|\S*cli\.(?:js|ts)"?|\S*\/ym"?|ym)\s+hook\s+(?:session-start|prompt|pre-edit|post-edit|claude-pretool)"?\s*$/;
+
+/** A hook group is ours if every command in it is a Yardmaster hook command (npm, source, or standalone install). */
+export function isOurHookGroup(group: unknown): boolean {
+  const hooks = (group as { hooks?: { command?: unknown }[] })?.hooks;
+  return Array.isArray(hooks) && hooks.length > 0 && hooks.every((h) => typeof h.command === 'string' && OUR_HOOK.test(h.command));
+}
+
 export function installHooks(agent: 'claude' | 'codex'): string {
   const { file, hooks } = hookPlan(agent);
   backupAndWriteJson(file, (cfg) => {
     const existing = (cfg.hooks ?? {}) as Record<string, unknown[]>;
     for (const [event, groups] of Object.entries(hooks)) {
       // Re-running connect replaces our entries and leaves everyone else's alone.
-      const mine = /yardmaster|cli\.(js|ts)"? hook /;
-      existing[event] = [...(existing[event] ?? []).filter((g) => !mine.test(JSON.stringify(g)) || !JSON.stringify(g).includes(' hook ')), ...groups];
+      existing[event] = [...(existing[event] ?? []).filter((g) => !isOurHookGroup(g)), ...groups];
     }
     cfg.hooks = existing;
   });

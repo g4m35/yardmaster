@@ -31,4 +31,4 @@ jobs:
           cache: npm
       - run: npm ci
       - run: node scripts/build-binary.mjs
-      - run: release/yardmaster-linux-x64 --version && release/yardmaster-linux-x64 help > /dev/null
+      - run: sh scripts/smoke-binary.sh release/yardmaster-linux-x64

@@ -33,7 +33,8 @@ writeFileSync(join(work, 'sea-config.json'), JSON.stringify({
   main: join(work, 'yardmaster.cjs'),
   output: blob,
   disableExperimentalSEAWarning: true,
-  useCodeCache: true,
+  // Off: Node documents that import() (used for plugins) does not work in code-cached SEAs.
+  useCodeCache: false,
   execArgv: ['--no-warnings'],
   assets: { 'dashboard.html': 'src/dashboard/index.html', 'SKILL.md': 'skills/yardmaster/SKILL.md' },
 }));

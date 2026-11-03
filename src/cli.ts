@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
-import { closeSync, existsSync, openSync, readFileSync, statfsSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, statfsSync, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
-import { hostname, networkInterfaces } from 'node:os';
+import { createInterface as createLineReader } from 'node:readline';
+import { hostname, networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildMethods, localClient, remoteClient, type Client } from './api.ts';
 import { Coordinator } from './coordinator.ts';
@@ -25,6 +26,7 @@ import { HOOK_EVENTS, runHook } from './hook.ts';
 import { creatorPrompt, loadPlugins, scaffoldPlugin, testPlugin } from './plugins.ts';
 import { planGoal } from './planner.ts';
 import { VERSION } from './version.ts';
+import { serviceFiles, installService, uninstallService } from './service.ts';
 import { inSea } from './assets.ts';
 import { runMockAgent } from './mockagent.ts';
 import { TIERS } from './config.ts';
@@ -406,7 +408,6 @@ async function cmdDisk(a: Args) {
 }
 
 async function cmdService(a: Args) {
-  const { serviceFiles, installService, uninstallService } = await import('./service.ts');
   const sub = a._[1] ?? 'status';
   const files = serviceFiles(flag(a, 'host'), flag(a, 'port'));
   if (sub === 'install') {
@@ -665,7 +666,7 @@ async function cmdPlugin(a: Args) {
     const spec = adapter.build({ prompt: creatorPrompt(name, kind, describe), cwd: dir, model: null, settings: { enabled: true, models: {}, maxParallel: 1, extraArgs: [], autonomy: 'workspace' } });
     const child = spawn(spec.command, spec.args, { cwd: dir, stdio: [spec.stdin !== undefined ? 'pipe' : 'ignore', 'pipe', 'inherit'], env: process.env });
     if (spec.stdin !== undefined) child.stdin?.end(spec.stdin);
-    const rl = (await import('node:readline')).createInterface({ input: child.stdout! });
+    const rl = createLineReader({ input: child.stdout! });
     rl.on('line', (line) => {
       for (const ev of adapter.parse(line)) if (ev.type === 'tool') console.log(dim(`  · ${ev.name}`));
     });
@@ -725,8 +726,6 @@ async function cmdDashboard(a: Args) {
 
 /** An isolated sandbox with a fake agent, so anyone can see how Yardmaster behaves without spending tokens. */
 async function cmdDemo(a: Args) {
-  const { mkdtempSync, writeFileSync, mkdirSync, realpathSync } = await import('node:fs');
-  const { tmpdir } = await import('node:os');
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'yardmaster-demo-')));
   process.env.YARDMASTER_HOME = join(base, 'home');
   process.env.YARDMASTER_ENABLE_MOCK = '1';

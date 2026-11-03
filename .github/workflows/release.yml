@@ -30,10 +30,7 @@ jobs:
       - run: npm ci
       - run: node scripts/build-binary.mjs
       - name: Smoke test the binary
-        run: |
-          bin=$(ls release/yardmaster-* | grep -v sha256)
-          "$bin" --version
-          "$bin" help > /dev/null
+        run: sh scripts/smoke-binary.sh "$(ls release/yardmaster-* | grep -v sha256)"
       - uses: actions/upload-artifact@v4
         with:
           name: bin-${{ matrix.os }}

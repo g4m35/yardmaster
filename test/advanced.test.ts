@@ -231,6 +231,14 @@ test('connect installs hooks and the skill without disturbing existing settings'
     assert.equal(cfg.hooks.PreToolUse.length, 2, 'user hook kept, ours added once');
     assert.ok(JSON.stringify(cfg.hooks.PreToolUse).includes('my-guard.sh'));
     for (const ev of ['SessionStart', 'UserPromptSubmit', 'PostToolUse']) assert.equal(cfg.hooks[ev].length, 1);
+    // A standalone install (~/.local/bin/ym) must be recognized too, or reconnecting would duplicate hooks.
+    const { isOurHookGroup } = await import('../src/connect.ts');
+    for (const cmd of ['/home/a/.local/bin/ym hook session-start', 'ym hook prompt', '"/Users/x/My Tools/node" "/Users/x/lib/node_modules/yardmaster/dist/cli.js" hook pre-edit', '/usr/bin/node /src/cli.ts hook post-edit']) {
+      assert.ok(isOurHookGroup({ hooks: [{ type: 'command', command: cmd }] }), cmd);
+    }
+    for (const cmd of ['my-guard.sh', '~/.claude/hooks/secret-scan.sh', 'echo hook prompt-check', 'ym-other hook prompt']) {
+      assert.ok(!isOurHookGroup({ hooks: [{ type: 'command', command: cmd }] }), cmd);
+    }
     installHooks('codex');
     assert.ok(existsSync(join(home, '.codex', 'hooks.json')));
     const dirs = installSkill();
