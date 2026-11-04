@@ -1,0 +1,32 @@
+name: Yardmaster CI guard
+description: Skip a workflow's heavy jobs when this exact file tree already passed it, and record what passed.
+author: Yardmaster
+branding:
+  icon: fast-forward
+  color: green
+inputs:
+  mode:
+    description: '"check" (decide whether to skip; read the "skip" output) or "record" (after the jobs pass, note which tree passed).'
+    default: check
+  token:
+    description: Token for the GitHub API. The default job token is enough; see docs/CI.md for the permissions block.
+    default: ${{ github.token }}
+  trust-local:
+    description: Also skip when "ym ci signoff" reported that local checks passed for this exact tree (posted by someone with write access).
+    default: 'false'
+  trusted-users:
+    description: Optional comma-separated logins whose signoffs count. Empty means anyone with write access.
+    default: ''
+  wait-seconds:
+    description: With trust-local, how long to wait for a signoff that's still on its way.
+    default: '20'
+outputs:
+  skip:
+    description: '"true" when the heavy jobs can be skipped.'
+  reason:
+    description: Why.
+  tree:
+    description: The git tree hash this run tests.
+runs:
+  using: node24
+  main: action/index.mjs

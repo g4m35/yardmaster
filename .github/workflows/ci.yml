@@ -3,14 +3,33 @@ on:
   push:
     branches: [main]
   pull_request:
+concurrency:
+  group: ci-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+permissions:
+  contents: read
 jobs:
+  # Yardmaster's own CI guard (this repo's action, so pull requests test their own changes to it).
+  guard:
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    permissions: { actions: read, contents: read, pull-requests: read, statuses: read }
+    outputs:
+      skip: ${{ steps.guard.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: guard
+        uses: ./
   test:
+    needs: guard
+    if: needs.guard.outputs.skip != 'true'
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
         node: [22, 24]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -22,7 +41,10 @@ jobs:
       - run: npm run build
       - run: npm test
   binary:
+    needs: guard
+    if: needs.guard.outputs.skip != 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -32,3 +54,12 @@ jobs:
       - run: npm ci
       - run: node scripts/build-binary.mjs
       - run: sh scripts/smoke-binary.sh release/yardmaster-linux-x64
+  record:
+    needs: [test, binary]
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    permissions: { contents: read, statuses: write }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./
+        with: { mode: record }

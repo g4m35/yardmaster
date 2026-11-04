@@ -6,7 +6,8 @@ import { getAdapter } from './adapters/index.ts';
 import type { AgentEvent } from './adapters/types.ts';
 import { agentSettings, priceFor, type Config, worktreeRootOf } from './config.ts';
 import { paths } from './paths.ts';
-import { addWorktree, branchExists, changedFiles, commitAll, conflictedFiles, git, hasConflictMarkers, isAncestor, isLinkedWorktreeOf, revParse } from './git.ts';
+import { addWorktree, branchExists, changedFiles, commitAll, conflictedFiles, git, hasConflictMarkers, isAncestor, isClean, isLinkedWorktreeOf, revParse } from './git.ts';
+import { rememberChecked } from './ci/verified.ts';
 import { cleanEnv, killGroup, processStartTime, runShell } from './proc.ts';
 import { escalate } from './router.ts';
 import { inScope, matches } from './scope.ts';
@@ -505,6 +506,7 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
       return retryOrStop(ctx, totals, `Checks failed (\`${result.command}\`):\n${tail(result.output, 40, 2500)}`, errorFingerprint(result.output));
     }
     log.push('verify passed');
+    if (head && (await isClean(wt))) await rememberChecked(wt, head, commands);
   } else {
     await event(ctx, 'warn', 'task.unverified', 'No checks are configured, so this work was not tested. Add "verify" commands to yardmaster.json.');
   }

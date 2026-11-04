@@ -30,6 +30,8 @@ import { serviceFiles, installService, uninstallService } from './service.ts';
 import { inSea } from './assets.ts';
 import { runMockAgent } from './mockagent.ts';
 import { TIERS } from './config.ts';
+import { detectVerify } from './detect.ts';
+import { runCi } from './ci/cli.ts';
 
 // ---------- tiny argument parser ----------
 
@@ -67,7 +69,7 @@ function parseArgs(argv: string[]): Args {
 }
 
 const SHORT: Record<string, string> = { f: 'follow', n: 'lines', y: 'yes', j: 'json', h: 'help' };
-const BOOLEAN_FLAGS = new Set(['with-hooks', 'no-skill', 'now', 'version', 'follow', 'yes', 'json', 'help', 'all', 'dry-run', 'foreground', 'force', 'no-changes-ok', 'watch', 'with-hook', 'no-hub', 'open']);
+const BOOLEAN_FLAGS = new Set(['with-hooks', 'no-skill', 'now', 'version', 'follow', 'yes', 'json', 'help', 'all', 'dry-run', 'foreground', 'force', 'no-changes-ok', 'watch', 'with-hook', 'no-hub', 'open', 'draft', 'quiet', 'hooks-path']);
 
 const flag = (a: Args, k: string) => (typeof a.flags[k] === 'string' ? (a.flags[k] as string) : undefined);
 const list = (a: Args, k: string) => flag(a, k)?.split(',').map((s) => s.trim()).filter(Boolean);
@@ -174,6 +176,11 @@ ${bold('Manage work')}
   ym land                      bring finished work into your branch (fast-forward only)
   ym clean [--yes]             remove finished worktrees/branches/locks; never unmerged work
 
+${bold('CI costs')} (GitHub Actions)
+  ym ci audit [owner/repo]     where your Actions minutes went and what to fix (--owner, --days)
+  ym ci init                   push gate: checks before push, once per file tree; prints the workflow guard
+  ym ci budget | status | ship push finished agent work as one PR (ym ci help for all)
+
 ${bold('Machines')}
   ym hub start|stop|status|run [--host 0.0.0.0] [--port 7777]
   ym service install|uninstall keep the hub running across crashes and reboots
@@ -203,26 +210,6 @@ async function cmdInit(a: Args) {
   console.log(green(`✔ ${project.name} is ready`) + dim(` (base branch ${project.base_branch}, id ${project.id})`));
   console.log(agents.length ? `Agents found: ${agents.map((x) => bold(x)).join(', ')}` : yellow('No coding agents found on PATH. Install Claude Code, Codex, OpenCode, Cursor CLI or Gemini CLI.'));
   console.log(`\nNext:\n  ${cyan('ym connect all')}      so your agents can use Yardmaster from where you already work\n  ${cyan('ym add "..."')}        or ask your agent to "split this into parallel tasks with yardmaster"`);
-}
-
-function detectVerify(root: string): string[] {
-  const pkg = join(root, 'package.json');
-  if (existsSync(pkg)) {
-    try {
-      const scripts = (JSON.parse(readFileSync(pkg, 'utf8')) as { scripts?: Record<string, string> }).scripts ?? {};
-      const runner = existsSync(join(root, 'pnpm-lock.yaml')) ? 'pnpm' : existsSync(join(root, 'yarn.lock')) ? 'yarn' : existsSync(join(root, 'bun.lock')) || existsSync(join(root, 'bun.lockb')) ? 'bun' : 'npm';
-      const out: string[] = [];
-      if (scripts.typecheck) out.push(`${runner} run typecheck`);
-      if (scripts.test && !/no test specified/.test(scripts.test)) out.push(`${runner} test`);
-      if (out.length) return out;
-    } catch {
-      // unreadable package.json: fall through
-    }
-  }
-  if (existsSync(join(root, 'Cargo.toml'))) return ['cargo test'];
-  if (existsSync(join(root, 'go.mod'))) return ['go test ./...'];
-  if (existsSync(join(root, 'pyproject.toml')) || existsSync(join(root, 'pytest.ini'))) return [which('uv') ? 'uv run pytest' : 'pytest'];
-  return [];
 }
 
 async function cmdAdd(a: Args) {
@@ -798,6 +785,7 @@ async function main() {
     case 'presets': return cmdPresets();
     case 'dashboard': return cmdDashboard(a);
     case 'demo': return cmdDemo(a);
+    case 'ci': return runCi(a._[1], { positional: a._.slice(2), flag: (k) => flag(a, k), has: (k) => a.flags[k] !== undefined }, { bold, dim, red, green, yellow, cyan });
     case 'version': case '--version': return console.log(VERSION);
     default: die(`Unknown command "${cmd}". Run "ym help".`);
   }
