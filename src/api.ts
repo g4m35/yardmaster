@@ -10,7 +10,7 @@ import type { Config } from './config.ts';
 import type { Supervisor } from './supervisor.ts';
 import { diskReport } from './janitor.ts';
 import { addLesson, creditLessons, lessonFromFix, lessonsFor, listLessons, markUsed, renderLessons } from './lessons.ts';
-import { coupling } from './imports.ts';
+import { coupling, filesIn } from './imports.ts';
 
 /**
  * The single API surface. The hub serves it over HTTP, the CLI and MCP server call it locally or
@@ -49,6 +49,10 @@ function attentionItems(coord: Coordinator, tasks: Task[]) {
 }
 
 export function boardSummary(coord: Coordinator, projectId?: string | null, supervisor?: Supervisor) {
+  return coord.pass(() => boardSummaryInPass(coord, projectId, supervisor));
+}
+
+function boardSummaryInPass(coord: Coordinator, projectId?: string | null, supervisor?: Supervisor) {
   const tasks = coord.listTasks(projectId ?? null);
   const counts: Record<string, number> = {};
   for (const t of tasks) counts[t.status] = (counts[t.status] ?? 0) + 1;
@@ -168,6 +172,15 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
         ? others.flatMap((o) => coupling(graph, task.scope, o.scope).slice(0, 2).map((c) => `${c.mine} ${c.direction === 'imports' ? 'imports' : 'is imported by'} ${c.theirs}, which ${o.id} "${clip(o.title, 40)}" is changing`))
         : [];
       const lessons = cfg.learning.lessons ? lessonsFor(coord, task, cfg.learning.maxLessonsPerBrief) : [];
+      // A small map of how the owned files connect to the rest of the code, so the agent spends fewer steps exploring.
+      const fullGraph = coord.graphs.get(task.project_id);
+      const map = fullGraph && task.scope.length
+        ? filesIn(fullGraph, task.scope).slice(0, 8).map((f) => {
+            const uses = [...(fullGraph.deps.get(f) ?? [])].slice(0, 5);
+            const usedBy = [...(fullGraph.rdeps.get(f) ?? [])].slice(0, 5);
+            return `${f}${uses.length ? ` imports ${uses.join(', ')}` : ''}${usedBy.length ? `${uses.length ? ';' : ''} used by ${usedBy.join(', ')}` : ''}`;
+          }).filter((l) => l.includes(' '))
+        : [];
       return {
         deps: coord.depsOf(task.id).map(winner).filter((d) => d.status === 'done').map((d) => ({ id: d.id, title: d.title, summary: clip(d.summary, 500) })),
         others,
@@ -176,6 +189,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
         coupling: coupled.slice(0, 6),
         lessons: lessons.length ? renderLessons(lessons) : '',
         lessonIds: lessons.map((l) => l.id),
+        map,
       };
     }),
     'task.usage': method(z.object({ id: TaskId, costUsd: z.number().min(0), tokensIn: z.number().int().min(0), tokensOut: z.number().int().min(0) }), (p) => coord.addUsage(p.id, p.costUsd, p.tokensIn, p.tokensOut)),
@@ -196,6 +210,18 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       }
     }),
 
+    // One round trip per hook (hooks run on every prompt and edit, so they must be cheap).
+    'hook.check': method(z.object({ projectId: Id, paths: z.array(z.string()).min(1).max(50), cwd: z.string(), sessionId: Id }), (p) => {
+      const holders = coord.whoHas(p.projectId, p.paths);
+      if (!holders.length) return null;
+      const mine = new Set(coord.listSessions(p.projectId).filter((x) => x.cwd === p.cwd).map((x) => x.id));
+      mine.add(p.sessionId);
+      return holders.find((h) => !mine.has(h.holder)) ?? null;
+    }),
+    'hook.reserve': method(z.object({ projectId: Id, sessionName: Id, cwd: z.string(), paths: z.array(z.string()).min(1).max(50), machineId: z.string().nullish() }), (p) => {
+      const sessionId = coord.registerSession(p.sessionName, 'hooked-agent', p.projectId, p.cwd, p.machineId ?? null);
+      return coord.claimLocks(p.projectId, sessionId, p.paths, 'edited in an interactive session', 20);
+    }),
     'board.status': method(z.object({ projectId: z.string().nullish() }), (p) => boardSummary(coord, p.projectId, hooks.supervisor)),
     'board.text': method(z.object({ projectId: z.string().nullish() }), (p) => boardText(coord, p.projectId, hooks.supervisor)),
     'fleet.pause': method(z.object({ projectId: z.string().nullish(), stopRunning: z.boolean().default(false), by: z.string().default('you') }), (p) => {
@@ -334,18 +360,4 @@ export function localClient(methods: Methods): Client {
   });
 }
 
-export function remoteClient(baseUrl: string, token: string): Client {
-  const url = baseUrl.replace(/\/$/, '');
-  return new Proxy({} as Client, {
-    get: (_t, name: string) => name === 'then' ? undefined : async (params: unknown) => {
-      const res = await fetch(`${url}/api/rpc/${name}`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-        body: JSON.stringify(params ?? {}),
-      });
-      const body = (await res.json()) as { ok: boolean; result?: unknown; error?: string };
-      if (!body.ok) throw new Error(body.error ?? `Hub returned ${res.status}`);
-      return body.result;
-    },
-  });
-}
+export { remoteClient } from './rpc.ts';

@@ -23,6 +23,8 @@ export const paths = {
   globalConfig: () => join(yardHome(), 'config.json'),
   hubInfo: () => join(yardHome(), 'hub.json'),
   hubLog: () => join(yardHome(), 'hub.log'),
+  /** One managed repo root per line; lets hook guards skip unmanaged folders without starting Node. */
+  managedRoots: () => join(yardHome(), 'roots'),
 };
 
 function ensureDir(p: string): string {

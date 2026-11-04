@@ -16,6 +16,7 @@ import { Watchdog, type Verdict } from './watchdog.ts';
 import type { Client } from './api.ts';
 import type { TaskPatch } from './coordinator.ts';
 import { changedLineCount, formatIssues, runReview, shouldReview } from './review.ts';
+import { warmStart } from './warmstart.ts';
 
 export class Semaphore {
   private queue: (() => void)[] = [];
@@ -78,14 +79,42 @@ function verifyCommands(task: Task, config: Config): string[] {
   return task.verify ?? config.verify;
 }
 
-function buildPrompt(ctx: RunContext, extra: { deps: { id: string; title: string; summary: string }[]; others: { id: string; title: string; scope: string[] }[]; messages: { from: string; body: string }[]; conflicts: string[]; guidance?: string | null; coupling?: string[]; lessons?: string }): string {
+function shellQuote(s: string): string {
+  return /^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/** The checks a task runs on itself: quick, change-scoped ones when configured, otherwise the full list. */
+export function taskChecks(task: Task, config: Config, files: string[]): string[] {
+  // Quick checks are only safe when the full suite runs later, at merge time.
+  if (task.verify || !config.verifyQuick.length || config.integration.mode === 'none') return verifyCommands(task, config);
+  const list = files.map(shellQuote).join(' ');
+  return config.verifyQuick.filter((c) => !c.includes('{files}') || files.length).map((c) => c.replaceAll('{files}', list));
+}
+
+/**
+ * The brief is ordered from most stable to most specific: the fixed rules first (identical for every task, so model
+ * providers can cache that opening across tasks and retries), then the task, then what's happening around it.
+ */
+function buildPrompt(ctx: RunContext, extra: { deps: { id: string; title: string; summary: string }[]; others: { id: string; title: string; scope: string[] }[]; messages: { from: string; body: string }[]; conflicts: string[]; guidance?: string | null; coupling?: string[]; lessons?: string; map?: string[] }): string {
   const { task, config } = ctx;
   const parts: string[] = [];
-  parts.push(`You are working on one task in an isolated git worktree managed by Yardmaster (task ${task.id}). Other agents may be working on other tasks in parallel.`);
-  parts.push(`## Task\n${task.title}\n\n${task.prompt !== task.title ? task.prompt : ''}`.trim());
+  parts.push(
+    [
+      'You are working on one task in an isolated git worktree managed by Yardmaster. Other agents may be working on other tasks in parallel.',
+      '## Rules',
+      '- Do not push, switch branches, or run destructive git commands (reset --hard, clean, checkout of other branches). Yardmaster commits your work for you.',
+      '- Do not ask questions; nobody is watching this session. If information is missing, make a reasonable choice and note it.',
+      '- Stay focused on the task: read what you need, change what it requires, and stop.',
+      '- End with a short summary (1-3 sentences) of what you changed.',
+    ].join('\n'),
+  );
+  parts.push(`## Task (${task.id})\n${task.title}\n\n${task.prompt !== task.title ? task.prompt : ''}`.trim());
+  const verify = verifyCommands(task, config);
+  parts.push(verify.length ? `## Done means\nThese pass: ${verify.map((v) => `\`${v}\``).join(', ')}.` : '## Done means\nYour change works; check it runs before finishing.');
   if (task.scope.length) {
     parts.push(`## Files you own\n${task.scope.join(', ')}\nKeep your changes inside these. If something outside them must change, keep it minimal and say why in your final message.`);
   }
+  if (extra.map?.length) parts.push(`## Where things are (from the import graph)\n${extra.map.map((m) => `- ${m}`).join('\n')}`);
   const others = extra.others.filter((o) => o.scope.length);
   if (others.length) {
     parts.push(`## Do not edit (other agents are changing these right now)\n${others.map((o) => `- ${o.scope.join(', ')} (${o.id} "${clip(o.title, 50)}")`).join('\n')}`);
@@ -105,16 +134,6 @@ function buildPrompt(ctx: RunContext, extra: { deps: { id: string; title: string
     parts.push(`## First: resolve merge conflicts\nThe latest merged work was combined into your branch and these files have conflict markers: ${extra.conflicts.join(', ')}. Resolve them, keeping both sides' intent, before continuing.`);
   }
   if (task.retry_note) parts.push(`## Notes from the previous attempt or the person supervising\n${task.retry_note}\nYour earlier changes (if any) are still in this worktree. Build on them rather than starting over.`);
-  const verify = verifyCommands(task, config);
-  parts.push(
-    [
-      '## Rules',
-      verify.length ? `- Before finishing, make sure these pass: ${verify.map((v) => `\`${v}\``).join(', ')}.` : '- Check your work runs before finishing.',
-      '- Do not push, switch branches, or run destructive git commands (reset --hard, clean, checkout of other branches). Yardmaster commits your work for you.',
-      '- Do not ask questions; nobody is watching this session. If information is missing, make a reasonable choice and note it.',
-      '- End with a short summary (1-3 sentences) of what you changed.',
-    ].join('\n'),
-  );
   return parts.join('\n\n');
 }
 
@@ -187,8 +206,10 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   const branch = task.branch ?? `yardmaster/${task.id}`;
   let baseSha = task.base_sha;
   const conflicts: string[] = [];
+  let freshWorktree = false;
   try {
     if (!existsSync(wt)) {
+      freshWorktree = true;
       const hadBranch = await branchExists(ctx.repoPath, branch);
       await addWorktree(ctx.repoPath, wt, branch, ctx.startPoint);
       if (hadBranch) {
@@ -207,6 +228,18 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
     return finishNeedsHuman(ctx, `Could not prepare a git worktree: ${(err as Error).message}`);
   }
   await update(ctx, { worktree: wt, branch, base_sha: baseSha, pending_rebase: false });
+  // Fresh worktree: bring over installed dependencies and run setup, so the agent starts on the actual task.
+  if (freshWorktree) {
+    const warm = await warmStart(ctx.repoPath, wt, config).catch((err: Error) => ({ cloned: [], skipped: [{ rel: '*', why: err.message }], copied: [], ms: 0 }));
+    if (warm.cloned.length || warm.copied.length) {
+      await event(ctx, 'info', 'task.warm_start', `Ready in ${(warm.ms / 1000).toFixed(1)}s with ${[...warm.cloned.map((c) => c.rel), ...warm.copied].join(', ')} from your checkout (no reinstall needed)`);
+    }
+    for (const sk of warm.skipped) await event(ctx, 'info', 'task.warm_start_skipped', `Didn't bring over ${sk.rel}: ${sk.why}`);
+    for (const command of config.worktree.setup) {
+      const r = await runShell(command, { cwd: wt, timeoutMs: config.verifyTimeoutMinutes * 60_000 });
+      if (r.code !== 0) return finishNeedsHuman(ctx, `Worktree setup \`${command}\` failed:\n${tail(r.stdout, 20, 1500)}`);
+    }
+  }
 
   const context = await api['task.context']({ id: task.id });
   const prompt = buildPrompt(ctx, { ...context, conflicts });
@@ -460,7 +493,7 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   if (hot.length) await event(ctx, 'info', 'task.hotfiles', `Touches shared files (${hot.join(', ')}); it will be merged on its own.`);
 
   // ---- verify: "done" is measured, not claimed ----
-  const commands = verifyCommands(task, config);
+  const commands = taskChecks(task, config, files);
   const head = await revParse(wt, 'HEAD');
   await update(ctx, { status: 'verifying', head_sha: head, summary });
   if (commands.length) {
@@ -527,7 +560,9 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   const needsApproval = (config.integration.requireApproval || task.needs_approval) && !task.approved;
   await update(ctx, {
     status: 'ready', ready_at: Date.now(), head_sha: head, summary: clip(summary + reviewNote, 1500), attention: needsApproval ? 'Waiting for your approval to merge' : null,
-    last_error: null, error_fp: null, same_error_count: 0, retry_note: null, lease_until: null,
+    retry_note: null, lease_until: null,
+    // A failure that only shows up at merge time is kept on record, so a repeat of it stops early.
+    ...(task.error_fp?.startsWith('merge:') ? {} : { last_error: null, error_fp: null, same_error_count: 0 }),
   });
   await event(ctx, 'success', 'task.ready', `"${task.title}" passed checks (${files.length} file${files.length === 1 ? '' : 's'} changed, ${formatUsd(task.cost_usd + cost)})${needsApproval ? '. Waiting for your approval to merge.' : ''}`);
   return { status: 'ready', message: summary };

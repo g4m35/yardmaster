@@ -204,7 +204,8 @@ export class Integrator {
       }
       return this.onConflict(project, task, config, files);
     }
-    const baseMoved = !task.base_sha || task.base_sha !== before;
+    // Quick per-task checks mean the full suite hasn't run on this change yet, so run it now.
+    const baseMoved = !task.base_sha || task.base_sha !== before || (!task.verify && config.verifyQuick.length > 0);
     const commands = task.verify ?? config.verify;
     if (baseMoved && commands.length) {
       this.coord.event(project.id, task.id, 'info', 'integration.reverify', `Re-checking "${task.title}" combined with work merged since it started`);
@@ -212,7 +213,8 @@ export class Integrator {
       if (!result.ok) {
         await git(path, ['reset', '--hard', before]);
         this.coord.setMeta(`integrating:${project.id}`, null);
-        const fp = errorFingerprint(result.output);
+        // "merge:" marks failures that only appear when combined, so passing alone doesn't reset the count.
+        const fp = `merge:${errorFingerprint(result.output)}`;
         const same = task.error_fp === fp ? task.same_error_count + 1 : 1;
         const giveUp = same >= config.retry.sameFailureLimit || task.attempts >= task.max_attempts;
         const note = `After combining with the latest merged work, checks failed (\`${result.command}\`):\n${tail(result.output, 40, 2500)}`;
@@ -247,7 +249,7 @@ export class Integrator {
     if (!ensured) return true;
     const { path, head: before } = ensured;
     const fresh = train.map((t) => this.coord.getTask(t.id)).filter((t): t is Task => !!t && t.status === 'ready' && !!t.head_sha);
-    const needsCheck = fresh.filter((t) => t.base_sha !== before);
+    const needsCheck = fresh.filter((t) => t.base_sha !== before || config.verifyQuick.length > 0);
     if (fresh.length < 2 || needsCheck.length < 2 || !config.verify.length) return false;
     this.coord.setMeta(`integrating:${project.id}`, before);
     for (const t of fresh) this.coord.updateTask(t.id, { status: 'merging' });

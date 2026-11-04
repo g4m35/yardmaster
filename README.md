@@ -182,6 +182,10 @@ ym hub restart
 
 Notifier plugins can send updates to Slack, ntfy, or a webhook. See `~/.yardmaster/plugins/<name>/PLUGIN_GUIDE.md`.
 
+## Speed
+
+Yardmaster stays out of your agents' way. Its hooks cost about 3 to 5 ms when there's nothing to do and about 47 ms in a managed repo. Background agents start with your dependencies already in place, and dependent tasks start the moment the previous one merges. The measurements are in [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+
 ## How it works
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). For the research behind it (Gas Town, Symphony, Overstory, OpenWeft, DeepSeek Harness, and real developer complaints), see [docs/RESEARCH.md](docs/RESEARCH.md).

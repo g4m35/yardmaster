@@ -21,6 +21,8 @@ import {
 } from './types.ts';
 import { defaultBranch, mainRepoRoot, projectIdFor } from './git.ts';
 import { basename } from 'node:path';
+import { writeFileSync } from 'node:fs';
+import { paths } from './paths.ts';
 
 type Row = Record<string, unknown>;
 
@@ -93,6 +95,47 @@ export class Coordinator {
     this.db = db;
   }
 
+  /**
+   * Called after any change that could let work move (a task changed state, work was added, a reservation was
+   * released). The hub uses it to schedule and merge immediately instead of waiting for its next timer tick.
+   */
+  onChange: (() => void) | null = null;
+
+  private changed(): void {
+    this.onChange?.();
+  }
+
+  // ---------- per-pass read cache ----------
+  //
+  // A scheduling pass or a board read asks the same questions once per queued task (what's active, what's locked,
+  // what's been spent). Within one pass the answers can't change except through our own writes, so they are
+  // computed once; any write clears the cache.
+
+  private passMemo: Map<string, unknown> | null = null;
+
+  pass<T>(fn: () => T): T {
+    if (this.passMemo) return fn();
+    this.passMemo = new Map();
+    try {
+      return fn();
+    } finally {
+      this.passMemo = null;
+    }
+  }
+
+  private memo<T>(key: string, fn: () => T): T {
+    const m = this.passMemo;
+    if (!m) return fn();
+    if (m.has(key)) return m.get(key) as T;
+    const v = fn();
+    m.set(key, v);
+    return v;
+  }
+
+  private invalidate(): void {
+    this.passMemo?.clear();
+  }
+
   // ---------- config ----------
 
   configFor(projectId: string): Config {
@@ -118,7 +161,12 @@ export class Coordinator {
     const project: Project = { id, name: basename(root), root, base_branch: base, created_at: Date.now() };
     this.db.prepare('INSERT INTO projects (id, name, root, base_branch, created_at) VALUES (?, ?, ?, ?, ?)').run(id, project.name, root, base, project.created_at);
     this.event(id, null, 'info', 'project.registered', `Project "${project.name}" is now managed by Yardmaster`);
+    this.writeManagedRoots();
     return project;
+  }
+
+  writeManagedRoots(): void {
+    writeFileSync(paths.managedRoots(), this.listProjects().map((p) => p.root).join('\n') + '\n');
   }
 
   getProject(id: string): Project | null {
@@ -230,6 +278,7 @@ export class Coordinator {
       }
       for (const v of raceVariants) created.push(this.getTask(v.id)!);
       for (const d of duplicates) this.event(projectId, d.existing, 'warn', 'task.duplicate', `Skipped "${d.title}": it duplicates ${d.existing} "${d.existingTitle}"`);
+      if (created.length) this.changed();
       return { created, duplicates };
     });
   }
@@ -244,7 +293,7 @@ export class Coordinator {
 
   /** A dependency on a raced task is satisfied as soon as any member of the race is done. */
   depState(dep: Task): 'done' | 'dead' | 'pending' {
-    const group = dep.race_group ? this.listTasks(dep.project_id).filter((t) => t.race_group === dep.race_group) : [dep];
+    const group = dep.race_group ? this.memo(`tasks:${dep.project_id}`, () => this.listTasks(dep.project_id)).filter((t) => t.race_group === dep.race_group) : [dep];
     if (group.some((t) => t.status === 'done')) return 'done';
     if (group.every((t) => t.status === 'failed' || t.status === 'canceled')) return 'dead';
     return 'pending';
@@ -298,8 +347,16 @@ export class Coordinator {
   }
 
   depsOf(taskId: string): Task[] {
-    const rows = this.db.prepare('SELECT t.* FROM deps d JOIN tasks t ON t.id = d.depends_on WHERE d.task_id = ?').all(taskId) as Row[];
-    return rows.map(toTask);
+    if (!this.passMemo) return (this.db.prepare('SELECT t.* FROM deps d JOIN tasks t ON t.id = d.depends_on WHERE d.task_id = ?').all(taskId) as Row[]).map(toTask);
+    const all = this.memo('deps', () => {
+      const map = new Map<string, Task[]>();
+      for (const r of this.db.prepare('SELECT d.task_id AS for_task, t.* FROM deps d JOIN tasks t ON t.id = d.depends_on').all() as Row[]) {
+        const k = String(r.for_task);
+        map.set(k, [...(map.get(k) ?? []), toTask(r)]);
+      }
+      return map;
+    });
+    return all.get(taskId) ?? [];
   }
 
   dependentsOf(taskId: string): Task[] {
@@ -322,6 +379,8 @@ export class Coordinator {
   }
 
   updateTask(id: string, patch: TaskPatch): Task {
+    this.invalidate();
+    this.changed();
     const sets: string[] = [];
     const vals: (string | number | null)[] = [];
     for (const [k, v] of Object.entries(patch)) {
@@ -410,11 +469,16 @@ export class Coordinator {
   /** Pausing stops new work from starting. Running agents finish unless the caller also stops them. */
   setPaused(projectId: string | null, paused: boolean, by: string): void {
     this.setMeta(`paused:${projectId ?? '*'}`, paused ? JSON.stringify({ by, at: Date.now() }) : null);
+    this.changed();
     const name = projectId ? `"${this.getProject(projectId)?.name ?? projectId}"` : 'all projects';
     this.event(projectId, null, paused ? 'warn' : 'info', paused ? 'fleet.paused' : 'fleet.resumed', paused ? `${by} paused new work on ${name}` : `${by} resumed work on ${name}`);
   }
 
   pausedState(projectId?: string | null): { paused: boolean; by: string | null; scope: 'all' | 'project' | null } {
+    return this.memo(`paused:${projectId ?? ''}`, () => this.pausedStateUncached(projectId));
+  }
+
+  private pausedStateUncached(projectId?: string | null): { paused: boolean; by: string | null; scope: 'all' | 'project' | null } {
     const all = this.getMeta('paused:*');
     if (all) return { paused: true, by: (JSON.parse(all) as { by: string }).by, scope: 'all' };
     const one = projectId ? this.getMeta(`paused:${projectId}`) : null;
@@ -429,13 +493,21 @@ export class Coordinator {
   // ---------- scheduling ----------
 
   activeScopes(projectId: string, excludeId?: string): { task: Task; scope: string[] }[] {
-    // Members of the same race intentionally work on the same files in separate worktrees.
-    const group = excludeId ? this.getTask(excludeId)?.race_group ?? null : null;
-    const active = this.listTasks(projectId, ACTIVE_STATUSES).filter((t) => t.id !== excludeId && (!group || t.race_group !== group));
-    return active.map((task) => {
-      const touched = this.latestRun(task.id)?.touched ?? [];
-      return { task, scope: [...new Set([...this.effectiveScope(task), ...touched])] };
+    const all = this.memo(`active:${projectId}`, () => {
+      const active = this.listTasks(projectId, ACTIVE_STATUSES);
+      if (!active.length) return [];
+      // Files each active task has actually touched, from its latest run: one query instead of one per task.
+      const touched = new Map<string, string[]>();
+      const rows = this.db
+        .prepare(`SELECT task_id, touched FROM runs WHERE role = 'implement' AND task_id IN (${active.map(() => '?').join(',')}) ORDER BY started_at, rowid`)
+        .all(...active.map((t) => t.id)) as { task_id: string; touched: string }[];
+      for (const r of rows) touched.set(r.task_id, JSON.parse(r.touched ?? '[]') as string[]);
+      return active.map((task) => ({ task, scope: [...new Set([...this.effectiveScope(task), ...(touched.get(task.id) ?? [])])] }));
     });
+    if (!excludeId) return all;
+    // Members of the same race intentionally work on the same files in separate worktrees.
+    const group = all.find((a) => a.task.id === excludeId)?.task.race_group ?? this.getTask(excludeId)?.race_group ?? null;
+    return all.filter((a) => a.task.id !== excludeId && (!group || a.task.race_group !== group));
   }
 
   effectiveScope(task: Task): string[] {
@@ -444,12 +516,20 @@ export class Coordinator {
   }
 
   activeLocks(projectId: string): { pattern: string; holder: string; reason: string | null; lease_until: number }[] {
+    return this.memo(`locks:${projectId}`, () => this.activeLocksUncached(projectId));
+  }
+
+  private activeLocksUncached(projectId: string): { pattern: string; holder: string; reason: string | null; lease_until: number }[] {
     return this.db.prepare('SELECT pattern, holder, reason, lease_until FROM locks WHERE project_id = ? AND lease_until > ?').all(projectId, Date.now()) as {
       pattern: string; holder: string; reason: string | null; lease_until: number;
     }[];
   }
 
   spentToday(): number {
+    return this.memo('spent', () => this.spentTodayUncached());
+  }
+
+  private spentTodayUncached(): number {
     const start = new Date();
     start.setHours(0, 0, 0, 0);
     const r = this.db.prepare('SELECT COALESCE(SUM(cost_usd), 0) AS s FROM runs WHERE started_at >= ?').get(start.getTime()) as { s: number };
@@ -458,6 +538,10 @@ export class Coordinator {
 
   /** Verified track record per agent on this project (overall and per tier), used by the learned router. */
   agentStats(projectId: string): Record<string, AgentStats> {
+    return this.memo(`stats:${projectId}`, () => this.agentStatsUncached(projectId));
+  }
+
+  private agentStatsUncached(projectId: string): Record<string, AgentStats> {
     const rows = this.db
       .prepare(
         `SELECT r.agent, COALESCE(r.tier, t.tier) AS tier, COUNT(*) AS runs,
@@ -519,6 +603,10 @@ export class Coordinator {
 
   /** Atomically hands the best runnable task to a machine. Safe to call concurrently from many processes. */
   claimNext(req: ClaimRequest): Claim | null {
+    return this.pass(() => this.claimNextInPass(req));
+  }
+
+  private claimNextInPass(req: ClaimRequest): Claim | null {
     return tx(this.db, () => {
       const now = Date.now();
       const queued = (this.db.prepare("SELECT * FROM tasks WHERE status = 'queued' AND assignee IS NULL ORDER BY priority DESC, created_at ASC").all() as Row[]).map(toTask);
@@ -590,6 +678,10 @@ export class Coordinator {
   }
 
   latestRun(taskId: string): Run | null {
+    return this.memo(`run:${taskId}`, () => this.latestRunUncached(taskId));
+  }
+
+  private latestRunUncached(taskId: string): Run | null {
     const r = this.db.prepare("SELECT * FROM runs WHERE task_id = ? AND role = 'implement' ORDER BY started_at DESC, rowid DESC LIMIT 1").get(taskId) as Row | undefined;
     return r ? toRun(r) : null;
   }
@@ -645,6 +737,7 @@ export class Coordinator {
   }
 
   releaseLocks(projectId: string, holder: string, patterns?: string[]): number {
+    this.changed();
     if (patterns?.length) {
       let n = 0;
       for (const p of patterns.map(normalizePattern)) n += Number(this.db.prepare('DELETE FROM locks WHERE project_id = ? AND holder = ? AND pattern = ?').run(projectId, holder, p).changes);
@@ -676,6 +769,10 @@ export class Coordinator {
   }
 
   getMachine(id: string): Machine | null {
+    return this.memo(`machine:${id}`, () => this.getMachineUncached(id));
+  }
+
+  private getMachineUncached(id: string): Machine | null {
     const r = this.db.prepare('SELECT * FROM machines WHERE id = ?').get(id) as Row | undefined;
     return r ? { ...(r as unknown as Machine), info: JSON.parse(String(r.info)) as MachineInfo, is_hub: Boolean(r.is_hub) } : null;
   }
