@@ -5,6 +5,7 @@ import { runAttempt, Semaphore, type StopReason } from './runner.ts';
 import { run } from './proc.ts';
 import { git, isClean, isLinkedWorktreeOf, revParse } from './git.ts';
 import { dirBytes, findArtifacts, freeGb, gb, removeArtifact } from './disk.ts';
+import { clonesAreFree } from './warmstart.ts';
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { MachineInfo, Project, Task } from './types.ts';
@@ -83,8 +84,11 @@ export class WorkerLoop {
   }
 
   async disk(): Promise<{ freeGb: number; worktreesGb: number }> {
-    const root = worktreeRootOf(this.local());
-    return { freeGb: freeGb(root), worktreesGb: (await dirBytes(root)) / 1e9 };
+    const cfg = this.local();
+    const root = worktreeRootOf(cfg);
+    // Copy-on-write clones of dependencies cost no real disk, so they don't count against the quota.
+    const exclude = cfg.worktree.warmStart === 'clone' && existsSync(root) && (await clonesAreFree(root)) ? cfg.worktree.shareDirs : [];
+    return { freeGb: freeGb(root), worktreesGb: (await dirBytes(root, 60_000, exclude)) / 1e9 };
   }
 
   async info(): Promise<MachineInfo> {

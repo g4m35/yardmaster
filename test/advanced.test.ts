@@ -210,6 +210,12 @@ test('hooks coordinate an interactive session with zero tool calls', async () =>
   assert.equal(blocked.code, 2);
   const mine = await runHook('pre-edit', JSON.stringify({ ...base, tool_name: 'Write', tool_input: { file_path: join(s.repo, 'notes.md') } }), client);
   assert.equal(mine.code, 0, 'the session that holds the file can keep editing');
+  // Paths through a symlink (/tmp vs /private/tmp on macOS) must still be recognized as inside the repo.
+  const { symlinkSync } = await import('node:fs');
+  const alias = join(tempDir('ym-alias-'), 'repo-link');
+  symlinkSync(s.repo, alias);
+  const viaLink = await runHook('pre-edit', JSON.stringify({ cwd: join(alias, 'pkg'), session_id: 'other2', tool_name: 'Write', tool_input: { file_path: join(alias, 'notes.md') } }), client);
+  assert.equal(viaLink.code, 2, 'a held file is protected even when reached through a symlinked path');
   // Codex sends edits as apply_patch text.
   assert.deepEqual(editedPaths({ tool_name: 'apply_patch', tool_input: { command: '*** Begin Patch\n*** Update File: src/a.ts\n@@\n*** Add File: src/b.ts\n*** End Patch' } }), ['src/a.ts', 'src/b.ts']);
   // Hub down or repo unknown: hooks never get in the way.
@@ -270,4 +276,39 @@ test('minimal MCP profile exposes a single tool for clients that load every defi
   } finally {
     await mcp.close();
   }
+});
+
+test('warm start: new worktrees get installed dependencies without reinstalling', async () => {
+  const s = await startHub({}, {}, { '.gitignore': 'node_modules/\n', 'src/app.js': 'export const x = 1;\n' });
+  mkdirSync(join(s.repo, 'node_modules', 'leftpad'), { recursive: true });
+  writeFileSync(join(s.repo, 'node_modules', 'leftpad', 'index.js'), 'module.exports = 1;\n');
+  // The agent fails unless the dependency is already there (as if `npm test` needed node_modules).
+  const [t] = s.add([{ title: 'Use the leftpad dependency', prompt: '@mock write src/use.js uses leftpad', agent: 'mock', verify: ['test -f node_modules/leftpad/index.js'] }]);
+  const [final] = await s.settle([t!.id]);
+  assert.equal(final!.status, 'done', final!.attention ?? '');
+  assert.ok(s.events().some((e) => e.kind === 'task.warm_start' && /node_modules/.test(e.message)));
+  assert.equal(readFileSync(join(s.repo, 'node_modules', 'leftpad', 'index.js'), 'utf8'), 'module.exports = 1;\n', 'the original is untouched');
+  assert.equal(s.onIntegration('node_modules/leftpad/index.js'), null, 'dependencies are never committed');
+});
+
+test('quick checks run per task on changed files; the full suite runs at merge', async () => {
+  // The full suite fails on purpose; the quick, change-scoped check passes.
+  const s = await startHub({}, { verify: ['node check.mjs', 'echo full suite failed && false'], verifyQuick: ['test -n "$(echo {files})" && echo quick ok for {files}'] });
+  const [t] = s.add([{ title: 'Change one module', prompt: '@mock write mod.js m', agent: 'mock' }]);
+  const [final] = await s.settle([t!.id], 60_000);
+  assert.equal(final!.status, 'needs_human', 'a change that only fails the full suite is stopped');
+  assert.match(final!.attention!, /breaks when combined/);
+  assert.equal(final!.attempts, 2, 'stopped on the second identical merge-time failure, not after every attempt');
+  assert.equal(s.onIntegration('mod.js'), null, 'nothing that fails the full suite lands');
+  assert.ok(s.events().filter((e) => e.kind === 'task.ready').length >= 1, 'quick checks passed in the worktree');
+});
+
+test('the brief includes a map of how owned files connect to the code', async () => {
+  const files = { 'src/api.js': 'export const get = () => 1;\n', 'src/ui.js': "import { get } from './api.js';\nexport const v = get();\n" };
+  const s = await startHub({}, {}, files);
+  await until(() => s.hub.coord.graphs.has(s.project.id), (v) => v, 10_000, 'graph');
+  s.hub.worker.stopAll('shutdown', 'test');
+  const [t] = s.add([{ title: 'Add caching to the API client', prompt: 'x', files: ['src/api.js'], agent: 'mock' }]);
+  const ctx = await s.hub.client['task.context']({ id: t!.id });
+  assert.deepEqual(ctx.map, ['src/api.js used by src/ui.js']);
 });

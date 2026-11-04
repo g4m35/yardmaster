@@ -18,17 +18,20 @@ export function freeGb(path: string): number {
 const sizeCache = new Map<string, { at: number; bytes: number }>();
 
 /** Disk used by a directory tree. Uses `du` (fast, handles hard links) with a JS fallback; cached for a minute. */
-export async function dirBytes(path: string, maxAgeMs = 60_000): Promise<number> {
-  const hit = sizeCache.get(path);
+export async function dirBytes(path: string, maxAgeMs = 60_000, exclude: string[] = []): Promise<number> {
+  const key = exclude.length ? `${path}\0${exclude.join(',')}` : path;
+  const hit = sizeCache.get(key);
   if (hit && Date.now() - hit.at < maxAgeMs) return hit.bytes;
   let bytes = 0;
   if (!existsSync(path)) bytes = 0;
   else if (process.platform !== 'win32') {
-    const r = await run('du', ['-sk', path], { timeoutMs: 60_000 }).catch(() => null);
+    // BSD du (macOS) excludes with -I, GNU du with --exclude.
+    const ex = exclude.flatMap((e) => (process.platform === 'darwin' ? ['-I', e] : [`--exclude=${e}`]));
+    const r = await run('du', ['-sk', ...ex, path], { timeoutMs: 60_000 }).catch(() => null);
     const kb = Number(r?.stdout.trim().split(/\s+/)[0]);
     bytes = Number.isFinite(kb) ? kb * 1024 : walkBytes(path);
   } else bytes = walkBytes(path);
-  sizeCache.set(path, { at: Date.now(), bytes });
+  sizeCache.set(key, { at: Date.now(), bytes });
   return bytes;
 }
 
@@ -59,7 +62,7 @@ function safeReaddir(p: string): string[] {
 }
 
 export function invalidateSize(path: string): void {
-  for (const k of sizeCache.keys()) if (k === path || k.startsWith(path + '/')) sizeCache.delete(k);
+  for (const k of sizeCache.keys()) if (k === path || k.startsWith(path + '/') || k.startsWith(path + '\0')) sizeCache.delete(k);
 }
 
 export interface ArtifactDir {

@@ -69,6 +69,14 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX lessons_project ON lessons(project_id);
   `,
+  `
+  CREATE INDEX runs_started ON runs(started_at);
+  CREATE INDEX runs_task_role ON runs(task_id, role, started_at);
+  CREATE INDEX deps_depends ON deps(depends_on);
+  CREATE INDEX locks_project ON locks(project_id, lease_until);
+  CREATE INDEX events_task ON events(task_id);
+  CREATE INDEX tasks_status ON tasks(status, assignee);
+  `,
 ];
 
 export type Db = DatabaseSync;

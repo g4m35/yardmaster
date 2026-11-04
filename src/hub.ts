@@ -53,6 +53,8 @@ export class Hub {
   private plugins: LoadedPlugins = { adapters: [], notifiers: [], errors: [] };
   readonly supervisor: Supervisor;
   private looping = false;
+  private again = false;
+  private kickTimer: NodeJS.Timeout | null = null;
   private lastPressureClean = 0;
   private readonly opts: HubOptions;
   url = '';
@@ -93,6 +95,8 @@ export class Hub {
     this.plugins = await loadPlugins();
     for (const e of this.plugins.errors) this.coord.event(null, null, 'warn', 'plugin.error', `Plugin in ${e.dir} failed to load: ${e.error}`);
     this.lastNotified = this.coord.lastEventId();
+    this.coord.writeManagedRoots();
+    this.coord.onChange = () => this.kick();
     await recover(this.coord, this.machineId, new Set(), { startup: true });
     const cfg = loadConfig();
     const host = this.opts.host ?? cfg.hub.host;
@@ -123,9 +127,43 @@ export class Hub {
     for (const id of this.worker.active.keys()) this.coord.renewLease(id, this.machineId);
   }
 
+  /**
+   * React to a change right away (debounced a few ms): start newly runnable work and merge newly verified work.
+   * The timer loop stays as a safety net and for periodic jobs.
+   */
+  kick(): void {
+    if (this.kickTimer || !this.server) return;
+    this.kickTimer = setTimeout(() => {
+      this.kickTimer = null;
+      void this.react().catch((err) => this.coord.event(null, null, 'error', 'hub.error', `Hub error: ${(err as Error).message}`));
+    }, 15);
+    this.kickTimer.unref();
+  }
+
+  private async react(): Promise<void> {
+    if (this.looping) {
+      this.again = true;
+      return;
+    }
+    this.looping = true;
+    try {
+      await this.worker.tick();
+      for (const p of this.coord.listProjects()) if (existsSync(p.root)) void this.integrator.step(p.id);
+    } finally {
+      this.looping = false;
+      if (this.again) {
+        this.again = false;
+        this.kick();
+      }
+    }
+  }
+
   private async loop(n: number): Promise<void> {
     // Never overlap ticks: a slow git call must not start a second scheduling pass alongside the first.
-    if (this.looping) return;
+    if (this.looping) {
+      this.again = true;
+      return;
+    }
     this.looping = true;
     try {
       if (n % 3 === 0) await this.heartbeat();
@@ -139,6 +177,10 @@ export class Hub {
       this.dispatchNotifications();
     } finally {
       this.looping = false;
+      if (this.again) {
+        this.again = false;
+        this.kick();
+      }
     }
   }
 
@@ -178,6 +220,8 @@ export class Hub {
 
   async stop(): Promise<void> {
     for (const t of this.timers) clearInterval(t);
+    this.coord.onChange = null;
+    if (this.kickTimer) clearTimeout(this.kickTimer);
     this.worker.stopAll('shutdown', 'Yardmaster is shutting down');
     await this.worker.drain();
     await new Promise<void>((r) => (this.server ? this.server.close(() => r()) : r()));

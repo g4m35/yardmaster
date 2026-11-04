@@ -108,15 +108,31 @@ export async function applyConnect(steps: ConnectStep[]): Promise<{ step: Connec
   return out;
 }
 
-function hookCommand(event: string): string {
-  return [...selfCommand(), 'hook', event].map((p) => (/[\s"']/.test(p) ? `"${p.replace(/"/g, '\\"')}"` : p)).join(' ');
+function shQuote(p: string): string {
+  return /^[\w@%+=:,./-]+$/.test(p) ? p : `'${p.replace(/'/g, `'\\''`)}'`;
 }
 
 /**
- * Hooks give zero-token coordination: a short briefing at session start, board changes before a prompt (only when
- * something changed), automatic reservation of files the agent edits, and a guard on edits to files another agent
- * holds. Claude Code and Codex read the same JSON shape (Codex from ~/.codex/hooks.json, approved once in /hooks).
+ * The command an agent runs for a hook. Two speed tricks, because hooks run on every prompt and edit:
+ * - a shell guard exits immediately (a few ms, no Node startup) when no Yardmaster hub is running;
+ * - otherwise a small dedicated entry loads only the hook code, not the whole CLI.
  */
+export function hookCommand(event: string): string {
+  const home = process.env.YARDMASTER_HOME ? shQuote(process.env.YARDMASTER_HOME) : '"$HOME/.yardmaster"';
+  const target = inSea ? [process.execPath, 'hook', event] : [process.execPath, hookEntry(), event];
+  // In plain POSIX sh: skip Yardmaster's own background agents; with a local hub, run only inside managed repos.
+  const guard = [
+    `[ -z "\${YARDMASTER_TASK_ID:-}" ] || exit 0`,
+    `if [ -z "\${YARDMASTER_HUB:-}" ]; then [ -f ${home}/hub.json ] || exit 0; ok=; d="$(pwd -P)"; [ -f ${home}/roots ] && while IFS= read -r p; do case "$d/" in "$p"/*) ok=1; break;; esac; done < ${home}/roots; [ -n "$ok" ] || exit 0; fi`,
+  ].join('; ');
+  return `${guard}; exec ${target.map(shQuote).join(' ')}`;
+}
+
+function hookEntry(): string {
+  const ext = import.meta.url.endsWith('.ts') ? '.ts' : '.js';
+  return fileURLToPath(new URL(`./hook-main${ext}`, import.meta.url));
+}
+
 export function hookPlan(agent: 'claude' | 'codex'): { file: string; hooks: Record<string, unknown[]> } {
   const edit = agent === 'claude' ? 'Edit|Write|MultiEdit|NotebookEdit' : 'Edit|Write';
   const h = (event: string, timeout: number) => ({ type: 'command', command: hookCommand(event), timeout });
@@ -126,12 +142,16 @@ export function hookPlan(agent: 'claude' | 'codex'): { file: string; hooks: Reco
       SessionStart: [{ matcher: 'startup|resume|clear|compact', hooks: [h('session-start', 10)] }],
       UserPromptSubmit: [{ hooks: [h('prompt', 5)] }],
       PreToolUse: [{ matcher: edit, hooks: [h('pre-edit', 10)] }],
-      PostToolUse: [{ matcher: edit, hooks: [h('post-edit', 10)] }],
+      // Reserving the file just edited doesn't need to hold the agent up.
+      PostToolUse: [{ matcher: edit, hooks: [{ ...h('post-edit', 10), async: true }] }],
     },
   };
 }
 
-const OUR_HOOK = /(?:^|[\s"'])(?:\S*yardmaster\S*|\S*cli\.(?:js|ts)"?|\S*\/ym"?|ym)\s+hook\s+(?:session-start|prompt|pre-edit|post-edit|claude-pretool)"?\s*$/;
+const HOOK_EVENT = '(?:session-start|prompt|pre-edit|post-edit|claude-pretool)';
+const OUR_HOOK = new RegExp(
+  `(?:(?:^|[\\s"'])(?:\\S*yardmaster\\S*|\\S*cli\\.(?:js|ts)["']?|\\S*\\/ym["']?|ym)\\s+hook\\s+${HOOK_EVENT}|\\S*hook-main\\.(?:js|ts)["']?\\s+${HOOK_EVENT})["']?\\s*$`,
+);
 
 /** A hook group is ours if every command in it is a Yardmaster hook command (npm, source, or standalone install). */
 export function isOurHookGroup(group: unknown): boolean {

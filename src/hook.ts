@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { isAbsolute, join, relative } from 'node:path';
+import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import type { Client } from './api.ts';
 import { mainRepoRoot, projectIdFor, repoRoot } from './git.ts';
 import { paths, machineId } from './paths.ts';
@@ -47,22 +47,80 @@ export function editedPaths(input: HookInput): string[] {
   return [...out];
 }
 
+interface RepoInfo {
+  checkout: string | null;
+  root: string | null;
+  projectId: string | null;
+  managed: boolean;
+  at: number;
+}
+
+/**
+ * Which repo (and Yardmaster project) a folder belongs to rarely changes, but finding out costs three git
+ * processes and a hub request. Hooks run on every prompt and edit, so the answer is cached per folder:
+ * managed repos for 30 minutes, everything else for 2 (so a fresh `ym init` is noticed quickly).
+ */
+function repoCachePath(): string {
+  return join(paths.tmp(), 'hook-repos.json');
+}
+
+function readRepoCache(): Record<string, RepoInfo> {
+  try {
+    return JSON.parse(readFileSync(repoCachePath(), 'utf8')) as Record<string, RepoInfo>;
+  } catch {
+    return {};
+  }
+}
+
+async function repoInfo(cwd: string, client: ClientFactory): Promise<{ info: RepoInfo; c: Client | null }> {
+  const cache = readRepoCache();
+  const hit = cache[cwd];
+  const ttl = hit?.managed ? 30 * 60_000 : 2 * 60_000;
+  if (hit && Date.now() - hit.at < ttl) return { info: hit, c: hit.managed ? await client() : null };
+  const [checkout, root] = await Promise.all([repoRoot(cwd), mainRepoRoot(cwd)]);
+  let projectId: string | null = null;
+  let managed = false;
+  const c = checkout && root ? await client() : null;
+  if (c && root) {
+    projectId = await projectIdFor(root).catch(() => null);
+    if (projectId) managed = await c['project.resolve']({ projectId }).then(() => true, () => false);
+  }
+  const info: RepoInfo = { checkout, root, projectId, managed, at: Date.now() };
+  // The hub being unreachable says nothing about the repo, so don't remember that.
+  if (c || !checkout) {
+    cache[cwd] = info;
+    const entries = Object.entries(cache).sort((a, b) => b[1].at - a[1].at).slice(0, 200);
+    writeFileSync(repoCachePath(), JSON.stringify(Object.fromEntries(entries)));
+  }
+  return { info, c };
+}
+
 async function context(input: HookInput, client: ClientFactory) {
   if (process.env.YARDMASTER_TASK_ID) return null; // background agents are briefed and isolated already
-  const cwd = input.cwd ?? process.cwd();
-  const checkout = await repoRoot(cwd);
-  const root = await mainRepoRoot(cwd);
-  if (!checkout || !root) return null;
-  const c = await client();
-  if (!c) return null;
-  const projectId = await projectIdFor(root);
-  try {
-    await c['project.resolve']({ projectId });
-  } catch {
-    return null; // repo not managed by Yardmaster: stay invisible
-  }
+  const cwd = real(input.cwd ?? process.cwd());
+  const { info, c } = await repoInfo(cwd, client);
+  if (!info.managed || !info.checkout || !info.root || !info.projectId || !c) return null;
+  const { checkout, root, projectId } = info;
   const sessionName = `hook-${sha1(input.session_id ?? String(process.ppid)).slice(0, 8)}`;
   return { c, cwd, checkout, root, projectId, sessionName, sessionId: `session:${sessionName}` };
+}
+
+/** Physical path, so /tmp vs /private/tmp (or any symlinked folder) can't hide a file from its repo. */
+function real(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    // A file about to be created doesn't exist yet: resolve its folder instead.
+    try {
+      return join(realpathSync(dirname(p)), basename(p));
+    } catch {
+      return p;
+    }
+  }
+}
+
+function relToRoot(root: string, cwd: string, f: string): string {
+  return relative(root, real(isAbsolute(f) ? f : join(cwd, f)));
 }
 
 function contextOutput(event: string, text: string): string {
@@ -77,13 +135,9 @@ export async function preEdit(input: HookInput, client: ClientFactory): Promise<
   if (!ctx) return { code: 0 };
   // Separate worktrees don't share files; any overlap surfaces at merge time instead.
   if (ctx.checkout !== ctx.root) return { code: 0 };
-  const rel = files.map((f) => relative(ctx.root, isAbsolute(f) ? f : join(ctx.cwd, f)));
-  const holders = await ctx.c['lock.check']({ projectId: ctx.projectId, paths: rel });
-  const board = await ctx.c['board.status']({ projectId: ctx.projectId });
-  // The hook can't see an MCP server's identity, so "mine" means any session registered from this same folder.
-  const mine = new Set(board.sessions.filter((s) => s.cwd === ctx.cwd).map((s) => s.id));
-  mine.add(ctx.sessionId);
-  const other = holders.find((h) => !mine.has(h.holder));
+  const rel = files.map((f) => relToRoot(ctx.root, ctx.cwd, f));
+  // The hook can't see an MCP server's identity, so the hub treats sessions from this same folder as "mine".
+  const other = await ctx.c['hook.check']({ projectId: ctx.projectId, paths: rel, cwd: ctx.cwd, sessionId: ctx.sessionId });
   if (!other) return { code: 0 };
   return { code: 2, stderr: `Yardmaster: ${other.path} is being changed by ${other.holder} (${other.detail}). Work on something else for now, or ask the user. The yard_who and yard_send tools help coordinate.` };
 }
@@ -94,10 +148,9 @@ export async function postEdit(input: HookInput, client: ClientFactory): Promise
   if (!files.length) return { code: 0 };
   const ctx = await context(input, client);
   if (!ctx || ctx.checkout !== ctx.root) return { code: 0 };
-  const rel = files.map((f) => relative(ctx.root, isAbsolute(f) ? f : join(ctx.cwd, f))).filter((f) => !f.startsWith('..'));
+  const rel = files.map((f) => relToRoot(ctx.root, ctx.cwd, f)).filter((f) => !f.startsWith('..'));
   if (!rel.length) return { code: 0 };
-  await ctx.c['session.register']({ name: ctx.sessionName, agent: 'hooked-agent', projectId: ctx.projectId, cwd: ctx.cwd, machineId: machineId() });
-  const r = await ctx.c['lock.claim']({ projectId: ctx.projectId, holder: ctx.sessionId, patterns: rel, reason: 'edited in an interactive session', ttlMinutes: 20 });
+  const r = await ctx.c['hook.reserve']({ projectId: ctx.projectId, sessionName: ctx.sessionName, cwd: ctx.cwd, paths: rel, machineId: machineId() });
   if (!r.ok && r.conflicts.length) {
     const c = r.conflicts[0]!;
     return { code: 0, stdout: contextOutput('PostToolUse', `Heads up from Yardmaster: ${c.pattern} is also being changed by ${c.holder}${c.reason ? ` (${c.reason})` : ''}. Coordinate before editing it further.`) };
