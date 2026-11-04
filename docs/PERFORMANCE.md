@@ -3,6 +3,57 @@
 Goal: Yardmaster should never be the thing an agent waits on, and it should remove waiting agents would
 otherwise do. Measured on an M-series MacBook (2026-11-03). Reproduce with the scripts in `bench/`.
 
+## Cost and speed per task (0.5)
+
+Measured 2026-11-04 on Claude Code 2.1.318 and the owner's real projects; reproduce with `bench/deps.bench.ts`.
+
+| What | Before | After | How |
+|---|---|---|---|
+| Context every background turn re-reads | 61,135 tokens | **about 14,000** | Lean launch (below) |
+| A real one-line task with Claude Haiku, end to end | 146,590 tokens, $0.0079 | **45,847 tokens, $0.0025** | Same task, same result, lean launch |
+| A retry after a failed check | fresh session: re-sends the brief, re-reads the code | **resumed: $0.0008 vs $0.0028, 5.7 s vs 10.7 s** | Continue the agent's own session |
+| Copy a 79,455-file node_modules into a new worktree | 17.4 s (`cp -cR`, file by file) | **1.9 s** | One `clonefile(2)` call for the whole folder |
+| Delete it when the task merges | 5.3 s on the merge path | **0.004 s** | Move to a trash folder, delete in the background |
+| Check runs at the same time | 1 | **1 per 4 cores** (max `maxParallel`), plus 1 for merges | Merge checks no longer queue behind task checks |
+| Wait before retrying a failed check | 20 s × attempt | **0** | Waiting only helps flaky infrastructure |
+
+**Lean launch** (`agents.<name>.context: "lean"`, the default) is where most of the money is. A background
+Claude Code run used to load everything an interactive session loads: every MCP server's instructions, every
+skill and plugin, the subagent catalog, and tools no unattended coding run needs (artifacts, scheduling, remote
+triggers). Measured context at startup:
+
+| Launch | Context |
+|---|---|
+| Everything (0.4) | 61,135 |
+| No MCP servers | 46,840 |
+| + no skills or slash commands | 42,936 |
+| + `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` (drops the Artifact and DesignSync tools) | 29,907 |
+| + only the coding tools (Bash, Read, Edit, Write, NotebookEdit, LSP, WebFetch, WebSearch) | **about 14,000 per turn** |
+
+Each turn re-reads that context (cheaply when cached, but every task writes its own cache, because caches are
+per directory and every task has its own worktree), so it multiplies by the number of turns. Your CLAUDE.md,
+AGENTS.md, hooks and permission rules still apply in lean runs. `"full"` restores the old behavior;
+`mcpConfig` keeps chosen MCP servers.
+
+Also cheaper by default:
+- **Effort follows the tier**: cheap work runs at low reasoning effort, standard at medium, strong at high (Claude Code `--effort`, Codex `model_reasoning_effort`). Override per agent with `effort`.
+- **Escalation after the second failure**, not the first: the same model usually fixes its first failure once it sees the error, especially with its session resumed. A retry escalated to a stronger model no longer triggers a review by itself.
+- **The CLI enforces the budget too** (`--max-budget-usd` with what's left of the task's budget).
+- **Reviews are capped**: read-only tools, 15 turns, $1 (`review.maxTurns`, `review.budgetUsd`).
+- **Spend is counted once per message.** Claude Code repeats a message's usage once per content block; counting each copy doubled the mid-run estimate, so budgets tripped at about half the real spend.
+- **The brief says which checks matter**: with `verifyQuick`, agents are told to run the quick checks on their changes rather than the whole suite.
+
+**Merge checks have dependencies now.** The merge worktree used to have no installed dependencies, so in JavaScript
+repos every combined check failed ("command not found"), sending good work back for another paid attempt. It now
+gets them like task worktrees, and refreshes them when a merge changes a lockfile.
+
+**Dependency reuse is lockfile-aware.** A new worktree takes dependencies from a checkout whose lockfiles match
+it exactly: your checkout, or another Yardmaster worktree (often the one that just installed a new package). When
+none match, the event log says so.
+
+`ym report` shows the result for your own work: spend per merged task, money spent on work that never merged,
+how many retries resumed their session and what they cost compared with fresh ones, and median time per phase.
+
 ## Overhead added to agents
 
 | Path | Before | After | How |
@@ -36,11 +87,12 @@ The hub reacts to every state change immediately (debounced 15 ms) instead of wa
 
 ## Work agents no longer redo
 
-- **Warm start.** New worktrees get the checkout's installed, git-ignored dependency folders (`node_modules`,
-  `target`, `vendor`, ...). Python virtualenvs are never copied, since they hard-code their location and a copy
-  would still install into your real environment. Add a `worktree.setup` command such as `uv sync` instead. On APFS, btrfs and XFS this is a copy-on-write clone: this repo's 73 MB
-  `node_modules` takes 0.2 s, and the time barely grows with size (it's metadata, not data). It takes no extra
-  disk until something changes, and the originals are never touched. Without copy-on-write, folders under
+- **Warm start.** New worktrees get installed, git-ignored dependency folders (`node_modules`, `target`, `vendor`,
+  ...) from a checkout with matching lockfiles. Python virtualenvs are never copied, since they hard-code their
+  location and a copy would still install into your real environment. Add a `worktree.setup` command such as
+  `uv sync` instead. On APFS a whole folder is cloned with one `clonefile(2)` call (through macOS's built-in
+  JavaScript for Automation, so nothing extra is installed); on btrfs and XFS with reflinks. It takes no extra disk
+  until something changes, and the originals are never touched. Without copy-on-write, folders under
   `worktree.maxPlainCopyMb` are copied and larger ones are skipped. Clones don't count against the disk quota.
 - **Quick checks.** `verifyQuick` runs change-scoped checks per task (`{files}` is replaced with the changed
   files), and the full `verify` suite runs at merge time, batched by merge trains. With `integration.mode: "none"`
@@ -52,5 +104,8 @@ The hub reacts to every state change immediately (debounced 15 ms) instead of wa
 
 - **`claude --bare`** to skip your config on background runs: it also skips your Claude login, so it fails
   for subscription users.
-- **Skipping MCP servers** (`--strict-mcp-config`) on background runs saves about 0.2 s of a roughly 1.5 s
-  startup, which isn't worth losing your tools. If you want it anyway, add it to `agents.claude.extraArgs`.
+- **Recycling worktrees** between tasks instead of creating new ones: `git worktree add` takes 0.47 s on a
+  3,900-file repo, so a pool would save about a quarter second per task. Worth revisiting for repos with tens of
+  thousands of tracked files.
+- (Corrected in 0.5: 0.3 measured only the startup time of skipping MCP servers, about 0.2 s, and called it not
+  worth it. The token cost, measured since, is the real saving; see the lean launch above.)

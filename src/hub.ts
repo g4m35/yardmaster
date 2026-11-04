@@ -15,7 +15,8 @@ import { recover, planCleanup, runCleanup } from './janitor.ts';
 import { Supervisor } from './supervisor.ts';
 import { inSea, readAsset } from './assets.ts';
 import { importGraph } from './imports.ts';
-import { loadConfig } from './config.ts';
+import { loadConfig, verifySlotsFor, worktreeRootOf } from './config.ts';
+import { purgeTrash } from './fastfs.ts';
 import { detectAgents } from './adapters/index.ts';
 import { hubToken, machineId, paths } from './paths.ts';
 import { git, revParse } from './git.ts';
@@ -64,8 +65,10 @@ export class Hub {
     this.coord = new Coordinator(opts.db ?? openDb());
     this.token = opts.token ?? hubToken();
     this.machineId = opts.machineId ?? machineId();
-    const verifySlots = new Semaphore(loadConfig().verifyParallel);
-    this.integrator = new Integrator(this.coord, verifySlots);
+    const cfg = loadConfig();
+    const verifySlots = new Semaphore(verifySlotsFor(cfg));
+    // Merge checks get a slot of their own: a long combined test run must not hold up every finished task's checks.
+    this.integrator = new Integrator(this.coord, new Semaphore(1));
     this.supervisor = new Supervisor(this.coord);
     this.methods = buildMethods(this.coord, {
       machineId: this.machineId,
@@ -99,6 +102,8 @@ export class Hub {
     this.coord.onChange = () => this.kick();
     await recover(this.coord, this.machineId, new Set(), { startup: true });
     const cfg = loadConfig();
+    // Deletes a previous run didn't get to finish (it was killed, or the machine slept).
+    purgeTrash(join(worktreeRootOf(cfg), '.trash'));
     const host = this.opts.host ?? cfg.hub.host;
     const port = this.opts.port ?? cfg.hub.port;
     this.server = createServer((req, res) => void this.handle(req, res));
@@ -173,7 +178,7 @@ export class Hub {
       if (n % 4 === 0) await recover(this.coord, this.machineId, new Set(this.worker.active.keys()));
       if (n % 7 === 0) this.supervisor.check();
       if (n % 20 === 1) void this.refreshGraphs();
-      if (n % 400 === 0 && loadConfig().cleanup.auto) await runCleanup(this.coord, await planCleanup(this.coord));
+      if (n % 400 === 0 && loadConfig().cleanup.auto) this.cleanInBackground();
       this.dispatchNotifications();
     } finally {
       this.looping = false;
@@ -182,6 +187,20 @@ export class Hub {
         this.kick();
       }
     }
+  }
+
+  private cleaning = false;
+
+  /** Routine cleanup never holds up scheduling: it runs beside the loop, one pass at a time, without sizing anything. */
+  private cleanInBackground(): void {
+    if (this.cleaning) return;
+    this.cleaning = true;
+    void planCleanup(this.coord, undefined, { sizes: false })
+      .then((plan) => runCleanup(this.coord, plan))
+      .catch(() => undefined)
+      .finally(() => {
+        this.cleaning = false;
+      });
   }
 
   /** Import graphs feed coupling warnings in briefs and (optionally) scheduling. Rebuilt only when HEAD moves. */

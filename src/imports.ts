@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from 'node:fs';
+import { readFile, stat } from 'node:fs/promises';
 import { dirname, join, posix } from 'node:path';
 import { gitOut, revParse } from './git.ts';
 import { matches, normalizePattern } from './scope.ts';
@@ -45,42 +45,76 @@ function resolvePy(from: string, spec: string, fileSet: Set<string>): string | n
   return null;
 }
 
+/**
+ * Raw import specifiers per file version (`root\0path\0blob`). A HEAD move re-reads only the files whose blob
+ * changed, and reads are async, so a 20k-file repo no longer freezes the hub for seconds on every commit.
+ */
+const specCache = new Map<string, string[]>();
+const SPEC_CACHE_MAX = 200_000;
+
+function specsOf(f: string, text: string): string[] {
+  const out: string[] = [];
+  if (f.endsWith('.py')) {
+    for (const m of text.matchAll(PY_FROM)) out.push(m[1]!);
+    for (const m of text.matchAll(PY_IMPORT)) out.push(m[1]!);
+  } else for (const m of text.matchAll(JS_IMPORT)) out.push(m[1]!);
+  return out;
+}
+
+async function readSpecs(root: string, entries: { path: string; blob: string }[]): Promise<Map<string, string[]>> {
+  const result = new Map<string, string[]>();
+  const todo: { path: string; key: string }[] = [];
+  for (const e of entries) {
+    const key = `${root}\0${e.path}\0${e.blob}`;
+    const hit = specCache.get(key);
+    if (hit) result.set(e.path, hit);
+    else todo.push({ path: e.path, key });
+  }
+  let next = 0;
+  const worker = async () => {
+    while (next < todo.length) {
+      const t = todo[next++]!;
+      try {
+        const full = join(root, t.path);
+        if ((await stat(full)).size > MAX_BYTES) continue;
+        const specs = specsOf(t.path, await readFile(full, 'utf8'));
+        if (specCache.size >= SPEC_CACHE_MAX) specCache.delete(specCache.keys().next().value!);
+        specCache.set(t.key, specs);
+        result.set(t.path, specs);
+      } catch {
+        // unreadable or vanished: no edges
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: 32 }, worker));
+  return result;
+}
+
 export async function importGraph(root: string, ref = 'HEAD'): Promise<ImportGraph> {
   const sha = (await revParse(root, ref)) ?? ref;
   const key = `${root}@${sha}`;
   const hit = cache.get(key);
   if (hit) return hit;
-  const files = (await gitOut(root, ['ls-files'])).split('\n').filter(Boolean);
+  // "<mode> <blob> <stage>\t<path>" for every tracked file
+  const listing = (await gitOut(root, ['ls-files', '-s'])).split('\n').filter(Boolean);
+  const entries: { path: string; blob: string }[] = [];
+  const files: string[] = [];
+  for (const line of listing) {
+    const tab = line.indexOf('\t');
+    if (tab < 0) continue;
+    const path = line.slice(tab + 1);
+    files.push(path);
+    if (CODE.test(path) && entries.length < MAX_FILES) entries.push({ path, blob: line.split(' ')[1] ?? '' });
+  }
   const fileSet = new Set(files);
+  const specs = await readSpecs(root, entries);
   const deps = new Map<string, Set<string>>();
   const rdeps = new Map<string, Set<string>>();
-  let parsed = 0;
-  for (const f of files) {
-    if (!CODE.test(f) || parsed >= MAX_FILES) continue;
-    const full = join(root, f);
-    let text: string;
-    try {
-      if (statSync(full).size > MAX_BYTES) continue;
-      text = readFileSync(full, 'utf8');
-    } catch {
-      continue;
-    }
-    parsed++;
+  for (const [f, list] of specs) {
     const out = new Set<string>();
-    if (f.endsWith('.py')) {
-      for (const m of text.matchAll(PY_FROM)) {
-        const r = resolvePy(f, m[1]!, fileSet);
-        if (r) out.add(r);
-      }
-      for (const m of text.matchAll(PY_IMPORT)) {
-        const r = resolvePy(f, m[1]!, fileSet);
-        if (r) out.add(r);
-      }
-    } else {
-      for (const m of text.matchAll(JS_IMPORT)) {
-        const r = resolveJs(f, m[1]!, fileSet);
-        if (r) out.add(r);
-      }
+    for (const spec of list) {
+      const r = f.endsWith('.py') ? resolvePy(f, spec, fileSet) : resolveJs(f, spec, fileSet);
+      if (r) out.add(r);
     }
     out.delete(f);
     if (!out.size) continue;

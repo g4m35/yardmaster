@@ -2,30 +2,67 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { inSea } from '../assets.ts';
-import { type Adapter, type AgentEvent, WRITE_TOOL, arr, commonFailure, num, obj, safeJson, str } from './types.ts';
+import type { Tier } from '../config.ts';
+import { type Adapter, type AdapterContext, type AgentEvent, WRITE_TOOL, arr, commonFailure, num, obj, safeJson, str } from './types.ts';
 
 const toolEvent = (name: string, input: unknown): AgentEvent => ({ type: 'tool', name, input, write: WRITE_TOOL.test(name) });
+
+/** Reasoning effort by tier when the user hasn't set one: cheap work thinks less, hard work more. */
+export const DEFAULT_EFFORT: Record<Tier, string> = { cheap: 'low', standard: 'medium', strong: 'high' };
+
+function effortFor(ctx: AdapterContext): string | null {
+  if (!ctx.tier) return null;
+  const e = ctx.settings.effort[ctx.tier] ?? DEFAULT_EFFORT[ctx.tier];
+  return e ? e : null;
+}
+
+/**
+ * The built-in tools a background coding run needs. Leaving out the rest (scheduling, remote triggers, artifacts,
+ * subagents and their catalog) is most of the lean saving: measured on Claude Code 2.1, about 61k tokens of starting
+ * context per turn becomes about 14k.
+ */
+export const CLAUDE_CODING_TOOLS = ['Bash', 'Read', 'Edit', 'Write', 'NotebookEdit', 'LSP', 'WebFetch', 'WebSearch'];
+const CLAUDE_READ_TOOLS = ['Bash', 'Read', 'LSP'];
 
 export const claude: Adapter = {
   name: 'claude',
   label: 'Claude Code',
   binary: 'claude',
+  resumable: true,
   setupHint: 'Install Claude Code (npm i -g @anthropic-ai/claude-code) and run `claude` once to sign in.',
   build(ctx) {
     const args = ['-p', '--output-format', 'stream-json', '--verbose'];
+    const env: Record<string, string> = {};
+    if (ctx.session && 'resume' in ctx.session) args.push('--resume', ctx.session.resume);
+    else if (ctx.session) args.push('--session-id', ctx.session.pin);
     if (ctx.model) args.push('--model', ctx.model);
     if (ctx.readOnly) args.push('--permission-mode', 'plan');
     else if (ctx.settings.autonomy === 'full') args.push('--permission-mode', 'bypassPermissions');
     // Edits are auto-accepted and shell is allowed so the agent can run tests; the user's own deny rules still apply.
     else args.push('--permission-mode', 'acceptEdits', '--allowedTools', 'Bash');
+    if (ctx.settings.context === 'lean') {
+      // CLAUDE.md, hooks and permission rules still load; MCP servers, skills and optional tools don't.
+      args.push('--strict-mcp-config');
+      if (ctx.settings.mcpConfig) args.push('--mcp-config', ctx.settings.mcpConfig);
+      args.push('--disable-slash-commands', '--exclude-dynamic-system-prompt-sections');
+      args.push('--tools', (ctx.settings.tools ?? (ctx.readOnly ? CLAUDE_READ_TOOLS : CLAUDE_CODING_TOOLS)).join(','));
+      // Skips telemetry and feature-flag fetches (which also drops the Artifact and DesignSync tools) and update checks.
+      env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1';
+      env.DISABLE_AUTOUPDATER = '1';
+    }
+    const effort = effortFor(ctx);
+    if (effort) args.push('--effort', effort);
+    if (ctx.budgetUsd !== undefined && ctx.budgetUsd !== null && ctx.budgetUsd > 0) args.push('--max-budget-usd', Math.max(0.05, ctx.budgetUsd).toFixed(2));
+    if (ctx.maxTurns) args.push('--max-turns', String(ctx.maxTurns));
     args.push(...ctx.settings.extraArgs);
-    return { command: ctx.settings.command ?? 'claude', args, stdin: ctx.prompt };
+    return { command: ctx.settings.command ?? 'claude', args, stdin: ctx.prompt, env };
   },
   parse(line) {
     const j = safeJson(line);
     if (!j) return [];
     const out: AgentEvent[] = [];
     const msg = obj(j.message);
+    if (j.type === 'system' && j.subtype === 'init' && typeof j.session_id === 'string') return [{ type: 'session', id: j.session_id }];
     if (j.type === 'assistant') {
       for (const c of arr(msg.content).map(obj)) {
         if (c.type === 'tool_use') out.push(toolEvent(str(c.name), c.input));
@@ -39,6 +76,7 @@ export const claude: Adapter = {
           cachedIn: num(u.cache_read_input_tokens),
           tokensOut: num(u.output_tokens),
           cumulative: false,
+          id: str(msg.id) || undefined,
         });
       }
     } else if (j.type === 'user') {
@@ -66,14 +104,23 @@ export const codex: Adapter = {
   name: 'codex',
   label: 'Codex CLI',
   binary: 'codex',
+  resumable: true,
   setupHint: 'Install Codex CLI (npm i -g @openai/codex) and run `codex login`.',
   build(ctx) {
-    const args = ['exec', '--json', '--skip-git-repo-check', '-C', ctx.cwd];
+    const resume = ctx.session && 'resume' in ctx.session ? ctx.session.resume : null;
+    // `exec resume` has no -C or -s: it runs in the worktree (spawn cwd) and takes the sandbox as config.
+    const args = resume ? ['exec', 'resume', '--json', '--skip-git-repo-check'] : ['exec', '--json', '--skip-git-repo-check', '-C', ctx.cwd];
     if (ctx.model) args.push('-m', ctx.model);
-    if (ctx.readOnly) args.push('-s', 'read-only');
-    else if (ctx.settings.autonomy === 'full') args.push('--dangerously-bypass-approvals-and-sandbox');
-    else args.push('-s', 'workspace-write');
-    args.push(...ctx.settings.extraArgs, '-');
+    const sandbox = ctx.readOnly ? 'read-only' : ctx.settings.autonomy === 'full' ? null : 'workspace-write';
+    if (!sandbox) args.push('--dangerously-bypass-approvals-and-sandbox');
+    else if (resume) args.push('-c', `sandbox_mode="${sandbox}"`);
+    else args.push('-s', sandbox);
+    if (ctx.settings.context === 'lean') args.push('-c', 'check_for_update_on_startup=false');
+    const effort = effortFor(ctx);
+    if (effort) args.push('-c', `model_reasoning_effort="${effort}"`);
+    args.push(...ctx.settings.extraArgs);
+    if (resume) args.push(resume);
+    args.push('-');
     return { command: ctx.settings.command ?? 'codex', args, stdin: ctx.prompt };
   },
   parse(line) {
@@ -81,6 +128,8 @@ export const codex: Adapter = {
     if (!j) return [];
     const item = obj(j.item);
     switch (j.type) {
+      case 'thread.started':
+        return typeof j.thread_id === 'string' ? [{ type: 'session', id: j.thread_id }] : [];
       case 'item.started':
         if (item.type === 'command_execution') return [toolEvent('shell', item.command)];
         if (item.type === 'mcp_tool_call') return [toolEvent(`mcp:${str(item.tool)}`, item.arguments)];
@@ -226,8 +275,15 @@ export const mock: Adapter = {
   name: 'mock',
   label: 'Mock agent (tests and demos)',
   binary: process.execPath,
+  // Off by default so `@mock` directives keep driving every attempt; tests switch resuming on to exercise it.
+  get resumable() {
+    return process.env.YARDMASTER_MOCK_RESUMABLE === '1';
+  },
   build(ctx) {
-    return { command: process.execPath, args: mockAgentArgs(), stdin: ctx.prompt };
+    const env: Record<string, string> = { YM_MOCK_ARGS: JSON.stringify({ tier: ctx.tier ?? null, budget: ctx.budgetUsd ?? null, context: ctx.settings.context }) };
+    if (ctx.session && 'resume' in ctx.session) env.YM_MOCK_RESUME = ctx.session.resume;
+    else if (ctx.session) env.YM_MOCK_SESSION = ctx.session.pin;
+    return { command: process.execPath, args: mockAgentArgs(), stdin: ctx.prompt, env };
   },
   parse(line) {
     const j = safeJson(line);

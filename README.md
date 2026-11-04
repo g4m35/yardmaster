@@ -178,7 +178,7 @@ On agent-heavy private repos, 15 to 20% of billed minutes typically go to re-tes
 }
 ```
 
-Agents run with your normal configuration: your CLAUDE.md, AGENTS.md, hooks, MCP servers and permission rules all still apply. `autonomy: "workspace"` (default) uses each agent's safest unattended mode (Claude: accept edits and allow shell; Codex: workspace-write sandbox). `"full"` uses the agent's bypass mode.
+Background agents run lean by default: your CLAUDE.md, AGENTS.md, hooks and permission rules apply, but your MCP servers, skills and the tools no unattended coding run needs don't load, which cuts the context every turn re-reads by about three quarters (`agents.<name>.context: "full"` turns that off; `mcpConfig` keeps chosen MCP servers). `autonomy: "workspace"` (default) uses each agent's safest unattended mode (Claude: accept edits and allow shell; Codex: workspace-write sandbox). `"full"` uses the agent's bypass mode.
 
 Costs are what the agent reports (Claude Code, OpenCode). For agents that only report tokens (Codex, Gemini) they are estimates from list prices, shown as "est.". Override them in `pricing`.
 
@@ -196,7 +196,15 @@ Notifier plugins can send updates to Slack, ntfy, or a webhook. See `~/.yardmast
 
 ## Speed
 
-Yardmaster stays out of your agents' way. Its hooks cost about 3 to 5 ms when there's nothing to do and about 47 ms in a managed repo. Background agents start with your dependencies already in place, and dependent tasks start the moment the previous one merges. The measurements are in [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+Yardmaster stays out of your agents' way and cuts what each task costs:
+
+- Background agents start with about 14k tokens of context instead of 61k; a real task measured 69% fewer tokens and 68% lower cost.
+- A retry continues the agent's own session (measured: 71% cheaper and twice as fast as starting over).
+- A 79k-file `node_modules` reaches a new worktree in 1.9 s instead of 17.4 s, and is deleted in milliseconds when the task merges.
+- Hooks cost 3 to 5 ms when there's nothing to do; dependent tasks start the moment the previous one merges.
+- `ym report` shows spend per merged task, waste, and where the time goes; `ym disk --scan` finds duplicate dependency installs anywhere on your Mac (20 GB on the machine we measured) and `--dedupe` shares them, recoverably.
+
+The measurements are in [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 
 ## How it works
 
@@ -204,7 +212,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). For the research behind it (Ga
 
 ## Status
 
-Early (0.4). Tested end to end with the mock agent (71 tests, including the CI gate, guard, budget and audit against a mock GitHub API and real git pushes, and policies, cross-model review rounds, lessons and their credit, critical-path ordering, races, merge trains, import-graph coupling, hooks, the minimal MCP profile, and parallel scheduling, scopes, dependencies, loops, budgets, retries, conflicts, edit-time overlap, approval, cleanup safety, a two-machine run, the MCP server, pause/redirect, supervisor warnings, disk holds and artifact trimming, and regression tests for cancel-during-verify, stale attempts, detached HEADs and hand edits in the integration worktree). Smoke-tested with real Claude Code and Codex. The Cursor and Gemini adapters follow their documented stream formats but haven't been run against live sessions yet.
+Early (0.5). Tested end to end with the mock agent (84 tests, including the CI gate, guard, budget and audit against a mock GitHub API and real git pushes, and policies, cross-model review rounds, lessons and their credit, critical-path ordering, races, merge trains, import-graph coupling, hooks, the minimal MCP profile, and parallel scheduling, scopes, dependencies, loops, budgets, retries, conflicts, edit-time overlap, approval, cleanup safety, a two-machine run, the MCP server, pause/redirect, supervisor warnings, disk holds and artifact trimming, and regression tests for cancel-during-verify, stale attempts, detached HEADs and hand edits in the integration worktree). Smoke-tested with real Claude Code and Codex. The Cursor and Gemini adapters follow their documented stream formats but haven't been run against live sessions yet.
 
 ## License
 

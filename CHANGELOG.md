@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.0
+Speed and cost per task. Measurements in docs/PERFORMANCE.md.
+- Lean launch for background agents (default; `agents.<name>.context: "full"` to opt out): Claude Code runs without your MCP servers, skills or optional tools, so each turn re-reads about 14k tokens of context instead of 61k. A real task measured 69% fewer tokens and 68% lower cost. CLAUDE.md, hooks and permission rules still apply; `mcpConfig` keeps chosen MCP servers.
+- Retries continue the agent's session (Claude Code `--resume`, Codex `exec resume`) with a short message instead of a fresh brief (measured: 71% cheaper, about twice as fast). A stuck agent starts fresh; a session that can't be resumed falls back to a fresh one without costing an attempt.
+- Effort follows the tier (low, medium, high), the CLI enforces the remaining budget (`--max-budget-usd`), and reviews are capped (read-only tools, `review.maxTurns`, `review.budgetUsd`).
+- Escalate to a stronger model after a second failure, not the first; an escalated retry no longer triggers review by itself.
+- Fix: Claude spend was counted once per content block, about doubling mid-run estimates and tripping budgets early.
+- Fix: the merge worktree had no dependencies, so combined checks in JavaScript repos failed and sent good work back. It's now prepared like task worktrees and refreshed when a merge changes a lockfile.
+- Dependencies reach new worktrees with one `clonefile(2)` call per folder on macOS (79k-file node_modules: 17.4 s to 1.9 s), from a checkout whose lockfiles match the worktree's. Deletes move to a trash and finish in the background (5.3 s to 0.004 s on the merge path).
+- No wait before retrying a failed check; check slots scale with CPU cores and merge checks have their own; routine cleanup no longer pauses scheduling; the import graph rebuild is incremental and no longer blocks the hub.
+- `ym report`: spend per merged task, waste, resumed vs fresh retries, median time per phase. Each run records its phases.
+- `ym disk --scan` finds duplicate dependency installs across your projects; `--dedupe` replaces provably identical ones (same lockfile, installed packages and native addons) with space-free clones, keeping originals for `--restore` until `--purge` or 3 days.
+
 ## 0.4.0
 - CI cost control for GitHub Actions (`ym ci`, docs/CI.md). Works without the hub, for agents and people alike.
   - `ym ci audit`: where Actions minutes went (re-tested trees, failed runs, outdated runs, duplicate triggers, per-job rounding, Copilot and Dependabot runs) and workflow fixes ranked by value.

@@ -1,11 +1,14 @@
-import type { AgentSettings } from '../config.ts';
+import type { AgentSettings, Tier } from '../config.ts';
 
 /** Every agent CLI's output is normalized into these events, so the watchdog and budget logic are agent-independent. */
 export type AgentEvent =
   | { type: 'tool'; name: string; input: unknown; write: boolean }
   | { type: 'tool_result'; ok: boolean; text: string }
   | { type: 'text'; text: string }
-  | { type: 'usage'; tokensIn: number; tokensOut: number; cachedIn?: number; costUsd?: number; cumulative: boolean }
+  /** `id` identifies the API message: some CLIs repeat a message's usage once per content block, so count it once. */
+  | { type: 'usage'; tokensIn: number; tokensOut: number; cachedIn?: number; costUsd?: number; cumulative: boolean; id?: string }
+  /** The CLI's own session id, for resuming on retry. */
+  | { type: 'session'; id: string }
   | { type: 'result'; ok: boolean; text: string }
   | { type: 'error'; text: string };
 
@@ -16,6 +19,13 @@ export interface AdapterContext {
   settings: AgentSettings;
   /** Read-only planning runs (used by `ym plan`). */
   readOnly?: boolean;
+  tier?: Tier;
+  /** Continue this session (resume) or start a new one under this id (pin), for CLIs that support it. */
+  session?: { resume: string } | { pin: string };
+  /** What's left of the task's budget; passed to CLIs that can enforce a spending cap themselves. */
+  budgetUsd?: number | null;
+  /** Hard cap on agentic turns (used for bounded jobs like reviews). */
+  maxTurns?: number;
 }
 
 export interface LaunchSpec {
@@ -33,6 +43,8 @@ export interface Adapter {
   label: string;
   /** Executable looked up on PATH to decide whether this agent is installed. */
   binary: string;
+  /** Whether build() honors ctx.session.resume (so a retry continues the previous conversation). */
+  resumable?: boolean;
   build(ctx: AdapterContext): LaunchSpec;
   parse(line: string): AgentEvent[];
   classifyFailure?(output: string): FailureClass;

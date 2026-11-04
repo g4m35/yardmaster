@@ -71,6 +71,14 @@ export interface Task {
   guidance: string | null;
   needs_approval: boolean;
   policies: string[];
+  /** The agent session (Claude Code session id, Codex thread id) a retry can resume instead of starting over. */
+  agent_session: string | null;
+  session_agent: string | null;
+  /** Spend already reported by that session; resumed runs report totals that include it. */
+  session_cost: number;
+  session_at: number | null;
+  /** Tier the task was created with (escalation on retries raises `tier`, not this). */
+  created_tier: Tier | null;
 }
 
 export interface Project {
@@ -106,6 +114,9 @@ export interface Run {
   tier: string | null;
   lessons: string[];
   verdict: string | null;
+  /** Milliseconds per phase: prepare, agent, verify, review. */
+  phases: Record<string, number>;
+  resumed: boolean;
 }
 
 export interface YardEvent {

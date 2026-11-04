@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readdirSync, rmSync, statfsSync, statSync, lstat
 import { dirname, join, relative } from 'node:path';
 import { run } from './proc.ts';
 import { git } from './git.ts';
+import { removeFast } from './fastfs.ts';
 
 /** Free space on the filesystem holding `path` (or its nearest existing parent). */
 export function freeGb(path: string): number {
@@ -75,7 +76,7 @@ export interface ArtifactDir {
  * Regenerable build output inside a worktree: directories whose name is on the allow-list AND that git
  * ignores. Anything git tracks or would show as untracked work is never a candidate.
  */
-export async function findArtifacts(worktree: string, names: string[], maxDepth = 4): Promise<ArtifactDir[]> {
+export async function findArtifacts(worktree: string, names: string[], maxDepth = 4, opts: { sizes?: boolean } = {}): Promise<ArtifactDir[]> {
   const wanted = new Set(names);
   const found: string[] = [];
   const walk = (dir: string, depth: number) => {
@@ -106,14 +107,14 @@ export async function findArtifacts(worktree: string, names: string[], maxDepth 
     const tracked = await git(worktree, ['ls-files', '--', rel], { allowFail: true });
     if (tracked.stdout.trim()) continue;
     const path = join(worktree, rel);
-    out.push({ path, rel, bytes: await dirBytes(path, 0) });
+    out.push({ path, rel, bytes: opts.sizes === false ? 0 : await dirBytes(path, 0) });
   }
   return out;
 }
 
 export function removeArtifact(worktree: string, dir: ArtifactDir): void {
   if (!dir.path.startsWith(worktree + '/')) throw new Error(`${dir.path} is outside ${worktree}`);
-  rmSync(dir.path, { recursive: true, force: true });
+  removeFast(dir.path, join(dirname(dirname(worktree)), '.trash'));
   invalidateSize(worktree);
 }
 
