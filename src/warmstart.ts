@@ -43,6 +43,11 @@ export async function warmStart(repoRoot: string, worktree: string, config: Conf
     for (const d of dirs) {
       const target = join(worktree, d.rel);
       if (existsSync(target)) continue;
+      // Even if configured: a virtualenv copy keeps pointing at (and installing into) the original environment.
+      if (existsSync(join(d.path, 'pyvenv.cfg'))) {
+        out.skipped.push({ rel: d.rel, why: 'Python virtual environments hard-code their location; create one per worktree with a `setup` command (for example "uv sync") instead' });
+        continue;
+      }
       if (!cow && d.bytes > cfg.maxPlainCopyMb * 1e6) {
         out.skipped.push({ rel: d.rel, why: `${gb(d.bytes)} and this disk can't clone copy-on-write` });
         continue;

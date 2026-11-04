@@ -85,7 +85,8 @@ function shellQuote(s: string): string {
 
 /** The checks a task runs on itself: quick, change-scoped ones when configured, otherwise the full list. */
 export function taskChecks(task: Task, config: Config, files: string[]): string[] {
-  if (task.verify || !config.verifyQuick.length) return verifyCommands(task, config);
+  // Quick checks are only safe when the full suite runs later, at merge time.
+  if (task.verify || !config.verifyQuick.length || config.integration.mode === 'none') return verifyCommands(task, config);
   const list = files.map(shellQuote).join(' ');
   return config.verifyQuick.filter((c) => !c.includes('{files}') || files.length).map((c) => c.replaceAll('{files}', list));
 }

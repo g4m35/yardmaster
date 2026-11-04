@@ -37,12 +37,14 @@ The hub reacts to every state change immediately (debounced 15 ms) instead of wa
 ## Work agents no longer redo
 
 - **Warm start.** New worktrees get the checkout's installed, git-ignored dependency folders (`node_modules`,
-  `.venv`, `target`, `vendor`, ...). On APFS, btrfs and XFS this is a copy-on-write clone: this repo's 73 MB
+  `target`, `vendor`, ...). Python virtualenvs are never copied, since they hard-code their location and a copy
+  would still install into your real environment. Add a `worktree.setup` command such as `uv sync` instead. On APFS, btrfs and XFS this is a copy-on-write clone: this repo's 73 MB
   `node_modules` takes 0.2 s, and the time barely grows with size (it's metadata, not data). It takes no extra
   disk until something changes, and the originals are never touched. Without copy-on-write, folders under
   `worktree.maxPlainCopyMb` are copied and larger ones are skipped. Clones don't count against the disk quota.
 - **Quick checks.** `verifyQuick` runs change-scoped checks per task (`{files}` is replaced with the changed
-  files), and the full `verify` suite runs at merge time, batched by merge trains.
+  files), and the full `verify` suite runs at merge time, batched by merge trains. With `integration.mode: "none"`
+  there's no merge step, so tasks run the full suite themselves.
 - **Shorter exploration.** The brief includes a map of how the task's files connect (imports, importers) and
   starts with a fixed block of rules, so providers can reuse the cached opening across tasks and retries.
 

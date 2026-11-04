@@ -312,3 +312,32 @@ test('the brief includes a map of how owned files connect to the code', async ()
   const ctx = await s.hub.client['task.context']({ id: t!.id });
   assert.deepEqual(ctx.map, ['src/api.js used by src/ui.js']);
 });
+
+test('warm start never copies a Python virtualenv; quick checks never replace the only full check', async () => {
+  const { warmStart } = await import('../src/warmstart.ts');
+  const { taskChecks } = await import('../src/runner.ts');
+  const repo = tempDir('ym-venv-');
+  sh(repo, 'git', ['init', '-q', '-b', 'main']);
+  writeFileSync(join(repo, '.gitignore'), '.venv/\nnode_modules/\n');
+  sh(repo, 'git', ['add', '-A']);
+  sh(repo, 'git', ['-c', 'user.name=a', '-c', 'user.email=a@a', 'commit', '-qm', 'i']);
+  mkdirSync(join(repo, '.venv', 'bin'), { recursive: true });
+  writeFileSync(join(repo, '.venv', 'pyvenv.cfg'), `home = /usr/bin\n`);
+  mkdirSync(join(repo, 'node_modules', 'x'), { recursive: true });
+  writeFileSync(join(repo, 'node_modules', 'x', 'i.js'), '1');
+  const wt = join(tempDir('ym-venv-wt-'), 'wt');
+  mkdirSync(wt);
+  // Even when someone lists .venv explicitly, it is skipped with an explanation.
+  const cfg = resolveConfig([{ worktree: { shareDirs: ['node_modules', '.venv'] } }]);
+  const r = await warmStart(repo, wt, cfg);
+  assert.deepEqual(r.cloned.map((c) => c.rel), ['node_modules']);
+  assert.match(r.skipped.find((x) => x.rel === '.venv')!.why, /virtual environments/);
+  assert.ok(!existsSync(join(wt, '.venv')));
+  assert.ok(!resolveConfig([{}]).worktree.shareDirs.includes('.venv'), 'not shared by default');
+
+  const task = { verify: null } as unknown as Parameters<typeof taskChecks>[0];
+  const quick = resolveConfig([{ verify: ['npm test'], verifyQuick: ['vitest related {files}'] }]);
+  assert.deepEqual(taskChecks(task, quick, ['a.ts']), ['vitest related a.ts']);
+  const noMerge = resolveConfig([{ verify: ['npm test'], verifyQuick: ['vitest related {files}'], integration: { mode: 'none' } }]);
+  assert.deepEqual(taskChecks(task, noMerge, ['a.ts']), ['npm test'], 'with no merge step, the task must pass the full suite itself');
+});

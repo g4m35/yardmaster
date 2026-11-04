@@ -172,7 +172,9 @@ export const ConfigSchema = z.object({
       /** Give new worktrees the project's installed dependencies so agents don't reinstall them. */
       warmStart: z.enum(['clone', 'off']).default('clone'),
       /** Git-ignored folders to bring over from your checkout (searched a few levels deep, so monorepos work). */
-      shareDirs: z.array(z.string()).default(['node_modules', '.venv', 'venv', 'vendor', '.bundle', 'target', '.gradle', 'Pods']),
+      // Python virtualenvs are excluded: they hard-code their original path, so a copy would still point at your
+      // real environment. Use `setup` (e.g. "uv sync", fast with uv's cache) to build one per worktree instead.
+      shareDirs: z.array(z.string()).default(['node_modules', 'vendor', '.bundle', 'target', '.gradle', 'Pods']),
       /** Without copy-on-write, skip folders bigger than this instead of copying them byte by byte. */
       maxPlainCopyMb: z.number().min(0).default(300),
       /** Untracked files to copy in, e.g. [".env.local"]. Opt-in, because they often hold secrets. */
@@ -180,7 +182,7 @@ export const ConfigSchema = z.object({
       /** Commands to run in each new worktree before the agent starts (code generation, a quick install). */
       setup: z.array(z.string()).default([]),
     })
-    .default({ warmStart: 'clone', shareDirs: ['node_modules', '.venv', 'venv', 'vendor', '.bundle', 'target', '.gradle', 'Pods'], maxPlainCopyMb: 300, copy: [], setup: [] }),
+    .default({ warmStart: 'clone', shareDirs: ['node_modules', 'vendor', '.bundle', 'target', '.gradle', 'Pods'], maxPlainCopyMb: 300, copy: [], setup: [] }),
   /** Import-graph awareness: tasks editing files that import each other are warned (or kept apart). */
   coupling: z.enum(['off', 'warn', 'serialize']).default('warn'),
   notify: z.boolean().default(true),
