@@ -77,6 +77,15 @@ const MIGRATIONS: string[] = [
   CREATE INDEX events_task ON events(task_id);
   CREATE INDEX tasks_status ON tasks(status, assignee);
   `,
+  `
+  ALTER TABLE tasks ADD COLUMN agent_session TEXT;
+  ALTER TABLE tasks ADD COLUMN session_agent TEXT;
+  ALTER TABLE tasks ADD COLUMN session_cost REAL NOT NULL DEFAULT 0;
+  ALTER TABLE tasks ADD COLUMN session_at INTEGER;
+  ALTER TABLE tasks ADD COLUMN created_tier TEXT;
+  ALTER TABLE runs ADD COLUMN phases TEXT NOT NULL DEFAULT '{}';
+  ALTER TABLE runs ADD COLUMN resumed INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 export type Db = DatabaseSync;

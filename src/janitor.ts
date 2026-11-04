@@ -1,6 +1,7 @@
 import { worktreeRootOf } from './config.ts';
 import { existsSync, readdirSync, rmSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { removeFast } from './fastfs.ts';
 import type { Coordinator } from './coordinator.ts';
 import { paths } from './paths.ts';
 import { git, gitOut, isAncestor, isClean, isLinkedWorktreeOf, listWorktrees, removeWorktree } from './git.ts';
@@ -39,10 +40,10 @@ function underRoot(path: string, root: string): boolean {
  * Builds a cleanup plan. The rule is simple and absolute: anything with uncommitted changes, unmerged
  * commits, or that Yardmaster did not create is kept and reported, never deleted.
  */
-export async function planCleanup(coord: Coordinator, projectId?: string): Promise<CleanPlan> {
+export async function planCleanup(coord: Coordinator, projectId?: string, opts: { sizes?: boolean } = {}): Promise<CleanPlan> {
   const plan: CleanPlan = { remove: [], keep: [] };
   const projects = projectId ? [coord.getProject(projectId)].filter((p): p is Project => !!p) : coord.listProjects();
-  for (const project of projects) await planProject(coord, project, plan);
+  for (const project of projects) await planProject(coord, project, plan, opts.sizes !== false);
 
   const now = Date.now();
   for (const lock of coord.db.prepare('SELECT id, pattern, holder, lease_until FROM locks WHERE lease_until <= ?').all(now) as { id: string; pattern: string; holder: string }[]) {
@@ -95,7 +96,7 @@ async function planArtifacts(coord: Coordinator, projectName: string, worktree: 
   }
 }
 
-async function planProject(coord: Coordinator, project: Project, plan: CleanPlan): Promise<void> {
+async function planProject(coord: Coordinator, project: Project, plan: CleanPlan, sizes = true): Promise<void> {
   if (!existsSync(project.root)) {
     plan.keep.push({ kind: 'worktree', target: project.root, reason: 'project folder not found on this machine; nothing touched', project: project.name });
     return;
@@ -151,7 +152,7 @@ async function planProject(coord: Coordinator, project: Project, plan: CleanPlan
         continue;
       }
     }
-    plan.remove.push({ ...item, reason: `task ${task.id} is ${task.status} and everything in it is merged or empty`, bytes: await dirBytes(wt.path) });
+    plan.remove.push({ ...item, reason: `task ${task.id} is ${task.status} and everything in it is merged or empty`, bytes: sizes ? await dirBytes(wt.path) : undefined });
   }
 
   const prunable = worktrees.filter((w) => w.prunable || !existsSync(w.path));
@@ -214,7 +215,7 @@ export async function runCleanup(coord: Coordinator, plan: CleanPlan): Promise<{
           if (t && ['running', 'verifying', 'merging'].includes(t.status)) throw new Error('its task started running again; kept');
           const still = (await findArtifacts(wt, coord.configFor(t?.project_id ?? '').disk.artifactDirs)).find((a) => a.path === item.target);
           if (!still) throw new Error('no longer looks like ignored build output; kept');
-          rmSync(item.target, { recursive: true, force: true });
+          removeFast(item.target, join(dirname(dirname(wt)), '.trash'));
           break;
         }
         case 'branch': {

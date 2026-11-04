@@ -3,7 +3,7 @@ import type { Client } from './api.ts';
 import { deepMerge, resolveConfig, type Config, worktreeRootOf } from './config.ts';
 import { runAttempt, Semaphore, type StopReason } from './runner.ts';
 import { run } from './proc.ts';
-import { git, isClean, isLinkedWorktreeOf, revParse } from './git.ts';
+import { git, isClean, isLinkedWorktreeOf, removeWorktree, revParse } from './git.ts';
 import { dirBytes, findArtifacts, freeGb, gb, removeArtifact } from './disk.ts';
 import { clonesAreFree } from './warmstart.ts';
 import { existsSync, readdirSync } from 'node:fs';
@@ -140,7 +140,8 @@ export class WorkerLoop {
     if (d.freeGb < cfg.minFreeGb) problem = `only ${d.freeGb.toFixed(1)} GB free on the worktree disk (minimum ${cfg.minFreeGb} GB)`;
     else if (cfg.maxWorktreesGb !== null && d.worktreesGb > cfg.maxWorktreesGb) problem = `worktrees use ${gb(d.worktreesGb * 1e9)}, over the ${cfg.maxWorktreesGb} GB quota`;
     if (!problem) return true;
-    if (this.onDiskPressure) await this.onDiskPressure().catch(() => undefined);
+    // Cleaning can take a while; work is held either way, so don't make this check wait for it.
+    if (this.onDiskPressure) void this.onDiskPressure().catch(() => undefined);
     if (Date.now() - this.lastDiskWarn > 10 * 60_000) {
       this.lastDiskWarn = Date.now();
       await this.client['task.event']({ projectId: null, taskId: null, level: 'warn', kind: 'machine.disk', message: `${this.name} is holding new work: ${problem}. Finished worktrees and build output are cleaned automatically; run "ym disk" to see what is using space.` }).catch(() => undefined);
@@ -167,7 +168,7 @@ export class WorkerLoop {
           const t = await this.client['task.peek']({ id: taskId }).catch(() => null);
           if (!t || ['running', 'verifying'].includes(t.status)) continue;
           if (t.status === 'done' && (await isClean(path))) {
-            await git(repo, ['worktree', 'remove', path], { allowFail: true });
+            await removeWorktree(repo, path).catch(() => undefined);
             await git(repo, ['branch', '-D', `yardmaster/${taskId}`], { allowFail: true });
           } else if (cfg.disk.trimArtifacts && t.status !== 'ready' && t.status !== 'merging') {
             for (const a of await findArtifacts(path, cfg.disk.artifactDirs)) removeArtifact(path, a);

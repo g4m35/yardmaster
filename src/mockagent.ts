@@ -15,9 +15,10 @@
 //   @mock unless-prompt <word> <directive...>  skip the directive if the prompt mentions <word>
 //   @mock git <args...>              run git in the worktree (e.g. to misbehave on purpose)
 //   @mock-review <round> <approve|changes> <note>  how to answer when asked to review
-import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 
 type Emitted = Record<string, unknown>;
 
@@ -27,6 +28,16 @@ export async function runMockAgent(): Promise<void> {
 
   let prompt = '';
   for await (const chunk of process.stdin) prompt += chunk;
+  // Sessions, like real CLIs: a resumed run sees the earlier conversation plus the new message.
+  const sessionId = process.env.YM_MOCK_RESUME ?? process.env.YM_MOCK_SESSION;
+  if (sessionId) {
+    const dir = join(tmpdir(), 'ym-mock-sessions');
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, `${sessionId.replace(/[^\w-]/g, '_')}.txt`);
+    if (process.env.YM_MOCK_RESUME && existsSync(file)) prompt = `${readFileSync(file, 'utf8')}\n${prompt}`;
+    writeFileSync(file, prompt);
+    emit({ type: 'session', id: sessionId });
+  }
 
   const attempt = Number(process.env.YARDMASTER_ATTEMPT ?? '1');
   const lines = prompt.split('\n').map((l) => l.trim()).filter((l) => l.startsWith('@mock '));

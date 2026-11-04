@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, statfsSync, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { createInterface as createLineReader } from 'node:readline';
-import { hostname, networkInterfaces, tmpdir } from 'node:os';
+import { homedir as homedirPath, hostname, networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildMethods, localClient, remoteClient, type Client } from './api.ts';
 import { Coordinator } from './coordinator.ts';
@@ -29,8 +29,9 @@ import { VERSION } from './version.ts';
 import { serviceFiles, installService, uninstallService } from './service.ts';
 import { inSea } from './assets.ts';
 import { runMockAgent } from './mockagent.ts';
-import { TIERS } from './config.ts';
+import { TIERS, defaultAgentSettings, verifySlotsFor } from './config.ts';
 import { detectVerify } from './detect.ts';
+import { dedupeGroup, defaultScanRoots, purgeDedupeTrash, restoreLatest, scanDeps } from './devdeps.ts';
 import { runCi } from './ci/cli.ts';
 
 // ---------- tiny argument parser ----------
@@ -69,7 +70,7 @@ function parseArgs(argv: string[]): Args {
 }
 
 const SHORT: Record<string, string> = { f: 'follow', n: 'lines', y: 'yes', j: 'json', h: 'help' };
-const BOOLEAN_FLAGS = new Set(['with-hooks', 'no-skill', 'now', 'version', 'follow', 'yes', 'json', 'help', 'all', 'dry-run', 'foreground', 'force', 'no-changes-ok', 'watch', 'with-hook', 'no-hub', 'open', 'draft', 'quiet', 'hooks-path']);
+const BOOLEAN_FLAGS = new Set(['scan', 'dedupe', 'restore', 'purge', 'with-hooks', 'no-skill', 'now', 'version', 'follow', 'yes', 'json', 'help', 'all', 'dry-run', 'foreground', 'force', 'no-changes-ok', 'watch', 'with-hook', 'no-hub', 'open', 'draft', 'quiet', 'hooks-path']);
 
 const flag = (a: Args, k: string) => (typeof a.flags[k] === 'string' ? (a.flags[k] as string) : undefined);
 const list = (a: Args, k: string) => flag(a, k)?.split(',').map((s) => s.trim()).filter(Boolean);
@@ -170,7 +171,8 @@ ${bold('Manage work')}
   ym tell <id> "do X instead"  redirect a running agent (it keeps its work so far)
   ym pause [--now] [--all]     stop new work from starting (--now also parks running agents)
   ym resume                    start queued work again
-  ym disk                      what uses disk space and what can be freed
+  ym disk                      what uses disk space and what can be freed (--scan: duplicate dependencies anywhere)
+  ym report [--days 7]         spend per merged task, waste, retries, and where the time goes
   ym learn "..." [--files g]   teach every future agent something about this repo
   ym lessons [--all]           what agents have learned here (forget <id> to retire one)
   ym land                      bring finished work into your branch (fast-forward only)
@@ -378,12 +380,68 @@ async function cmdTell(a: Args) {
   console.log(green(`✔ ${t.id} will ${t.status === 'running' ? 'restart with your guidance, keeping its work so far' : 'use your guidance on its next attempt'}.`));
 }
 
+const fmtBytes = (b: number) => (b < 1e9 ? `${Math.round(b / 1e6)} MB` : `${(b / 1e9).toFixed(1)} GB`);
+
+/** Duplicate dependency installs anywhere on this machine (no hub needed), and recoverable sharing of them. */
+async function cmdDiskDeps(a: Args): Promise<boolean> {
+  if (a.flags.restore) {
+    const r = restoreLatest();
+    if (!r.restored.length && !r.skipped.length) console.log('Nothing to restore.');
+    for (const p of r.restored) console.log(green(`✔ restored ${p}`));
+    for (const s of r.skipped) console.log(yellow(`  kept ${s.path}: ${s.why}`));
+    return true;
+  }
+  if (a.flags.purge) {
+    const n = purgeDedupeTrash();
+    console.log(n ? green(`✔ Deleting ${n} kept batch(es) of originals in the background; the space comes back as it goes.`) : 'The dedupe trash is empty.');
+    return true;
+  }
+  if (!a.flags.scan && !a.flags.dedupe) return false;
+  // Originals kept for undo are deleted for good after 3 days.
+  purgeDedupeTrash(3 * 86_400_000);
+  const roots = a._.slice(1).length ? a._.slice(1).map((p) => expandHome(p)) : defaultScanRoots();
+  if (!roots.length) die('No project folders found. Pass the folders to scan: ym disk --scan ~/code');
+  const progress = process.stderr.isTTY ? (d: number, t: number) => process.stderr.write(`\r  measuring ${d}/${t} dependency folders`.padEnd(50)) : undefined;
+  const r = await scanDeps(roots, { onProgress: progress });
+  if (progress) process.stderr.write('\r'.padEnd(52) + '\r');
+  if (a.flags.json && !a.flags.dedupe) return (console.log(JSON.stringify(r, null, 2)), true);
+  const reclaim = r.identical.reduce((n, g) => n + g.reclaimable, 0);
+  console.log(`${bold(`${r.dirs.length} node_modules folders`)} in ${roots.map((x) => x.replace(homedirPath(), '~')).join(', ')}: ${bold(fmtBytes(r.total))}`);
+  if (r.identical.length) {
+    console.log(`\n${bold('Identical installs')} (same lockfile and same installed packages) ${green(`${fmtBytes(reclaim)} reclaimable`)}`);
+    for (const g of r.identical.slice(0, 10)) console.log(`  ${String(g.dirs.length).padStart(2)} copies  ${fmtBytes(g.reclaimable).padStart(8)}  ${dim(g.dirs.slice(0, 3).map((d) => d.project.replace(homedirPath(), '~')).join(', '))}${g.dirs.length > 3 ? dim(', ...') : ''}`);
+  }
+  if (r.sameLock.length) {
+    const n = r.sameLock.reduce((x, g) => x + g.dirs.length, 0);
+    console.log(dim(`\n${n} more folders share a lockfile but were installed differently, so they can't be shared as they are (a fresh "npm ci" in each would make them identical).`));
+  }
+  console.log(dim('Sizes count every copy in full; copies that are already clones of each other take less real space.'));
+  if (!a.flags.dedupe) {
+    if (reclaim > 0) console.log(`\nShare them: ${cyan('ym disk --dedupe')} (dry run first; originals are kept for undo until ${cyan('ym disk --purge')} or 3 days).`);
+    return true;
+  }
+  const apply = !!a.flags.yes;
+  let freed = 0;
+  for (const g of r.identical) {
+    const out = await dedupeGroup(g, { dryRun: !apply });
+    for (const e of out.replaced) {
+      freed += g.dirs.find((d) => d.path === e.path)?.bytes ?? 0;
+      console.log(`${apply ? green('✔ shared') : '  would share'} ${e.path.replace(homedirPath(), '~')} ${dim(`with ${e.from.replace(homedirPath(), '~')}`)}`);
+    }
+    for (const s of out.skipped) console.log(yellow(`  left ${s.path.replace(homedirPath(), '~')}: ${s.why}`));
+  }
+  if (!apply) console.log(`\nAbout ${bold(fmtBytes(freed))} would come back. Close dev servers in those projects, then run ${cyan('ym disk --dedupe --yes')}.`);
+  else console.log(`\n${green(`✔ About ${fmtBytes(freed)} will come back`)} once the kept originals are purged (${cyan('ym disk --purge')}, or automatically after 3 days). Undo: ${cyan('ym disk --restore')}.`);
+  return true;
+}
+
 async function cmdDisk(a: Args) {
+  if (await cmdDiskDeps(a)) return;
   const client = await getClient(a);
   const projectId = a.flags.all ? null : (await currentProject(client).catch(() => null))?.id ?? null;
   const r = await client['disk.report']({ projectId });
   if (a.flags.json) return console.log(JSON.stringify(r, null, 2));
-  const fmt = (b: number) => (b < 1e9 ? `${Math.round(b / 1e6)} MB` : `${(b / 1e9).toFixed(1)} GB`);
+  const fmt = fmtBytes;
   const low = r.freeGb < r.minFreeGb;
   console.log(`${bold('Disk')}  ${low ? red(`${r.freeGb.toFixed(1)} GB free`) : green(`${r.freeGb.toFixed(1)} GB free`)} ${dim(`(new work pauses below ${r.minFreeGb} GB)`)}`);
   console.log(`Worktrees use ${bold(fmt(r.worktreesBytes))}${r.quotaGb ? dim(` of a ${r.quotaGb} GB quota`) : ''}, logs ${fmt(r.logsBytes)}.`);
@@ -392,6 +450,31 @@ async function cmdDisk(a: Args) {
     for (const w of r.worktrees.slice(0, 12)) console.log(`  ${fmt(w.bytes).padStart(8)}  ${(STATUS_COLOR[w.status] ?? dim)((STATUS_LABEL[w.status as keyof typeof STATUS_LABEL] ?? w.status).padEnd(14))} ${w.taskId} ${dim(clip(w.title ?? '', 50))}`);
   }
   console.log(r.reclaimableBytes > 0 ? `\n${green(fmt(r.reclaimableBytes))} can be freed safely: run ${cyan('ym clean --yes')}.` : dim('\nNothing more can be freed without touching unmerged work.'));
+}
+
+async function cmdReport(a: Args) {
+  const client = await getClient(a);
+  const projectId = a.flags.all ? null : (await currentProject(client).catch(() => null))?.id ?? null;
+  const days = Number(flag(a, 'days') ?? 7);
+  const r = await client['report.summary']({ projectId, days });
+  if (a.flags.json) return console.log(JSON.stringify(r, null, 2));
+  const usd = (n: number | null) => (n === null ? 'n/a' : formatUsd(n));
+  const secs = (n: number | null | undefined) => (n === null || n === undefined ? 'n/a' : n < 90 ? `${Math.round(n)}s` : `${(n / 60).toFixed(1)} min`);
+  console.log(bold(`Last ${days} day${days === 1 ? '' : 's'}${projectId ? '' : ', all projects'}`));
+  console.log(`  Tasks: ${green(`${r.tasks.done} merged`)}, ${r.tasks.open} open, ${r.tasks.needsYou ? yellow(`${r.tasks.needsYou} need you`) : '0 need you'}, ${r.tasks.failed} failed, ${r.tasks.canceled} canceled`);
+  console.log(`  Spend: ${bold(usd(r.spend.total))}${r.spend.estimated ? dim(' (partly estimated)') : ''}  (agents ${usd(r.spend.implement)}, reviews ${usd(r.spend.review)})`);
+  console.log(`  Per merged task: ${bold(usd(r.perMergedTask))}   Wasted on work that never merged: ${r.wasted > 0 ? yellow(usd(r.wasted)) : usd(0)}`);
+  if (r.retries.runs) {
+    const saved = r.retries.avgFresh && r.retries.avgResumed !== null ? dim(` (a resumed retry cost ${usd(r.retries.avgResumed)} on average vs ${usd(r.retries.avgFresh)} fresh)`) : '';
+    console.log(`  Retries: ${r.retries.runs}, of which ${r.retries.resumed} continued the earlier session${saved}`);
+  }
+  const ph = r.phases;
+  if (Object.keys(ph).length) console.log(`  Typical attempt: prepare ${secs(ph.prepare)}, agent ${secs(ph.agent)}, checks ${secs(ph.verify)}${ph.review !== undefined ? `, review ${secs(ph.review)}` : ''}, other ${secs(ph.collect)}`);
+  console.log(`  Waits: ${secs(r.waits.toStart)} from added to started, ${secs(r.waits.toMerge)} from checks passing to merged`);
+  if (r.byAgent.length) {
+    console.log('  By agent:');
+    for (const x of r.byAgent.slice(0, 8)) console.log(`    ${`${x.agent}${x.model ? ` (${x.model})` : ''}`.padEnd(28)} ${String(x.runs).padStart(4)} runs  ${usd(x.cost).padStart(8)}  ${dim(`${x.runs ? Math.round((x.success / x.runs) * 100) : 0}% succeeded`)}`);
+  }
 }
 
 async function cmdService(a: Args) {
@@ -527,7 +610,7 @@ async function cmdWorker(a: Args) {
   }
   const loop = new WorkerLoop({
     client, machineId: machineId(), repos: () => repos, agents: () => detectAgents(loadConfig()), localConfig: () => loadConfig(),
-    transport: httpTransport(hub, token, machineId()), verifySlots: new Semaphore(loadConfig().verifyParallel),
+    transport: httpTransport(hub, token, machineId()), verifySlots: new Semaphore(verifySlotsFor(loadConfig())),
   });
   await loop.heartbeat();
   console.log(green(`✔ ${hostname()} joined ${hub}`) + dim(` with ${Object.keys(repos).length} repo(s) and agents: ${detectAgents(loadConfig()).join(', ') || 'none'}`));
@@ -650,7 +733,7 @@ async function cmdPlugin(a: Args) {
     const config = loadConfig();
     const adapter = getAdapter(builder, config) ?? die(`Unknown agent ${builder}`);
     console.log(dim(`Creator mode: ${adapter.label} is writing the plugin...`));
-    const spec = adapter.build({ prompt: creatorPrompt(name, kind, describe), cwd: dir, model: null, settings: { enabled: true, models: {}, maxParallel: 1, extraArgs: [], autonomy: 'workspace' } });
+    const spec = adapter.build({ prompt: creatorPrompt(name, kind, describe), cwd: dir, model: null, settings: defaultAgentSettings({ maxParallel: 1 }) });
     const child = spawn(spec.command, spec.args, { cwd: dir, stdio: [spec.stdin !== undefined ? 'pipe' : 'ignore', 'pipe', 'inherit'], env: process.env });
     if (spec.stdin !== undefined) child.stdin?.end(spec.stdin);
     const rl = createLineReader({ input: child.stdout! });
@@ -771,6 +854,7 @@ async function main() {
     case 'learn': return cmdLearn(a);
     case 'lessons': return cmdLessons(a);
     case 'disk': return cmdDisk(a);
+    case 'report': return cmdReport(a);
     case 'service': return cmdService(a);
     case 'clean': return cmdClean(a);
     case 'hub': return cmdHub(a);

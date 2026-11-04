@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { availableParallelism } from 'node:os';
 import * as z from 'zod/v4';
 import { expandHome, paths, yardHome } from './paths.ts';
 
@@ -15,6 +16,21 @@ const AgentSettingsSchema = z.object({
   extraArgs: z.array(z.string()).default([]),
   /** Passed to agents that support permission modes. Headless runs cannot answer prompts. */
   autonomy: z.enum(['full', 'workspace']).default('workspace'),
+  /**
+   * "lean" (default): background runs skip your MCP servers, skills and slash commands, and Claude Code's optional
+   * tools. Your CLAUDE.md/AGENTS.md, hooks and permission rules still apply. Measured on Claude Code 2.1: the context
+   * every turn re-reads drops from about 61k to 14k tokens, and startup is roughly twice as fast.
+   * "full": load everything your interactive sessions load.
+   */
+  context: z.enum(['lean', 'full']).default('lean'),
+  /** Claude Code tools for lean runs (default: the ones coding needs). */
+  tools: z.array(z.string()).optional(),
+  /** MCP servers lean runs should still load: path to an MCP config JSON (Claude Code `--mcp-config`). */
+  mcpConfig: z.string().optional(),
+  /** Reasoning effort per tier, e.g. { "cheap": "low", "standard": "medium", "strong": "high" }. Empty string: the agent's default. */
+  effort: z.partialRecord(TierSchema, z.string()).default({}),
+  /** On retry, continue the previous session instead of starting over (it keeps what the agent already read). */
+  resume: z.boolean().default(true),
 });
 export type AgentSettings = z.infer<typeof AgentSettingsSchema>;
 
@@ -68,7 +84,8 @@ export const ConfigSchema = z.object({
    */
   verifyQuick: z.array(z.string()).default([]),
   verifyTimeoutMinutes: z.number().default(20),
-  verifyParallel: z.number().int().min(1).default(1),
+  /** How many task check runs at once. Unset: about one per 4 CPU cores, up to maxParallel. Merge checks get their own slot. */
+  verifyParallel: z.number().int().min(1).optional(),
   maxParallel: z.number().int().min(1).default(3),
   defaultTier: TierSchema.optional(),
   agents: z.record(z.string(), AgentSettingsSchema.partial()).default({}),
@@ -151,8 +168,11 @@ export const ConfigSchema = z.object({
       crossFamily: z.boolean().default(true),
       /** If the reviewer still objects after the last round: proceed with a note, or stop for a person. */
       onUnresolved: z.enum(['proceed', 'needs_human']).default('proceed'),
+      /** A review reads the diff it's given plus a few files; these caps keep one from turning into a long session. */
+      maxTurns: z.number().int().min(1).default(15),
+      budgetUsd: z.number().positive().default(1),
     })
-    .default({ mode: 'auto', minChangedLines: 200, maxRounds: 1, reviewers: ['claude', 'codex', 'gemini', 'cursor', 'opencode'], crossFamily: true, onUnresolved: 'proceed' }),
+    .default({ mode: 'auto', minChangedLines: 200, maxRounds: 1, reviewers: ['claude', 'codex', 'gemini', 'cursor', 'opencode'], crossFamily: true, onUnresolved: 'proceed', maxTurns: 15, budgetUsd: 1 }),
   learning: z
     .object({
       /** Pick agents by their verified track record on this repo, not just list order. */
@@ -247,13 +267,19 @@ export const PRESETS: Record<Config['preset'], ConfigInput> = {
   },
 };
 
+const AGENT_BASE = { enabled: true, extraArgs: [], autonomy: 'workspace', context: 'lean', effort: {}, resume: true } as const;
+
+export function defaultAgentSettings(over: Partial<AgentSettings> = {}): AgentSettings {
+  return { ...AGENT_BASE, models: {}, maxParallel: 2, extraArgs: [], effort: {}, ...over };
+}
+
 export const DEFAULT_AGENTS: Record<string, AgentSettings> = {
-  claude: { enabled: true, models: { cheap: 'haiku', standard: 'sonnet', strong: 'opus' }, maxParallel: 3, extraArgs: [], autonomy: 'workspace' },
-  codex: { enabled: true, models: {}, maxParallel: 3, extraArgs: [], autonomy: 'workspace' },
-  opencode: { enabled: true, models: {}, maxParallel: 2, extraArgs: [], autonomy: 'workspace' },
-  cursor: { enabled: true, models: {}, maxParallel: 2, extraArgs: [], autonomy: 'workspace' },
-  gemini: { enabled: true, models: {}, maxParallel: 2, extraArgs: [], autonomy: 'workspace' },
-  mock: { enabled: true, models: {}, maxParallel: 8, extraArgs: [], autonomy: 'workspace' },
+  claude: { ...AGENT_BASE, models: { cheap: 'haiku', standard: 'sonnet', strong: 'opus' }, maxParallel: 3, extraArgs: [], effort: {} },
+  codex: { ...AGENT_BASE, models: {}, maxParallel: 3, extraArgs: [], effort: {} },
+  opencode: { ...AGENT_BASE, models: {}, maxParallel: 2, extraArgs: [], effort: {} },
+  cursor: { ...AGENT_BASE, models: {}, maxParallel: 2, extraArgs: [], effort: {} },
+  gemini: { ...AGENT_BASE, models: {}, maxParallel: 2, extraArgs: [], effort: {} },
+  mock: { ...AGENT_BASE, models: {}, maxParallel: 8, extraArgs: [], effort: {} },
 };
 
 export const DEFAULT_ROUTING: Record<Tier, string[]> = {
@@ -316,9 +342,9 @@ export function loadConfig(projectRoot?: string, overrides: unknown = {}): Confi
 }
 
 export function agentSettings(config: Config, agent: string): AgentSettings {
-  const base = DEFAULT_AGENTS[agent] ?? { enabled: true, models: {}, maxParallel: 2, extraArgs: [], autonomy: 'workspace' as const };
+  const base: AgentSettings = DEFAULT_AGENTS[agent] ?? { ...AGENT_BASE, models: {}, maxParallel: 2, extraArgs: [], effort: {} };
   const over = config.agents[agent] ?? {};
-  return { ...base, ...over, models: { ...base.models, ...(over.models ?? {}) } };
+  return { ...base, ...over, models: { ...base.models, ...(over.models ?? {}) }, effort: { ...base.effort, ...(over.effort ?? {}) } };
 }
 
 export function routingFor(config: Config, tier: Tier): string[] {
@@ -339,6 +365,10 @@ export function writeProjectConfig(root: string, cfg: Record<string, unknown>): 
   const file = join(root, PROJECT_CONFIG_FILE);
   writeFileSync(file, JSON.stringify(cfg, null, 2) + '\n');
   return file;
+}
+
+export function verifySlotsFor(config: Pick<Config, 'verifyParallel' | 'maxParallel'>, cpus = availableParallelism()): number {
+  return config.verifyParallel ?? Math.max(1, Math.min(config.maxParallel, Math.floor(cpus / 4)));
 }
 
 export function worktreeRootOf(config: Pick<Config, 'worktreeRoot'>): string {

@@ -9,6 +9,7 @@ import { revParse } from './git.ts';
 import type { Config } from './config.ts';
 import type { Supervisor } from './supervisor.ts';
 import { diskReport } from './janitor.ts';
+import { buildReport } from './report.ts';
 import { addLesson, creditLessons, lessonFromFix, lessonsFor, listLessons, markUsed, renderLessons } from './lessons.ts';
 import { coupling, filesIn } from './imports.ts';
 
@@ -329,6 +330,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
     }),
 
     'budget.today': method(z.object({}), () => coord.spentToday()),
+    'report.summary': method(z.object({ projectId: z.string().nullish(), days: z.number().min(1).max(365).default(7) }), (p) => buildReport(coord.db, { projectId: p.projectId ?? null, days: p.days })),
     'clean.plan': method(z.object({ projectId: z.string().optional() }), (p) => {
       if (!hooks.cleanPlan) throw new Error('Cleanup runs on the hub machine.');
       return hooks.cleanPlan(p.projectId);

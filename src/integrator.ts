@@ -5,6 +5,8 @@ import type { Coordinator } from './coordinator.ts';
 import { addWorktree, branchExists, conflictedFiles, git, isAncestor, isClean, isLinkedWorktreeOf, removeWorktree, revParse } from './git.ts';
 import { rememberChecked } from './ci/verified.ts';
 import { runVerify, Semaphore } from './runner.ts';
+import { runShell } from './proc.ts';
+import { lockHash, refreshDeps, siblingWorktrees } from './warmstart.ts';
 import { clip, errorFingerprint, tail } from './text.ts';
 import type { Config } from './config.ts';
 import type { Project, Task } from './types.ts';
@@ -66,8 +68,10 @@ export class Integrator {
       await git(project.root, ['branch', branch, base]);
       this.coord.event(project.id, null, 'info', 'integration.created', `Created ${branch} from ${project.base_branch}. Finished work collects there; your branches are untouched.`);
     }
-    if (!existsSync(path)) await addWorktree(project.root, path, branch, branch);
+    const created = !existsSync(path);
+    if (created) await addWorktree(project.root, path, branch, branch);
     if (!isLinkedWorktreeOf(path, project.root)) throw new Error(`${path} exists but is not a Yardmaster worktree of ${project.root}; refusing to use it.`);
+    if (created) await this.prepareDeps(project, path, config, []);
     const marker = this.coord.getMeta(`integrating:${project.id}`);
     if (!(await isClean(path))) {
       if (!marker) {
@@ -103,6 +107,27 @@ export class Integrator {
   /** Run something against the integration branch with the project lock held (used for base bundles). */
   withLock<T>(projectId: string, fn: () => Promise<T>): Promise<T> {
     return this.lock.run(projectId, fn);
+  }
+
+  /**
+   * The merge worktree needs installed dependencies like any task worktree, or combined checks fail with "command
+   * not found" and good work gets sent back. Refreshed whenever its lockfiles change (a merged dependency update),
+   * preferring the worktrees of the tasks being merged, which already installed the new dependencies.
+   */
+  private async prepareDeps(project: Project, path: string, config: Config, prefer: string[]): Promise<void> {
+    const key = `deps:${project.id}`;
+    try {
+      const r = await refreshDeps(project.root, path, config, this.coord.getMeta(key), [...prefer, ...siblingWorktrees(path)]);
+      if (!r) return;
+      this.coord.setMeta(key, lockHash(path));
+      for (const command of config.worktree.setup) {
+        const s = await runShell(command, { cwd: path, timeoutMs: config.verifyTimeoutMinutes * 60_000 });
+        if (s.code !== 0) this.coord.event(project.id, null, 'warn', 'integration.setup_failed', `Setup \`${command}\` failed in the merge worktree: ${clip(s.stdout.trim().split('\n').slice(-3).join(' '), 200)}`);
+      }
+      if (r.cloned.length) this.coord.event(project.id, null, 'info', 'integration.deps', `Merge worktree has ${r.cloned.map((c) => c.rel).join(', ')} (${(r.ms / 1000).toFixed(1)}s, no reinstall)`);
+    } catch (err) {
+      this.coord.event(project.id, null, 'warn', 'integration.deps_failed', `Couldn't prepare dependencies for the merge worktree: ${clip((err as Error).message, 200)}`);
+    }
   }
 
   /** Pulls new commits from the base branch (the user's own work) into the integration branch. */
@@ -210,6 +235,7 @@ export class Integrator {
     const commands = task.verify ?? config.verify;
     if (baseMoved && commands.length) {
       this.coord.event(project.id, task.id, 'info', 'integration.reverify', `Re-checking "${task.title}" combined with work merged since it started`);
+      await this.prepareDeps(project, path, config, task.worktree ? [task.worktree] : []);
       const result = await this.verifySlots.use(() => runVerify(path, commands, config.verifyTimeoutMinutes));
       if (!result.ok) {
         await git(path, ['reset', '--hard', before]);
@@ -270,6 +296,7 @@ export class Integrator {
       merged.push(t);
     }
     this.coord.event(project.id, null, 'info', 'integration.train', `Checking ${merged.length} finished tasks together in one run: ${merged.map((t) => `"${clip(t.title, 40)}"`).join(', ')}`);
+    await this.prepareDeps(project, path, config, merged.flatMap((t) => (t.worktree ? [t.worktree] : [])));
     const result = await this.verifySlots.use(() => runVerify(path, config.verify, config.verifyTimeoutMinutes));
     const stillMerging = merged.every((t) => this.coord.getTask(t.id)?.status === 'merging');
     if (!result.ok || !stillMerging) {

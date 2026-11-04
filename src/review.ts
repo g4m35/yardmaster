@@ -38,7 +38,8 @@ export function shouldReview(task: Task, config: Config, files: string[], change
     case 'always':
       return 'every change is reviewed';
     case 'auto': {
-      if (task.tier === 'strong') return 'strong-tier work';
+      // The tier the task was created with: a retry escalated to a stronger model isn't a reason for a review.
+      if ((task.created_tier ?? task.tier) === 'strong') return 'strong-tier work';
       const hot = files.find((f) => config.hotFiles.some((h) => matches(f, h)));
       if (hot) return `touches shared file ${hot}`;
       if (changedLines >= config.review.minChangedLines) return `large change (${changedLines} lines)`;
@@ -85,6 +86,7 @@ export async function runReview(opts: { task: Task; config: Config; implementer:
   const settings = agentSettings(opts.config, reviewer);
   const r = await runOneShot({
     agent: reviewer, config: opts.config, cwd: opts.cwd, readOnly: true, model: settings.models.standard ?? settings.models.strong ?? null,
+    tier: 'standard', maxTurns: opts.config.review.maxTurns, budgetUsd: opts.config.review.budgetUsd,
     prompt: reviewPrompt(opts.task, diff, opts.task.review_rounds), env: { YARDMASTER_REVIEW_ROUND: String(opts.task.review_rounds), YARDMASTER_TASK_ID: opts.task.id },
   });
   let review: Review;

@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url';
 import * as z from 'zod/v4';
 import { registerAdapter } from './adapters/index.ts';
 import type { Adapter, AgentEvent } from './adapters/types.ts';
-import { DEFAULT_AGENTS } from './config.ts';
+import { DEFAULT_AGENTS, defaultAgentSettings } from './config.ts';
 import { paths } from './paths.ts';
 import type { YardEvent } from './types.ts';
 
@@ -64,7 +64,7 @@ export async function loadPlugins(root = paths.plugins()): Promise<LoadedPlugins
       const p = await loadPluginFile(entry);
       if (p.kind === 'adapter') {
         registerAdapter({ ...p, label: p.label ?? p.name } as unknown as Adapter);
-        DEFAULT_AGENTS[p.name] ??= { enabled: true, models: {}, maxParallel: 2, extraArgs: [], autonomy: 'workspace' };
+        DEFAULT_AGENTS[p.name] ??= defaultAgentSettings();
         out.adapters.push(p.name);
       } else {
         out.notifiers.push({ name: p.name, onEvent: p.onEvent as (e: YardEvent) => unknown });
@@ -90,7 +90,7 @@ export async function testPlugin(dir: string): Promise<{ ok: boolean; checks: { 
   }
   if (plugin.kind === 'adapter') {
     try {
-      const spec = (plugin.build as Adapter['build'])({ prompt: 'Say hello', cwd: dir, model: null, settings: { enabled: true, models: {}, maxParallel: 1, extraArgs: [], autonomy: 'workspace' } });
+      const spec = (plugin.build as Adapter['build'])({ prompt: 'Say hello', cwd: dir, model: null, settings: defaultAgentSettings({ maxParallel: 1 }) });
       const ok = typeof spec?.command === 'string' && Array.isArray(spec.args) && spec.args.every((a) => typeof a === 'string');
       checks.push({ name: 'build() returns { command, args[] }', ok, detail: ok ? `${spec.command} ${spec.args.join(' ').slice(0, 80)}` : JSON.stringify(spec) });
       const promptPassed = spec.stdin === 'Say hello' || spec.args.some((a) => a.includes('Say hello'));

@@ -44,7 +44,14 @@ function toTask(r: Row): Task {
 }
 
 function toRun(r: Row): Run {
-  return { ...(r as unknown as Run), touched: JSON.parse(String(r.touched ?? '[]')) as string[], lessons: JSON.parse(String(r.lessons ?? '[]')) as string[], cost_estimated: Boolean(r.cost_estimated) };
+  return {
+    ...(r as unknown as Run),
+    touched: JSON.parse(String(r.touched ?? '[]')) as string[],
+    lessons: JSON.parse(String(r.lessons ?? '[]')) as string[],
+    cost_estimated: Boolean(r.cost_estimated),
+    phases: JSON.parse(String(r.phases ?? '{}')) as Record<string, number>,
+    resumed: Boolean(r.resumed),
+  };
 }
 
 const TASK_COLUMNS = new Set([
@@ -53,9 +60,10 @@ const TASK_COLUMNS = new Set([
   'not_before', 'wait_for', 'pending_rebase', 'control', 'summary', 'last_error', 'retry_note', 'error_fp',
   'same_error_count', 'conflict_rounds', 'attention', 'approved', 'started_at', 'finished_at', 'ready_at', 'prompt', 'title',
   'review', 'review_rounds', 'race_group', 'guidance', 'needs_approval', 'policies', 'scope_inferred',
+  'agent_session', 'session_agent', 'session_cost', 'session_at',
 ]);
 
-const RUN_COLUMNS = new Set(['pid', 'proc_started', 'status', 'stop_reason', 'exit_code', 'cost_usd', 'tokens_in', 'tokens_out', 'cost_estimated', 'last_activity', 'touched', 'ended_at', 'lessons', 'verdict']);
+const RUN_COLUMNS = new Set(['pid', 'proc_started', 'status', 'stop_reason', 'exit_code', 'cost_usd', 'tokens_in', 'tokens_out', 'cost_estimated', 'last_activity', 'touched', 'ended_at', 'lessons', 'verdict', 'phases', 'resumed']);
 
 export class StaleAttemptError extends Error {
   constructor(id: string, status: string) {
@@ -230,14 +238,14 @@ export class Coordinator {
           this.db
             .prepare(
               `INSERT INTO tasks (id, project_id, title, prompt, fingerprint, status, priority, tier, agent, scope, scope_inferred, verify,
-                allow_no_changes, max_attempts, budget_usd, created_by, created_at, updated_at, review, race_group, guidance, needs_approval, policies)
-               VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                allow_no_changes, max_attempts, budget_usd, created_by, created_at, updated_at, review, race_group, guidance, needs_approval, policies, created_tier)
+               VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             )
             .run(
               taskId, projectId, title, prompt, taskFingerprint(title, prompt), input.priority ?? effects.priority ?? 0, tier, agent,
               JSON.stringify(scope), explicit.length ? 0 : 1, (input.verify ?? effects.verify) ? JSON.stringify(input.verify ?? effects.verify) : null,
               input.allowNoChanges ? 1 : 0, effects.maxAttempts ?? cfg.retry.maxAttempts, input.budgetUsd ?? effects.budgetUsd ?? cfg.budget.perTaskUsd,
-              createdBy, now, now, input.review ?? effects.review ?? null, raceGroup, effects.guidance ?? null, effects.requireApproval ? 1 : 0, JSON.stringify(matched),
+              createdBy, now, now, input.review ?? effects.review ?? null, raceGroup, effects.guidance ?? null, effects.requireApproval ? 1 : 0, JSON.stringify(matched), tier,
             );
         if (bestOf < 2) {
           insert(id, input.title.trim(), input.agent ?? effects.agent ?? null, null);
@@ -702,7 +710,7 @@ export class Coordinator {
       sets.push(`${k} = ?`);
       if (v === undefined || v === null) vals.push(null);
       else if (typeof v === 'boolean') vals.push(v ? 1 : 0);
-      else if (Array.isArray(v)) vals.push(JSON.stringify(v));
+      else if (Array.isArray(v) || typeof v === 'object') vals.push(JSON.stringify(v));
       else vals.push(v as string | number);
     }
     if (!sets.length) return;

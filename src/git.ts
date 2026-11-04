@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { run, cleanEnv } from './proc.ts';
+import { removeWorktreeFast } from './fastfs.ts';
 
 export class GitError extends Error {
   readonly stderr: string;
@@ -148,8 +149,17 @@ export async function addWorktree(root: string, path: string, branch: string, st
   }
 }
 
+/**
+ * Remove a clean linked worktree. The fast path moves it to the worktree root's trash and deletes it in the
+ * background (a big node_modules takes seconds to delete); anything unusual falls back to `git worktree remove`.
+ */
 export async function removeWorktree(root: string, path: string): Promise<void> {
-  await git(root, ['worktree', 'remove', path]);
+  if (!(await isClean(path))) throw new GitError(['worktree', 'remove', path], `${path} has uncommitted changes`);
+  try {
+    removeWorktreeFast(root, path, join(dirname(dirname(path)), '.trash'));
+  } catch {
+    await git(root, ['worktree', 'remove', path]);
+  }
 }
 
 /** Confirms a directory is a linked worktree of `root` (and not, say, the user's main checkout). */

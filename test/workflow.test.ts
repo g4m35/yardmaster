@@ -105,8 +105,18 @@ test('a failed check is retried with the failure as context and then succeeds', 
   const [final] = await s.settle([t!.id]);
   assert.equal(final!.status, 'done');
   assert.equal(final!.attempts, 2);
-  assert.equal(final!.tier, 'standard', 'retry used a stronger tier');
+  assert.equal(final!.tier, 'cheap', 'a first failure is retried by the same (cheaper) model, which now sees the error');
   assert.equal(fileOnIntegration(s.repo, 'parser.js'), 'export const parse = (x) => x;');
+});
+
+test('a second, different failure escalates to a stronger model', async () => {
+  const s = await startHub();
+  const marker = 'BRO' + 'KEN';
+  const [t] = s.add([{ title: 'Write the lexer', prompt: `@mock attempt 1 write lexer.js ${marker}\n@mock attempt 2 write lexer.js ok\n@mock attempt 2 write tokens.js ${marker}\n@mock attempt 3 write tokens.js ok`, agent: 'mock', tier: 'cheap' }]).created;
+  const [final] = await s.settle([t!.id]);
+  assert.equal(final!.status, 'done', final!.attention ?? '');
+  assert.equal(final!.attempts, 3);
+  assert.equal(final!.tier, 'standard');
 });
 
 test('an agent that changes nothing is not accepted as done', async () => {
