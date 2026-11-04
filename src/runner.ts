@@ -447,8 +447,10 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   await api['task.usage']({ id: task.id, costUsd: cost, tokensIn, tokensOut });
   const totals: TaskPatch = {};
   const summary = clip(resultText || lastText, 1200);
-  // Remember the session so a retry can continue it. Owner-fenced like every other write of this attempt.
-  if (sessionId && adapter.resumable && !stop) {
+  // Remember the session, and what it has cost so far, so a retry can continue it without charging this run again.
+  // Interrupted runs (redirect, preemption, shutdown) count too: they are resumed next. Owner-fenced like every write.
+  const stopReason = (stop as { reason: StopReason } | null)?.reason;
+  if (sessionId && adapter.resumable && stopReason !== 'lost' && stopReason !== 'canceled') {
     await update(ctx, { agent_session: sessionId, session_agent: ctx.agent, session_cost: meter.sessionTotal, session_at: Date.now() });
   }
 

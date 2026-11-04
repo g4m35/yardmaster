@@ -1,11 +1,11 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync, type Dirent } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, statSync, writeFileSync, type Dirent } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { dirBytes } from './disk.ts';
 import { cloneTree, removeFast } from './fastfs.ts';
 import { yardHome } from './paths.ts';
-import { lockHash } from './warmstart.ts';
+import { clonesAreFree, lockHash } from './warmstart.ts';
 
 /**
  * Duplicate dependency installs across every project on this machine, and a recoverable way to share them.
@@ -13,9 +13,9 @@ import { lockHash } from './warmstart.ts';
  * Copies whose installs are provably identical can be replaced by copy-on-write clones of one of them: the
  * projects stay ordinary folders, nothing changes for any tool, and the space comes back.
  *
- * "Provably identical" = the package manager's own record of what's installed (npm's node_modules/.package-lock.json,
- * pnpm's .modules.yaml, Yarn's state files) matches byte for byte, and so do the compiled native addons (*.node),
- * which differ when installs ran under different Node versions.
+ * Candidates are found cheaply (same lockfiles and the package manager's own record of what's installed: npm's
+ * node_modules/.package-lock.json, pnpm's .modules.yaml, Yarn's state files). Before anything is swapped, the two
+ * installs are compared file by file (contents, symlink targets, executable bits); only byte-identical ones are.
  */
 
 const INSTALL_STATE = ['.package-lock.json', '.modules.yaml', '.yarn-state.yml', '.yarn-integrity'];
@@ -86,21 +86,31 @@ function installedHash(nodeModules: string): string | null {
   return null;
 }
 
-/** Compiled addons differ by Node version and platform even when the package list is the same. */
-export function nativeFingerprint(nodeModules: string): string {
-  const h = createHash('sha1');
-  const stack = [nodeModules];
-  const found: string[] = [];
-  while (stack.length) {
-    const d = stack.pop()!;
-    for (const e of safeDirents(d)) {
-      const p = join(d, e.name);
-      if (e.isDirectory()) stack.push(p);
-      else if (e.isFile() && e.name.endsWith('.node')) found.push(p);
+/**
+ * A digest of everything in an install: every path, every file's bytes, every symlink's target. Identical lockfiles
+ * and package-manager records aren't enough on their own: patched packages, postinstall scripts that generate files,
+ * and native addons built under another Node version all leave them unchanged. Only byte-identical installs are
+ * ever swapped, so a dedupe can never change what a project runs.
+ */
+export function contentDigest(nodeModules: string): string {
+  const h = createHash('sha256');
+  const walk = (dir: string, rel: string) => {
+    const entries = safeDirents(dir).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const e of entries) {
+      const p = join(dir, e.name);
+      const r = `${rel}/${e.name}`;
+      if (e.isSymbolicLink()) h.update(`l${r}\0${readlinkSync(p)}\0`);
+      else if (e.isDirectory()) {
+        h.update(`d${r}\0`);
+        walk(p, r);
+      } else if (e.isFile()) {
+        const st = statSync(p);
+        h.update(`f${r}\0${st.size}\0${st.mode & 0o111 ? 'x' : '-'}\0`).update(readFileSync(p));
+      }
     }
-  }
-  for (const p of found.sort()) h.update(p.slice(nodeModules.length)).update(readFileSync(p));
-  return h.digest('hex').slice(0, 16);
+  };
+  walk(nodeModules, '');
+  return h.digest('hex');
 }
 
 export async function scanDeps(roots: string[], opts: { maxDepth?: number; onProgress?: (done: number, total: number) => void } = {}): Promise<ScanResult> {
@@ -166,7 +176,11 @@ export async function dedupeGroup(g: DepsGroup, opts: { dryRun?: boolean } = {})
   const skipped: { path: string; why: string }[] = [];
   const [keep, ...rest] = g.dirs;
   if (!keep) return { replaced, skipped };
-  const keepNative = nativeFingerprint(keep.path);
+  let keepDigest: string | null = null;
+  if (!(await clonesAreFree(dirname(keep.path)))) {
+    for (const d of rest) skipped.push({ path: d.path, why: "this disk can't clone copy-on-write, so sharing wouldn't save space" });
+    return { replaced, skipped };
+  }
   const batch = join(trashRoot(), String(Date.now()));
   for (const d of rest) {
     if (!sameDevice(keep.path, d.path)) {
@@ -177,8 +191,10 @@ export async function dedupeGroup(g: DepsGroup, opts: { dryRun?: boolean } = {})
       skipped.push({ path: d.path, why: 'changed since the scan' });
       continue;
     }
-    if (nativeFingerprint(d.path) !== keepNative) {
-      skipped.push({ path: d.path, why: 'compiled native modules differ (installed under another Node version?)' });
+    // Cheap checks first; the full byte comparison only for copies that passed them.
+    keepDigest ??= contentDigest(keep.path);
+    if (contentDigest(d.path) !== keepDigest) {
+      skipped.push({ path: d.path, why: 'its files differ from the other copy (patched packages, generated files, or native modules built for another Node version)' });
       continue;
     }
     if (opts.dryRun) {
@@ -188,7 +204,8 @@ export async function dedupeGroup(g: DepsGroup, opts: { dryRun?: boolean } = {})
     const fresh = `${d.path}.ym-clone-${process.pid}`;
     const r = await cloneTree(keep.path, fresh);
     if (!r.ok) {
-      skipped.push({ path: d.path, why: `clone failed: ${r.error ?? r.method}` });
+      // Without copy-on-write a "shared" copy would be a full copy: no space saved, so nothing is changed.
+      skipped.push({ path: d.path, why: "this disk can't clone copy-on-write, so sharing wouldn't save space" });
       continue;
     }
     mkdirSync(batch, { recursive: true });

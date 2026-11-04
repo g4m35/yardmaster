@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sandbox, sh, tempDir, until } from './helpers.ts';
 import { cloneTree, removeFast, removeWorktreeFast } from '../src/fastfs.ts';
-import { lockHash, warmStart } from '../src/warmstart.ts';
+import { clonesAreFree, lockHash, warmStart } from '../src/warmstart.ts';
 import { claude, codex, CLAUDE_CODING_TOOLS } from '../src/adapters/builtin.ts';
 import { UsageMeter } from '../src/usage.ts';
 import { defaultAgentSettings, loadConfig, resolveConfig, verifySlotsFor } from '../src/config.ts';
@@ -199,6 +199,25 @@ test('a retry continues the earlier session with only what is new, and the repor
   }
 });
 
+test('a redirected run is resumed and its spend becomes the new session baseline', async () => {
+  process.env.YARDMASTER_MOCK_RESUMABLE = '1';
+  try {
+    const s = await startHub();
+    const [t] = s.add([{ title: 'Implement the importer', prompt: '@mock cost 0.1\n@mock write started.js 1\n@mock unless-prompt GUIDANCE77 sleep 30000\n@mock write result.js ok', agent: 'mock' }]);
+    await until(() => existsSync(join(s.get(t!.id).worktree ?? '/nope', 'started.js')), (v) => v, 15_000, 'started');
+    s.hub.coord.control(t!.id, 'redirect', 'test', 'GUIDANCE77: skip the slow path');
+    const [done] = await s.settle([t!.id]);
+    assert.equal(done!.status, 'done', done!.attention ?? '');
+    const impl = s.hub.coord.runsFor(t!.id).filter((r) => r.role === 'implement').sort((a, b) => a.started_at - b.started_at);
+    assert.equal(impl[0]!.stop_reason, 'redirected');
+    assert.equal(impl[1]!.resumed, true, 'the redirect continued the session');
+    assert.ok(Math.abs(done!.session_cost - 0.2) < 1e-9, `baseline covers both runs, got ${done!.session_cost}`);
+    assert.ok(Math.abs(done!.cost_usd - 0.2) < 1e-9, `each run charged once, got ${done!.cost_usd}`);
+  } finally {
+    delete process.env.YARDMASTER_MOCK_RESUMABLE;
+  }
+});
+
 test('merge-time checks run with dependencies installed (they used to fail with none)', async () => {
   const s = await startHub({ verify: ['node node_modules/checker/index.js', 'node check.mjs'], integration: { trainSize: 4 } });
   mkdirSync(join(s.box.repo, 'node_modules', 'checker'), { recursive: true });
@@ -233,26 +252,36 @@ test('the import graph updates incrementally when files change', async () => {
 
 // ---------- duplicate installs across projects ----------
 
-test('identical installs elsewhere on the machine can be shared and the original restored', async () => {
+test('identical installs elsewhere on the machine can be shared, byte-identical ones only, and restored', async () => {
   sandbox();
   const root = tempDir('ym-dedupe-');
-  for (const p of ['one', 'two', 'three']) {
+  for (const p of ['one', 'two', 'three', 'four']) {
     mkdirSync(join(root, p));
     writeFileSync(join(root, p, 'package-lock.json'), '{"lockfileVersion":3}');
-    fakeInstall(join(root, p), 60, p === 'three' ? 'different' : 'same');
+    fakeInstall(join(root, p), 60, p === 'four' ? 'different' : 'same');
   }
+  // Same lockfile and same installed-state record, but a patched file: must never be swapped.
+  writeFileSync(join(root, 'three', 'node_modules', 'pkg2', 'f2.js'), 'module.exports = "patched";\n');
   const scan = await scanDeps([root]);
-  assert.equal(scan.dirs.length, 3);
+  assert.equal(scan.dirs.length, 4);
   assert.equal(scan.identical.length, 1);
-  assert.deepEqual(scan.identical[0]!.dirs.map((d) => d.project.split('/').pop()).sort(), ['one', 'two']);
-  assert.equal(scan.sameLock.length, 0, 'a single different install has nothing to pair with');
-  const dry = await dedupeGroup(scan.identical[0]!, { dryRun: true });
-  assert.equal(dry.replaced.length, 1);
-  const before = readFileSync(join(root, 'two', 'node_modules', 'pkg1', 'f1.js'), 'utf8');
-  const applied = await dedupeGroup(scan.identical[0]!);
-  assert.equal(applied.replaced.length, 1, JSON.stringify(applied.skipped));
+  const group = scan.identical[0]!;
+  assert.deepEqual(group.dirs.map((d) => d.project.split('/').pop()).sort(), ['one', 'three', 'two']);
+  const keep = group.dirs[0]!.project.split('/').pop();
+  const cow = await clonesAreFree(root);
+  const applied = await dedupeGroup(group);
+  if (!cow) {
+    assert.equal(applied.replaced.length, 0);
+    assert.ok(applied.skipped.every((x) => /can't clone copy-on-write/.test(x.why)), JSON.stringify(applied.skipped));
+    return;
+  }
+  const patched = applied.skipped.find((x) => x.path.includes('/three/'));
+  if (keep !== 'three') assert.match(patched?.why ?? '', /files differ/, 'the patched install is left alone');
+  assert.equal(applied.replaced.length, keep === 'three' ? 0 : 1, JSON.stringify(applied.skipped));
+  if (keep === 'three') return;
   const target = applied.replaced[0]!.path;
-  assert.equal(readFileSync(join(target, 'pkg1', 'f1.js'), 'utf8'), before, 'same files after sharing');
+  assert.equal(readFileSync(join(target, 'pkg1', 'f1.js'), 'utf8'), readFileSync(join(root, keep!, 'node_modules', 'pkg1', 'f1.js'), 'utf8'));
+  assert.match(readFileSync(join(root, 'three', 'node_modules', 'pkg2', 'f2.js'), 'utf8'), /patched/);
   assert.ok(existsSync(applied.replaced[0]!.original), 'the original is kept for undo');
   const undo = restoreLatest();
   assert.deepEqual(undo.restored, [target]);
