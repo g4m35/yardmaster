@@ -9,7 +9,7 @@ import { spawnDetached } from '../proc.ts';
 import { runVerify } from '../runner.ts';
 import { tail } from '../text.ts';
 import { warmStart } from '../warmstart.ts';
-import { claimRefresh, readBudget, verdict } from './budget.ts';
+import { budgetForNow, claimRefresh, readBudget, verdict } from './budget.ts';
 import { repoSlugFromUrl, type GitHub } from './github.ts';
 import { githubClient } from './token.ts';
 import { isVerified, recordVerified, treeOf } from './verified.ts';
@@ -103,7 +103,8 @@ export async function runGate(opts: { cwd: string; remoteUrl: string; stdin: str
   // ---- budget: cached numbers only, refreshed in the background so a push never waits on it ----
   if (slug && gh) {
     const owner = slug.split('/')[0]!;
-    const state = readBudget(owner);
+    // Last month's numbers say nothing about this month's allowance; treat them as missing (and refresh).
+    const state = budgetForNow(readBudget(owner));
     // Estimates read every private repo's runs, so they refresh at most hourly to stay far from API rate limits.
     const maxAgeMin = state?.source === 'estimate' ? Math.max(60, config.ci.budget.refreshMinutes) : config.ci.budget.refreshMinutes;
     const stale = !state || Date.now() - state.at > maxAgeMin * 60_000;

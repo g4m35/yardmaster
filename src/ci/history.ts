@@ -116,38 +116,47 @@ function cacheFile(repo: string): string {
   return join(dir, `${repo.replace('/', '__')}.json`);
 }
 
-function readCache(repo: string): Record<string, JobRec[]> {
+/** Cached jobs of a finished run, valid while the run's `updated_at` is unchanged (a re-run keeps the id but moves it). */
+interface CacheEntry {
+  u: number;
+  jobs: JobRec[];
+}
+
+function readCache(repo: string): Record<string, CacheEntry> {
   const f = cacheFile(repo);
   if (!existsSync(f)) return {};
   try {
-    return (JSON.parse(readFileSync(f, 'utf8')) as { jobs?: Record<string, JobRec[]> }).jobs ?? {};
+    const data = JSON.parse(readFileSync(f, 'utf8')) as { v?: number; jobs?: Record<string, CacheEntry> };
+    return data.v === 2 ? (data.jobs ?? {}) : {};
   } catch {
     return {};
   }
 }
 
-/** Jobs for each run, every attempt included (re-runs are billed too). Finished runs are cached on disk forever. */
+/** Jobs for each run, every attempt included (re-runs are billed too). Finished runs are cached until they change. */
 export async function loadJobs(gh: GitHub, repo: string, runs: RunRec[], onProgress?: (done: number, total: number) => void): Promise<Map<number, JobRec[]>> {
   const cache = readCache(repo);
   const out = new Map<number, JobRec[]>();
   const todo = runs.filter((r) => {
     const hit = cache[r.id];
-    if (hit && r.status === 'completed') out.set(r.id, hit);
-    return !(hit && r.status === 'completed');
+    const fresh = !!hit && r.status === 'completed' && hit.u === r.updatedAt;
+    if (fresh) out.set(r.id, hit.jobs);
+    return !fresh;
   });
   let done = 0;
   await mapLimit(todo, 8, async (r) => {
     const jobs = await gh.paginate<ApiJob>(`/repos/${repo}/actions/runs/${r.id}/jobs`, 'jobs', { filter: 'all' });
     const recs = jobs.map((j) => ({ runId: r.id, name: j.name, labels: j.labels ?? [], startedAt: j.started_at, completedAt: j.completed_at, conclusion: j.conclusion }));
     out.set(r.id, recs);
-    if (r.status === 'completed' && jobs.every((j) => j.status === 'completed')) cache[r.id] = recs;
+    if (r.status === 'completed' && jobs.every((j) => j.status === 'completed')) cache[r.id] = { u: r.updatedAt, jobs: recs };
+    else delete cache[r.id];
     onProgress?.(++done, todo.length);
   });
   // Keep the cache to runs we still care about (about three months), so it can't grow without bound.
   const keep = new Set(runs.map((r) => String(r.id)));
   const ids = Object.keys(cache).sort((a, b) => Number(b) - Number(a));
   const trimmed = Object.fromEntries(ids.filter((id, i) => keep.has(id) || i < 20_000).map((id) => [id, cache[id]!]));
-  writeFileSync(cacheFile(repo), JSON.stringify({ v: 1, jobs: trimmed }));
+  writeFileSync(cacheFile(repo), JSON.stringify({ v: 2, jobs: trimmed }));
   return out;
 }
 

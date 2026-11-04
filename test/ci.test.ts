@@ -11,7 +11,8 @@ import type { RepoHistory, RunRec, JobRec } from '../src/ci/history.ts';
 import { lintWorkflow } from '../src/ci/workflows.ts';
 import { createGitHub } from '../src/ci/github.ts';
 import { decide, record, testedContext, type GuardContext } from '../src/ci/guard.ts';
-import { computeBudget, verdict, writeBudget } from '../src/ci/budget.ts';
+import { computeBudget, currentMonth, verdict, writeBudget } from '../src/ci/budget.ts';
+import { loadJobs } from '../src/ci/history.ts';
 import { parsePushInput, runGate } from '../src/ci/gate.ts';
 import { installGateHook, uninstallGateHook } from '../src/ci/hookfile.ts';
 import { rememberChecked } from '../src/ci/verified.ts';
@@ -298,8 +299,30 @@ test('budget uses GitHub billing numbers when allowed, estimates otherwise', asy
   assert.equal(est.source, 'estimate');
   assert.ok(Math.abs(est.spentUsd - 6 * 0.006) < 1e-9, `2 jobs x 3 billed minutes, got ${est.spentUsd}`);
   assert.equal(verdict({ ...est, spentUsd: 12.5 }, cfg).level, 'over');
+  assert.notEqual(verdict({ ...est, spentUsd: 12.5, projectedUsd: 12.5 }, { ...cfg, extraUsd: 10 }).level, 'over', 'raising extraUsd takes effect without waiting for a refresh');
+  assert.equal(verdict({ ...est, spentUsd: 15, includedUsd: 100 }, cfg).level, 'over', 'the allowance comes from current settings, not the cached state');
   assert.equal(verdict({ ...est, spentUsd: 1, projectedUsd: 11 }, cfg).level, 'warn');
   assert.equal(verdict({ ...est, spentUsd: 1, projectedUsd: 2 }, cfg).level, 'ok');
+});
+
+test('job cache notices a re-run: same run id, new attempt', async () => {
+  sandbox();
+  let attempts = 1;
+  let fetches = 0;
+  const job = (n: number) => ({ run_id: 7, name: `attempt ${n}`, labels: ['ubuntu-latest'], status: 'completed', conclusion: 'success', started_at: '2026-11-01T00:00:00Z', completed_at: '2026-11-01T00:01:00Z' });
+  const m = await mockGitHub({
+    'GET /repos/acme/app/actions/runs/7/jobs': () => {
+      fetches++;
+      return { body: { jobs: Array.from({ length: attempts }, (_, i) => job(i + 1)) } };
+    },
+  });
+  const run = (updatedAt: number): RunRec => ({ id: 7, workflow: 'CI', path: '.github/workflows/ci.yml', event: 'push', branch: 'main', sha: 'a', tree: 't', status: 'completed', conclusion: 'success', actor: 'x', createdAt: 1, updatedAt, url: '' });
+  assert.equal((await loadJobs(m.gh, 'acme/app', [run(1000)])).get(7)!.length, 1);
+  assert.equal((await loadJobs(m.gh, 'acme/app', [run(1000)])).get(7)!.length, 1);
+  assert.equal(fetches, 1, 'an unchanged finished run comes from the cache');
+  attempts = 2;
+  assert.equal((await loadJobs(m.gh, 'acme/app', [run(2000)])).get(7)!.length, 2, 'the re-run attempt is billed too');
+  assert.equal(fetches, 2);
 });
 
 // ---------- the push gate ----------
@@ -391,14 +414,17 @@ test('push gate holds pushes to a private repo once the allowance is gone, and w
   try {
     const sha = sh(box.repo, 'git', ['rev-parse', 'HEAD']);
     const stdin = `refs/heads/main ${sha} refs/heads/main ${'0'.repeat(40)}\n`;
-    writeBudget({ owner: 'acme', at: Date.now(), month: '2026-11', source: 'estimate', spentUsd: 12.4, overageUsd: null, includedUsd: 12, extraUsd: 0, projectedUsd: 30, minutes: 2000, repos: [] });
+    writeBudget({ owner: 'acme', at: Date.now(), month: currentMonth(), source: 'estimate', spentUsd: 12.4, overageUsd: null, includedUsd: 12, extraUsd: 0, projectedUsd: 30, minutes: 2000, repos: [] });
     const held = await runGate({ cwd: box.repo, remoteUrl: 'https://github.com/acme/app.git', stdin });
     assert.equal(held.code, 1);
     assert.match(held.lines.join('\n'), /held so it does not start paid CI runs/);
     const forced = await runGate({ cwd: box.repo, remoteUrl: 'https://github.com/acme/app.git', stdin, env: { ...process.env, YM_CI_FORCE: '1' } });
     assert.equal(forced.code, 0, forced.lines.join('\n'));
+    writeBudget({ owner: 'acme', at: Date.now(), month: '1999-01', source: 'estimate', spentUsd: 99, overageUsd: null, includedUsd: 12, extraUsd: 0, projectedUsd: 99, minutes: 9000, repos: [] });
+    const newMonth = await runGate({ cwd: box.repo, remoteUrl: 'https://github.com/acme/app.git', stdin });
+    assert.equal(newMonth.code, 0, 'last month\'s spending never holds a push after the allowance resets');
 
-    writeBudget({ owner: 'acme', at: Date.now(), month: '2026-11', source: 'estimate', spentUsd: 1, overageUsd: null, includedUsd: 12, extraUsd: 0, projectedUsd: 2, minutes: 100, repos: [] });
+    writeBudget({ owner: 'acme', at: Date.now(), month: currentMonth(), source: 'estimate', spentUsd: 1, overageUsd: null, includedUsd: 12, extraUsd: 0, projectedUsd: 2, minutes: 100, repos: [] });
     live = true;
     const warned = await runGate({ cwd: box.repo, remoteUrl: 'https://github.com/acme/app.git', stdin });
     assert.equal(warned.code, 0);

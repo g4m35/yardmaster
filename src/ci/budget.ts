@@ -112,7 +112,7 @@ export async function computeBudget(gh: GitHub, owner: string, cfg: BudgetCfg, o
   const now = opts.now ?? new Date();
   const account = await gh.get<{ type: string; login: string }>(`/users/${owner}`);
   const isOrg = account.type === 'Organization';
-  const base = { owner: account.login, at: Date.now(), month: now.toISOString().slice(0, 7), includedUsd: cfg.includedUsd ?? DEFAULT_INCLUDED_USD, extraUsd: cfg.extraUsd };
+  const base = { owner: account.login, at: Date.now(), month: currentMonth(now), includedUsd: cfg.includedUsd ?? DEFAULT_INCLUDED_USD, extraUsd: cfg.extraUsd };
   const billing = await fromBilling(gh, account.login, isOrg, now);
   if (billing) {
     const state: BudgetState = { ...base, source: 'billing', ...billing, projectedUsd: billing.spentUsd / monthElapsed(now), repos: [] };
@@ -157,8 +157,19 @@ export interface Verdict {
   message: string;
 }
 
+/** The calendar month (UTC) budget states are kept for, e.g. "2026-11". */
+export function currentMonth(now = new Date()): string {
+  return now.toISOString().slice(0, 7);
+}
+
+/** A cached state counts only for the month it was measured in: allowances reset on the 1st. */
+export function budgetForNow(state: BudgetState | null, now = new Date()): BudgetState | null {
+  return state && state.month === currentMonth(now) ? state : null;
+}
+
+/** Judged against the current settings, not the ones in force when the numbers were cached. */
 export function verdict(state: BudgetState, cfg: BudgetCfg): Verdict {
-  const limit = state.includedUsd + state.extraUsd;
+  const limit = (cfg.includedUsd ?? DEFAULT_INCLUDED_USD) + cfg.extraUsd;
   const pct = limit > 0 ? Math.round((state.spentUsd / limit) * 100) : 100;
   const money = (n: number) => `$${n.toFixed(2)}`;
   const head = `${state.owner}: ${money(state.spentUsd)} of ${money(limit)} Actions allowance used this month (${pct}%${state.source === 'estimate' ? ', estimated' : ''})`;

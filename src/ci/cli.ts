@@ -1,7 +1,7 @@
 import { loadConfig } from '../config.ts';
 import { git, mainRepoRoot, repoRoot } from '../git.ts';
 import { analyze, totalOf, type Analysis, type Bucket } from './analyze.ts';
-import { computeBudget, readBudget, verdict } from './budget.ts';
+import { budgetForNow, computeBudget, readBudget, verdict } from './budget.ts';
 import { gateCommands, recentPushes, runGate } from './gate.ts';
 import { repoSlugFromUrl, type GitHub } from './github.ts';
 import { repoHistory } from './history.ts';
@@ -225,7 +225,7 @@ async function cmdStatus(ui: Ui): Promise<void> {
   const guarded = workflows.filter((w) => !lintWorkflow(w).some((f) => f.code === 'no-guard'));
   if (workflows.length) console.log(`${guarded.length === workflows.length ? ui.green('●') : ui.yellow('●')} Guard in ${guarded.length} of ${workflows.length} workflow(s)`);
   const slug = await originSlug(root);
-  const state = slug ? readBudget(slug.split('/')[0]!) : null;
+  const state = slug ? budgetForNow(readBudget(slug.split('/')[0]!)) : null;
   if (state) {
     const v = verdict(state, config.ci.budget);
     console.log(`${v.level === 'over' ? ui.red('●') : v.level === 'warn' ? ui.yellow('●') : ui.green('●')} ${v.message} ${ui.dim(`(as of ${new Date(state.at).toLocaleString()})`)}`);
