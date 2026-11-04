@@ -1,7 +1,7 @@
 #!/bin/sh
 # Exercises the standalone binary the way people use it: plugins (dynamic import) and the demo (hub, dashboard, agents).
 set -eu
-bin="$1"
+bin="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 home="$(mktemp -d)"
 export YARDMASTER_HOME="$home"
 demo=""
@@ -15,6 +15,25 @@ trap cleanup EXIT
 mkdir -p "$home/plugins/smoke"
 printf "export default { kind: 'notifier', name: 'smoke', onEvent() {} };\n" > "$home/plugins/smoke/index.mjs"
 "$bin" plugin test smoke
+# Push gate from the binary: a failing check stops the push, a passing one goes through.
+repo="$home/gate-repo"
+git init -q --bare "$home/gate-remote.git"
+git init -q -b main "$repo"
+(
+  cd "$repo"
+  git config user.email smoke@example.com
+  git config user.name smoke
+  printf '{"verify":["sh check.sh"]}\n' > yardmaster.json
+  printf 'if grep -q BAD flag.txt; then echo "flag is BAD"; exit 1; fi\n' > check.sh
+  echo ok > flag.txt
+  git add -A && git commit -qm init && git remote add origin "$home/gate-remote.git"
+  "$bin" ci init > /dev/null
+  git push -q origin main
+  echo BAD > flag.txt && git commit -qam bad
+  if git push -q origin main 2> "$home/gate.err"; then echo "push gate let a failing push through"; exit 1; fi
+  grep -q "checks failed" "$home/gate.err" || { cat "$home/gate.err"; exit 1; }
+)
+echo "push gate ok"
 "$bin" demo --port 7793 > "$home/demo.log" 2>&1 &
 demo=$!
 for i in $(seq 1 30); do

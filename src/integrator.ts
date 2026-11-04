@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { Coordinator } from './coordinator.ts';
 import { addWorktree, branchExists, conflictedFiles, git, isAncestor, isClean, isLinkedWorktreeOf, removeWorktree, revParse } from './git.ts';
+import { rememberChecked } from './ci/verified.ts';
 import { runVerify, Semaphore } from './runner.ts';
 import { clip, errorFingerprint, tail } from './text.ts';
 import type { Config } from './config.ts';
@@ -226,6 +227,7 @@ export class Integrator {
       }
     }
     const after = await revParse(path, 'HEAD');
+    if (after && baseMoved && commands.length) await rememberChecked(path, after, commands);
     // A cancel that arrived during re-verification wins: undo the merge.
     if (this.coord.getTask(task.id)?.status !== 'merging') {
       await git(path, ['reset', '--hard', before]);
@@ -279,6 +281,7 @@ export class Integrator {
       return false;
     }
     const after = (await revParse(path, 'HEAD'))!;
+    await rememberChecked(path, after, config.verify);
     this.coord.setMeta(`integrating:${project.id}`, null);
     this.lastGood.set(project.id, after);
     for (const t of merged) await this.tidy(project, t, config, t.head_sha!).catch(() => undefined);

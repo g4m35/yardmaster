@@ -36,3 +36,12 @@ trap), record it with `yard_learn` and the files it applies to. Future agents ge
 ## Steering
 `yard_control` with `redirect` and a `note` restarts a background agent with new guidance and keeps its work.
 `retry`, `cancel`, `stop`, and `approve` do what they say.
+
+## Pushing and CI
+Every push to a pull request runs the repo's whole CI suite, and on private repos that costs the user money.
+- Don't push to find out whether something works. Run the checks locally, fix, then push once when the change is done.
+- If the repo has the Yardmaster push gate, `git push` runs the checks first and stops a failing push; fix what it
+  reports rather than retrying. It skips trees that already passed, so re-pushing the same files is free.
+- If a push is held because CI is still running or the month's CI allowance is used up, stop and tell the user.
+  Don't bypass it (`YM_CI_SKIP`, `YM_CI_FORCE`, `--no-verify`) unless they ask you to.
+- For work Yardmaster merged, `ym ci ship` pushes the whole batch as one pull request instead of one per task.

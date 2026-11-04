@@ -13,6 +13,7 @@ Run several coding agents at once (Claude Code, Codex, Cursor, OpenCode, Gemini 
 - **Agents get better here over time.** A second model from a different family reviews risky changes before they merge. Fixed failures, review findings and your redirects become lessons that brief future agents on related files. The router learns which agent and model actually pass checks on this repo, and at what cost.
 - **Smarter scheduling.** Work on the critical path starts first. Tasks editing files that import each other are warned (or kept apart). Several verified tasks merge together with one check run. Hard tasks can be raced by two agents, and the first verified result wins.
 - **Your rules.** Policies like "anything under `src/auth` uses a strong model, gets reviewed, and needs my approval" or "docs tasks are cheap" apply automatically.
+- **Lighter on CI.** More agents means more pushes, and every push runs your GitHub Actions suite. A git push gate runs your checks once per file tree before anything reaches CI, a workflow guard skips re-testing a tree that already passed, finished agent work ships as one pull request, and pushes to private repos pause before the month's Actions allowance runs out. `ym ci audit` shows where your minutes go.
 - **Many machines.** Run `ym worker` on a laptop, desktop or server and they share one queue. Work moves between them as git bundles, so you don't need GitHub or SSH between them.
 
 ## Install
@@ -144,6 +145,17 @@ Every state change from an agent run is tied to its attempt, so a canceled task,
 - Logs are capped (`disk.maxLogsMb`) and expire (`cleanup.logRetentionDays`).
 - `ym disk` lists the largest worktrees and how much `ym clean --yes` would free.
 
+## CI costs
+
+```sh
+ym ci audit owner/repo   # where the Actions minutes went and the fixes worth making
+ym ci init               # push gate in this repo, plus the guard to paste into your workflow
+ym ci budget             # this month's spend against your allowance
+ym ci ship               # finished agent work as one pull request: one CI run for the batch
+```
+
+On agent-heavy private repos, 15 to 20% of billed minutes typically go to re-testing an identical file tree after a pull request merges, and another 10 to 25% to failed runs that local checks would have caught. None of this needs the hub, and it works the same for agents and people. Details, the guard's safety rules, and alternatives: [docs/CI.md](docs/CI.md).
+
 ## Configuration
 
 `yardmaster.json` in the repo (shared) and `~/.yardmaster/config.json` (this machine). Everything is optional:
@@ -192,7 +204,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). For the research behind it (Ga
 
 ## Status
 
-Early (0.2). Tested end to end with the mock agent (53 tests: policies, cross-model review rounds, lessons and their credit, critical-path ordering, races, merge trains, import-graph coupling, hooks, the minimal MCP profile, and parallel scheduling, scopes, dependencies, loops, budgets, retries, conflicts, edit-time overlap, approval, cleanup safety, a two-machine run, the MCP server, pause/redirect, supervisor warnings, disk holds and artifact trimming, and regression tests for cancel-during-verify, stale attempts, detached HEADs and hand edits in the integration worktree). Smoke-tested with real Claude Code and Codex. The Cursor and Gemini adapters follow their documented stream formats but haven't been run against live sessions yet.
+Early (0.4). Tested end to end with the mock agent (71 tests, including the CI gate, guard, budget and audit against a mock GitHub API and real git pushes, and policies, cross-model review rounds, lessons and their credit, critical-path ordering, races, merge trains, import-graph coupling, hooks, the minimal MCP profile, and parallel scheduling, scopes, dependencies, loops, budgets, retries, conflicts, edit-time overlap, approval, cleanup safety, a two-machine run, the MCP server, pause/redirect, supervisor warnings, disk holds and artifact trimming, and regression tests for cancel-during-verify, stale attempts, detached HEADs and hand edits in the integration worktree). Smoke-tested with real Claude Code and Codex. The Cursor and Gemini adapters follow their documented stream formats but haven't been run against live sessions yet.
 
 ## License
 

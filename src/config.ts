@@ -183,6 +183,32 @@ export const ConfigSchema = z.object({
       setup: z.array(z.string()).default([]),
     })
     .default({ warmStart: 'clone', shareDirs: ['node_modules', 'vendor', '.bundle', 'target', '.gradle', 'Pods'], maxPlainCopyMb: 300, copy: [], setup: [] }),
+  /** Spend less on hosted CI (GitHub Actions). See docs/CI.md. */
+  ci: z
+    .object({
+      /** What the git pre-push gate does: run checks and watch the budget, only watch the budget, or nothing. */
+      gate: z.enum(['verify', 'budget', 'off']).default('verify'),
+      /** Checks the gate runs before a push. Empty: the project's `verify` list, or what the repo obviously uses. */
+      verify: z.array(z.string()).default([]),
+      /** A push while CI is still running on that branch throws away the minutes already spent. */
+      coalesce: z.enum(['warn', 'block', 'off']).default('warn'),
+      /** Post a "yardmaster/verified" commit status after local checks pass, for workflows that opt in to trusting it. */
+      trustLocal: z.boolean().default(false),
+      budget: z
+        .object({
+          /** Dollars of Actions usage your plan includes each month (Free: 12, Pro and Team: 18). Null: assume 12. */
+          includedUsd: z.number().min(0).nullable().default(null),
+          /** Paid usage you accept on top of what's included before pushes are held. */
+          extraUsd: z.number().min(0).default(0),
+          /** Warn when the month is projected to use this share of the allowance. */
+          warnAt: z.number().min(0).max(1).default(0.8),
+          /** Refuse pushes to private repos once the allowance (plus extraUsd) is used up. */
+          blockPushes: z.boolean().default(true),
+          refreshMinutes: z.number().min(1).default(15),
+        })
+        .default({ includedUsd: null, extraUsd: 0, warnAt: 0.8, blockPushes: true, refreshMinutes: 15 }),
+    })
+    .default({ gate: 'verify', verify: [], coalesce: 'warn', trustLocal: false, budget: { includedUsd: null, extraUsd: 0, warnAt: 0.8, blockPushes: true, refreshMinutes: 15 } }),
   /** Import-graph awareness: tasks editing files that import each other are warned (or kept apart). */
   coupling: z.enum(['off', 'warn', 'serialize']).default('warn'),
   notify: z.boolean().default(true),
