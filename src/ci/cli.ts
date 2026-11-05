@@ -9,6 +9,7 @@ import { gateHookInstalled, installGateHook, uninstallGateHook } from './hookfil
 import { ship } from './ship.ts';
 import { signoff } from './signoff.ts';
 import { githubClient, NO_TOKEN_HELP } from './token.ts';
+import { VERSION } from '../version.ts';
 import { lintWorkflow, readLocalWorkflows, readRemoteWorkflows, type Finding } from './workflows.ts';
 
 export interface Ui {
@@ -26,7 +27,18 @@ export interface CiArgs {
   has: (k: string) => boolean;
 }
 
-export const ACTION_REF = 'g4m35/yardmaster@v0.4.0';
+export const ACTION_REPO = 'g4m35/yardmaster';
+export const ACTION_TAG = `v${VERSION}`;
+
+/**
+ * The guard pinned to the commit behind this release's tag. A tag can be moved to other code; a commit can't, and the
+ * guard decides whether tests run, so workflows should never follow a tag. Null when GitHub can't be asked.
+ */
+export async function pinnedActionRef(gh: GitHub | null): Promise<string | null> {
+  if (!gh) return null;
+  const c = await gh.get<{ sha?: string }>(`/repos/${ACTION_REPO}/commits/${ACTION_TAG}`).catch(() => null);
+  return c?.sha && /^[0-9a-f]{40}$/.test(c.sha) ? `${ACTION_REPO}@${c.sha} # ${ACTION_TAG}` : null;
+}
 
 export const CI_HELP = `ym ci: spend less on GitHub Actions when many agents push
 
@@ -42,10 +54,14 @@ export const CI_HELP = `ym ci: spend less on GitHub Actions when many agents pus
 Pushing through the gate: YM_CI_SKIP=1 skips it once, YM_CI_FORCE=1 pushes past budget and in-progress holds.
 Docs: https://github.com/g4m35/yardmaster/blob/main/docs/CI.md`;
 
-export function guardSnippet(ref = ACTION_REF): string {
-  return `jobs:
+export function guardSnippet(ref: string): string {
+  return `permissions:
+  contents: read               # jobs get only what they ask for below
+
+jobs:
   guard:                       # 1. decide (one 1-core job, about $0.002)
     runs-on: ubuntu-slim
+    timeout-minutes: 5
     permissions: { actions: read, contents: read, pull-requests: read, statuses: read }
     outputs:
       skip: \${{ steps.guard.outputs.skip }}
@@ -58,12 +74,17 @@ export function guardSnippet(ref = ACTION_REF): string {
     if: needs.guard.outputs.skip != 'true'
     # ...your existing job...
 
-  record:                      # 3. remember which tree passed
-    needs: [test]
+  done:                        # 3. the one check to require in branch protection; records what passed
+    needs: [guard, test]       #    list every job here
+    if: always()
     runs-on: ubuntu-slim
+    timeout-minutes: 5
     permissions: { contents: read, statuses: write }
     steps:
-      - uses: ${ref}
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
+      - if: needs.guard.outputs.skip != 'true' && !contains(needs.*.result, 'skipped')
+        uses: ${ref}
         with: { mode: record }`;
 }
 
@@ -92,7 +113,7 @@ export function formatAudit(a: Analysis, findings: Finding[], ui: Ui): string {
   if (a.copilot.runs) extras.push(`Copilot agent/review: ${n(a.copilot.minutes)} min in ${n(a.copilot.runs)} runs`);
   if (a.dependabot.runs) extras.push(`Dependabot: ${n(a.dependabot.runs)} runs (free)`);
   if (a.otherRunnerJobs) extras.push(`${n(a.otherRunnerJobs)} jobs on self-hosted/third-party runners (not billed by GitHub, not counted)`);
-  if (a.largerMacJobs) extras.push(`${n(a.largerMacJobs)} jobs on larger macOS runners (priced at the standard macOS rate; really more)`);
+  if (a.largerMacJobs) extras.push(`${n(a.largerMacJobs)} jobs on larger macOS runners (billed even in public repos)`);
   if (extras.length) out.push(ui.dim(`  ${extras.join(' · ')}`));
   if (a.workflows.length) {
     out.push('');
@@ -186,7 +207,11 @@ async function cmdBudget(a: CiArgs, ui: Ui): Promise<void> {
   console.log(color(`● ${v.message}`));
   if (state.minutes) console.log(ui.dim(`  ${n(state.minutes)} minutes so far this month.`));
   for (const r of state.repos.slice(0, 8)) console.log(`  ${r.repo.padEnd(40)} ${usd(r.usd).padStart(8)}  ${ui.dim(`${n(r.minutes)} min`)}`);
-  if (config.ci.budget.includedUsd === null) console.log(ui.dim(`  Assumed a $${state.includedUsd} allowance (GitHub Free). Pro and Team include $18: set ci.budget.includedUsd in ~/.yardmaster/config.json.`));
+  if (config.ci.budget.includedUsd === null) {
+    console.log(ui.dim(state.plan
+      ? `  Allowance from your GitHub ${state.plan} plan ($${state.includedUsd}). Override with ci.budget.includedUsd in ~/.yardmaster/config.json.`
+      : `  Assumed a $${state.includedUsd} allowance (GitHub Free). Pro and Team include $18: set ci.budget.includedUsd in ~/.yardmaster/config.json.`));
+  }
   if (state.note) console.log(ui.dim(`  ${state.note}`));
 }
 
@@ -209,7 +234,10 @@ async function cmdInit(a: CiArgs, ui: Ui): Promise<void> {
   else {
     console.log(`${ui.bold('Last step, in your workflow file')} (${unguarded.map((w) => w.path).join(', ')}): skip the suite when this exact tree already passed.`);
     console.log(ui.dim('Yardmaster does not edit workflow files for you. Add:'));
-    console.log(guardSnippet());
+    const ref = await pinnedActionRef(await githubClient().catch(() => null));
+    console.log(guardSnippet(ref ?? `${ACTION_REPO}@${ACTION_TAG}`));
+    if (!ref) console.log(ui.yellow(`  Couldn't look up the commit behind ${ACTION_TAG}. Replace the tag with that commit's full SHA (git ls-remote https://github.com/${ACTION_REPO} ${ACTION_TAG}): a tag can be moved, a commit can't.`));
+    console.log(ui.dim('  Jobs that run only on some branches or events (say, deploy on main) must not depend on the guard, or must be listed in its allow-skipped input.'));
   }
 }
 

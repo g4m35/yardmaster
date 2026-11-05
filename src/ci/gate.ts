@@ -124,11 +124,13 @@ export async function runGate(opts: { cwd: string; remoteUrl: string; stdin: str
 
   // ---- a push while CI is still running on the branch wastes that run ----
   if (slug && gh?.authenticated && config.ci.coalesce !== 'off') {
-    for (const u of updates) {
-      const branch = u.remoteRef.replace(/^refs\/heads\//, '');
-      const r = await gh
-        .get<{ workflow_runs: { head_sha: string; run_started_at?: string; created_at: string; status: string }[] }>(`/repos/${slug}/actions/runs`, { branch, per_page: 20 })
-        .catch(() => null);
+    type Runs = { workflow_runs: { head_sha: string; run_started_at?: string; created_at: string; status: string }[] };
+    const branchOf = (u: (typeof updates)[number]) => u.remoteRef.replace(/^refs\/heads\//, '');
+    // One lookup per pushed branch, all at once: a multi-branch push waits for the slowest, not the sum.
+    const found = await Promise.all(updates.map((u) => gh.get<Runs>(`/repos/${slug}/actions/runs`, { branch: branchOf(u), per_page: 20 }).catch(() => null)));
+    for (const [i, u] of updates.entries()) {
+      const branch = branchOf(u);
+      const r = found[i];
       const live = (r?.workflow_runs ?? []).filter((x) => (x.status === 'in_progress' || x.status === 'queued') && x.head_sha !== u.localSha);
       if (!live.length) continue;
       const age = Math.min(...live.map((x) => minutesAgo(x.run_started_at ?? x.created_at)));

@@ -38,6 +38,7 @@ if ${exists}; then
   exit $?
 fi
 if command -v ym >/dev/null 2>&1; then
+  echo "Yardmaster CI gate: the ym this hook was installed with is gone; using $(command -v ym) (run ym ci init to pin it again)." >&2
   printf '%s\\n' "$input" | ym ci gate "$@"
   exit $?
 fi

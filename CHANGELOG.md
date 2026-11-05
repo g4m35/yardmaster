@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.0
+CI guard hardening, plus cheaper and more accurate CI accounting. Upgrade the guard by pinning the new commit SHA that `ym ci init` prints.
+- Security: a recorded pass now counts only when the run it links to backs it up: a run of the same workflow file in the same repo, for the commit the status is on, started before the status was posted, with every job passed by then (only the recording job may finish later). Before, any status from `github-actions[bot]` or anyone with write access counted, so another workflow, a write-scoped token or a run that skipped its own suite could make untested code skip CI. Costs two API reads, only when a candidate is found.
+- Security: a pull request run vouches only for its own pull request and base (a pull request into another branch can run any workflow), and a push run only for the tree it tested.
+- Security: only `push`, `pull_request` and `merge_group` runs can skip or record. `pull_request_target`, `workflow_run` and similar events test a different commit than the one they report.
+- Security: a push run that matches the tree counts only if none of its jobs was skipped. New `allow-skipped` input for jobs that legitimately only run on some branches or events.
+- Breaking: `trust-local` needs `trusted-users`; without it signoffs are ignored. Bot accounts never count.
+- Security: `ym ci init` prints the guard pinned to the release's commit SHA instead of a tag, and the docs explain why. This repo's own workflows pin every action by SHA, scope release permissions per job, and record with the released guard, so code under review never runs with `statuses: write`.
+- Faster guard: its API reads run in parallel, a push reads its tree from the event, and with trust-local it only waits for a signoff that could match (a pull request behind its base no longer sits out the 20-second wait).
+- Cheaper guard layout: one final `done` job is both the required check and the recorder (two 1-core jobs per run in total). The audit flags small shell-only jobs that could run on `ubuntu-slim`.
+- Costs: current runner labels (`xcode-27`, `windows-2025-vs2026`, `windows-11-vs2026-arm`) were counted as free; larger macOS runners are priced at their own rates ($0.077 and $0.102 a minute).
+- Budget: the allowance follows your GitHub plan when the token can see it (Free $12, Pro and Team $18, Enterprise Cloud $300), and GitHub's own overage figure counts as over.
+- The push gate checks every pushed branch for running CI at once, and the hook says when it falls back to a `ym` found on PATH.
+
 ## 0.5.1
 - Fix: `ym disk --dedupe` treated installs as different when only tool caches inside node_modules differed (`.vite`, `.vitest-cache`, `.cache`, ...), so it shared nothing in Vite and Vitest projects. Caches are now left out of the comparison and each project keeps its own; packages and generated code (such as `.prisma`) must still match byte for byte. On a real machine: 0 copies shared before, 14 (9.8 GB) after.
 

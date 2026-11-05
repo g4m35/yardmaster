@@ -16,6 +16,8 @@ export interface BudgetState {
   /** Already billed beyond the included amount (billing source only). */
   overageUsd: number | null;
   includedUsd: number;
+  /** The plan the allowance came from, when GitHub said (null: configured, or assumed Free). */
+  plan?: string | null;
   extraUsd: number;
   projectedUsd: number;
   minutes: number | null;
@@ -24,6 +26,22 @@ export interface BudgetState {
 }
 
 export const DEFAULT_INCLUDED_USD = 12;
+
+/** Included Actions dollars per month by plan (docs.github.com, "GitHub Actions billing", checked 2026-11). */
+const PLAN_INCLUDED_USD: Record<string, number> = { free: 12, pro: 18, team: 18, enterprise: 300 };
+
+/** The account's plan, when the token may see it: your own account, or an organization you own. */
+async function detectPlan(gh: GitHub, owner: string, isOrg: boolean): Promise<string | null> {
+  const r = await gh.get<{ login?: string; plan?: { name?: string } | null }>(isOrg ? `/orgs/${owner}` : '/user').catch(() => null);
+  if (!r || (!isOrg && r.login?.toLowerCase() !== owner.toLowerCase())) return null;
+  const name = (r.plan?.name ?? '').toLowerCase();
+  return name in PLAN_INCLUDED_USD ? name : null;
+}
+
+/** Current settings first; then the plan GitHub reported (never a cached setting that may since have changed). */
+export function includedFor(cfg: BudgetCfg, state?: Pick<BudgetState, 'plan'> | null): number {
+  return cfg.includedUsd ?? (state?.plan ? PLAN_INCLUDED_USD[state.plan] ?? DEFAULT_INCLUDED_USD : DEFAULT_INCLUDED_USD);
+}
 
 type BudgetCfg = Config['ci']['budget'];
 
@@ -112,8 +130,9 @@ export async function computeBudget(gh: GitHub, owner: string, cfg: BudgetCfg, o
   const now = opts.now ?? new Date();
   const account = await gh.get<{ type: string; login: string }>(`/users/${owner}`);
   const isOrg = account.type === 'Organization';
-  const base = { owner: account.login, at: Date.now(), month: currentMonth(now), includedUsd: cfg.includedUsd ?? DEFAULT_INCLUDED_USD, extraUsd: cfg.extraUsd };
-  const billing = await fromBilling(gh, account.login, isOrg, now);
+  const [billing, plan] = await Promise.all([fromBilling(gh, account.login, isOrg, now), cfg.includedUsd === null ? detectPlan(gh, account.login, isOrg) : null]);
+  const includedUsd = cfg.includedUsd ?? (plan ? PLAN_INCLUDED_USD[plan]! : DEFAULT_INCLUDED_USD);
+  const base = { owner: account.login, at: Date.now(), month: currentMonth(now), includedUsd, plan, extraUsd: cfg.extraUsd };
   if (billing) {
     const state: BudgetState = { ...base, source: 'billing', ...billing, projectedUsd: billing.spentUsd / monthElapsed(now), repos: [] };
     writeBudget(state);
@@ -169,11 +188,13 @@ export function budgetForNow(state: BudgetState | null, now = new Date()): Budge
 
 /** Judged against the current settings, not the ones in force when the numbers were cached. */
 export function verdict(state: BudgetState, cfg: BudgetCfg): Verdict {
-  const limit = (cfg.includedUsd ?? DEFAULT_INCLUDED_USD) + cfg.extraUsd;
+  const limit = includedFor(cfg, state) + cfg.extraUsd;
   const pct = limit > 0 ? Math.round((state.spentUsd / limit) * 100) : 100;
   const money = (n: number) => `$${n.toFixed(2)}`;
   const head = `${state.owner}: ${money(state.spentUsd)} of ${money(limit)} Actions allowance used this month (${pct}%${state.source === 'estimate' ? ', estimated' : ''})`;
-  if (state.spentUsd >= limit) return { level: 'over', message: `${head}. More CI runs are paid or will be refused by GitHub.` };
+  // GitHub's own overage figure beats our arithmetic: past the allowance means past it.
+  const billedOver = state.source === 'billing' && (state.overageUsd ?? 0) > cfg.extraUsd;
+  if (billedOver || state.spentUsd >= limit) return { level: 'over', message: `${head}. More CI runs are paid or will be refused by GitHub.` };
   if (state.projectedUsd >= limit * cfg.warnAt) return { level: 'warn', message: `${head}; on pace for ${money(state.projectedUsd)} by month end.` };
   return { level: 'ok', message: `${head}; on pace for ${money(state.projectedUsd)}.` };
 }

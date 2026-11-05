@@ -12,10 +12,13 @@ inputs:
     description: Token for the GitHub API. The default job token is enough; see docs/CI.md for the permissions block.
     default: ${{ github.token }}
   trust-local:
-    description: Also skip when "ym ci signoff" reported that local checks passed for this exact tree (posted by someone with write access).
+    description: Also skip when "ym ci signoff" reported that local checks passed for this exact tree. Needs trusted-users; anyone listed can then let a tree skip CI.
     default: 'false'
   trusted-users:
-    description: Optional comma-separated logins whose signoffs count. Empty means anyone with write access.
+    description: Comma-separated logins whose signoffs count (required for trust-local; bot accounts never count).
+    default: ''
+  allow-skipped:
+    description: Comma-separated job names that may be skipped in a recorded run without voiding it, such as a deploy job that only runs on main. Never list a test job.
     default: ''
   wait-seconds:
     description: With trust-local, how long to wait for a signoff that's still on its way.
