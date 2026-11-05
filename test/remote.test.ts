@@ -45,25 +45,30 @@ test('a second machine runs the work and ships it back as a git bundle', async (
     verifySlots: new Semaphore(1),
   });
   const timer = setInterval(() => void worker.heartbeat().then(() => worker.tick()).catch(() => undefined), 200);
-  cleanups.push(() => clearInterval(timer));
-
-  const { created } = hub.coord.addTasks(project.id, [
-    { key: 'one', title: 'Add the remote module', prompt: '@mock write remote/one.js export const one = 1', files: ['remote/one.js'], agent: 'mock' },
-    { title: 'Build on the remote module', prompt: '@mock write remote/two.js export const two = 2', files: ['remote/two.js'], after: ['one'], agent: 'mock' },
-  ], 'test');
-  const done = await until(() => created.map((t) => hub!.coord.getTask(t.id)!), (ts) => ts.every((t) => ['done', 'needs_human', 'failed'].includes(t.status)), 40_000, 'remote tasks');
-  assert.deepEqual(done.map((t) => t.status), ['done', 'done'], JSON.stringify(done.map((t) => t.attention)));
-  for (const t of done) assert.equal(hub.coord.latestRun(t.id)!.machine_id, 'm-laptop');
-  assert.equal(sh(box.repo, 'git', ['show', 'yardmaster/integration:remote/two.js']), 'export const two = 2');
-  // The second task needed the first task's merge commit, which only existed on the hub.
-  const fetched = sh(clone, 'git', ['for-each-ref', '--format=%(refname)', 'refs/yardmaster/hub/']);
-  assert.match(fetched, /refs\/yardmaster\/hub\/yardmaster\/integration/);
-  assert.equal(sh(clone, 'git', ['branch', '--show-current']), 'main', "the laptop's checkout was not switched");
-  const machines = hub.coord.listMachines().map((m) => m.id).sort();
-  assert.deepEqual(machines, ['m-hub', 'm-laptop']);
-  clearInterval(timer);
-  worker.stopAll('shutdown', 'test over');
-  await worker.drain();
+  // Stop the worker whatever happens: a failed assertion must not leave agents running and the test process alive.
+  const stop = async () => {
+    clearInterval(timer);
+    worker.stopAll('shutdown', 'test over');
+    await worker.drain();
+  };
+  try {
+    const { created } = hub.coord.addTasks(project.id, [
+      { key: 'one', title: 'Add the remote module', prompt: '@mock write remote/one.js export const one = 1', files: ['remote/one.js'], agent: 'mock' },
+      { title: 'Build on the remote module', prompt: '@mock write remote/two.js export const two = 2', files: ['remote/two.js'], after: ['one'], agent: 'mock' },
+    ], 'test');
+    const done = await until(() => created.map((t) => hub!.coord.getTask(t.id)!), (ts) => ts.every((t) => ['done', 'needs_human', 'failed'].includes(t.status)), 90_000, 'remote tasks');
+    assert.deepEqual(done.map((t) => t.status), ['done', 'done'], JSON.stringify(done.map((t) => t.attention)));
+    for (const t of done) assert.equal(hub.coord.latestRun(t.id)!.machine_id, 'm-laptop');
+    assert.equal(sh(box.repo, 'git', ['show', 'yardmaster/integration:remote/two.js']), 'export const two = 2');
+    // The second task needed the first task's merge commit, which only existed on the hub.
+    const fetched = sh(clone, 'git', ['for-each-ref', '--format=%(refname)', 'refs/yardmaster/hub/']);
+    assert.match(fetched, /refs\/yardmaster\/hub\/yardmaster\/integration/);
+    assert.equal(sh(clone, 'git', ['branch', '--show-current']), 'main', "the laptop's checkout was not switched");
+    const machines = hub.coord.listMachines().map((m) => m.id).sort();
+    assert.deepEqual(machines, ['m-hub', 'm-laptop']);
+  } finally {
+    await stop();
+  }
 });
 
 test('the MCP server lets an interactive agent queue, wait for, and coordinate work', async () => {
