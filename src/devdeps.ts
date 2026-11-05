@@ -92,11 +92,20 @@ function installedHash(nodeModules: string): string | null {
  * and native addons built under another Node version all leave them unchanged. Only byte-identical installs are
  * ever swapped, so a dedupe can never change what a project runs.
  */
+/**
+ * Tool caches that live in node_modules but belong to the project, not the install (Vite, Vitest, Babel, ESLint,
+ * Turbo, Parcel). They differ in every project, so they're left out of the comparison and each project keeps its
+ * own. Generated code such as .prisma stays in the comparison: that is real code.
+ */
+export const TOOL_CACHES = ['.cache', '.vite', '.vite-temp', '.vitest', '.vitest-cache', '.eslintcache', '.turbo', '.parcel-cache', '.tmp'];
+
 export function contentDigest(nodeModules: string): string {
   const h = createHash('sha256');
+  const skip = new Set(TOOL_CACHES);
   const walk = (dir: string, rel: string) => {
     const entries = safeDirents(dir).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     for (const e of entries) {
+      if (rel === '' && skip.has(e.name)) continue;
       const p = join(dir, e.name);
       const r = `${rel}/${e.name}`;
       if (e.isSymbolicLink()) h.update(`l${r}\0${readlinkSync(p)}\0`);
@@ -152,6 +161,8 @@ export interface DedupeEntry {
   original: string;
   from: string;
   at: number;
+  /** The project's own tool caches, moved from the original into the shared copy. */
+  caches?: string[];
 }
 
 function trashRoot(): string {
@@ -194,7 +205,7 @@ export async function dedupeGroup(g: DepsGroup, opts: { dryRun?: boolean } = {})
     // Cheap checks first; the full byte comparison only for copies that passed them.
     keepDigest ??= contentDigest(keep.path);
     if (contentDigest(d.path) !== keepDigest) {
-      skipped.push({ path: d.path, why: 'its files differ from the other copy (patched packages, generated files, or native modules built for another Node version)' });
+      skipped.push({ path: d.path, why: 'its packages differ from the other copy (patched packages, generated code, or native modules built for another Node version)' });
       continue;
     }
     if (opts.dryRun) {
@@ -218,7 +229,16 @@ export async function dedupeGroup(g: DepsGroup, opts: { dryRun?: boolean } = {})
     // Two renames: the project is without node_modules for microseconds, and the original stays restorable.
     renameSync(d.path, original);
     renameSync(fresh, d.path);
-    replaced.push({ path: d.path, original, from: keep.path, at: Date.now() });
+    // The project keeps its own caches (not the other copy's).
+    const caches: string[] = [];
+    for (const c of TOOL_CACHES) {
+      // The other copy's caches never stay: the project gets exactly its own back, or none.
+      if (existsSync(join(d.path, c))) removeFast(join(d.path, c), batch);
+      if (!existsSync(join(original, c))) continue;
+      renameSync(join(original, c), join(d.path, c));
+      caches.push(c);
+    }
+    replaced.push({ path: d.path, original, from: keep.path, at: Date.now(), caches });
   }
   if (replaced.length && !opts.dryRun) writeFileSync(join(batch, 'manifest.json'), JSON.stringify(replaced, null, 2));
   return { replaced, skipped };
@@ -245,7 +265,11 @@ export function restoreLatest(): { restored: string[]; skipped: { path: string; 
       skipped.push({ path: e.path, why: 'its original is no longer in the trash' });
       continue;
     }
-    if (existsSync(e.path)) removeFast(e.path, latest.dir);
+    if (existsSync(e.path)) {
+      // Caches the project built up since stay with it.
+      for (const c of TOOL_CACHES) if (existsSync(join(e.path, c)) && !existsSync(join(e.original, c))) renameSync(join(e.path, c), join(e.original, c));
+      removeFast(e.path, latest.dir);
+    }
     renameSync(e.original, e.path);
     restored.push(e.path);
   }
