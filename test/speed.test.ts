@@ -262,6 +262,11 @@ test('identical installs elsewhere on the machine can be shared, byte-identical 
   }
   // Same lockfile and same installed-state record, but a patched file: must never be swapped.
   writeFileSync(join(root, 'three', 'node_modules', 'pkg2', 'f2.js'), 'module.exports = "patched";\n');
+  // Tool caches differ in every project and don't count; each project keeps its own.
+  for (const p of ['one', 'two']) {
+    mkdirSync(join(root, p, 'node_modules', '.vite', 'vitest'), { recursive: true });
+    writeFileSync(join(root, p, 'node_modules', '.vite', 'vitest', 'results.json'), `{"project":"${p}"}`);
+  }
   const scan = await scanDeps([root]);
   assert.equal(scan.dirs.length, 4);
   assert.equal(scan.identical.length, 1);
@@ -276,12 +281,14 @@ test('identical installs elsewhere on the machine can be shared, byte-identical 
     return;
   }
   const patched = applied.skipped.find((x) => x.path.includes('/three/'));
-  if (keep !== 'three') assert.match(patched?.why ?? '', /files differ/, 'the patched install is left alone');
+  if (keep !== 'three') assert.match(patched?.why ?? '', /packages differ/, 'the patched install is left alone');
   assert.equal(applied.replaced.length, keep === 'three' ? 0 : 1, JSON.stringify(applied.skipped));
   if (keep === 'three') return;
   const target = applied.replaced[0]!.path;
   assert.equal(readFileSync(join(target, 'pkg1', 'f1.js'), 'utf8'), readFileSync(join(root, keep!, 'node_modules', 'pkg1', 'f1.js'), 'utf8'));
   assert.match(readFileSync(join(root, 'three', 'node_modules', 'pkg2', 'f2.js'), 'utf8'), /patched/);
+  const owner = target.split('/').slice(-2, -1)[0];
+  assert.equal(readFileSync(join(target, '.vite', 'vitest', 'results.json'), 'utf8'), `{"project":"${owner}"}`, 'the project kept its own cache');
   assert.ok(existsSync(applied.replaced[0]!.original), 'the original is kept for undo');
   const undo = restoreLatest();
   assert.deepEqual(undo.restored, [target]);
