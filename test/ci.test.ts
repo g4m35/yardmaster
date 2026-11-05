@@ -362,6 +362,13 @@ test('guard skips when a push run really passed the same tree, and waits only fo
   assert.equal(d.url, 'https://github.com/acme/app/actions/runs/5');
   assert.ok(!m.calls.includes('GET /repos/acme/app/git/commits/S2'));
 
+  // A merge queue run of the same tree, under another sha, counts too.
+  const queued = await mockGitHub({
+    'GET /repos/acme/app/actions/workflows/ci.yml/runs': (_r, _b, url) => ({ body: { workflow_runs: url.searchParams.get('event') === 'merge_group' ? [{ id: 6, event: 'merge_group', html_url: 'https://github.com/acme/app/actions/runs/6', head_commit: { tree_id: 'T9' } }] : [] } }),
+    'GET /repos/acme/app/actions/runs/6/jobs': () => ({ body: { jobs: [job('guard', 0, 5), job('test', 6, 60)] } }),
+  });
+  assert.equal((await decide(queued.gh, push, { trustLocal: false, trustedUsers: [], waitSeconds: 0 })).url, 'https://github.com/acme/app/actions/runs/6');
+
   pushJobs = [job('guard', 0, 5), job('test', 6, 6, 'skipped')];
   const chained = await decide(m.gh, push, { trustLocal: false, trustedUsers: [], waitSeconds: 0 });
   assert.equal(chained.skip, false, 'a push run that skipped its suite is not a pass');

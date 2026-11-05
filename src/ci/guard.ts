@@ -218,9 +218,11 @@ export async function decide(gh: GitHub, ctx: GuardContext, inputs: GuardInputs)
   const wantsLocal = inputs.trustLocal && inputs.trustedUsers.length > 0;
 
   // Everything this decision may need, at once: one round trip in the common case.
-  const [tree, pushRuns, sameShaRuns, prHeads, headTree] = await Promise.all([
+  const [tree, pushRuns, queueRuns, sameShaRuns, prHeads, headTree] = await Promise.all([
     knownTree(ctx) ?? treeFor(gh, ctx.repo, ctx.sha),
     guarded ? runsOf({ event: 'push', per_page: 50 }) : [],
+    // Merge queue runs test their own commit too; the same tree may come back under another sha.
+    guarded ? runsOf({ event: 'merge_group', per_page: 20 }) : [],
     ctx.event === 'push' || ctx.event === 'merge_group' ? runsOf({ head_sha: ctx.sha, per_page: 20 }) : [],
     ctx.event === 'push' || ctx.event === 'merge_group'
       ? gh.get<{ head: { sha: string } }[]>(`/repos/${ctx.repo}/commits/${ctx.sha}/pulls`).then((p) => p.slice(0, 5).map((x) => x.head.sha), () => [] as string[])
@@ -237,7 +239,7 @@ export async function decide(gh: GitHub, ctx: GuardContext, inputs: GuardInputs)
   let rejected = false;
 
   // 1. A push (or merge queue) run of this workflow already tested exactly this tree, and really ran its jobs.
-  const sameTree = [...pushRuns, ...sameShaRuns].filter((r) => r.id !== ctx.runId && (r.event === 'push' || r.event === 'merge_group') && r.head_commit?.tree_id === tree);
+  const sameTree = [...pushRuns, ...queueRuns, ...sameShaRuns].filter((r) => r.id !== ctx.runId && (r.event === 'push' || r.event === 'merge_group') && r.head_commit?.tree_id === tree);
   for (const r of [...new Map(sameTree.map((r) => [r.id, r])).values()]) {
     if (runChecks++ >= MAX_VALIDATIONS) break;
     if (await jobsPassed(gh, ctx.repo, r.id, Infinity, allowSkipped)) return { skip: true, reason: 'this exact file tree already passed this workflow', tree, url: r.html_url };

@@ -206,9 +206,11 @@ async function decide(gh, ctx, inputs) {
   const runsOf = (query) => gh.get(`/repos/${ctx.repo}/actions/workflows/${encodeURIComponent(file)}/runs`, { status: "success", ...query }).then((r) => r.workflow_runs, () => []);
   const head = ctx.payload.pull_request?.head?.sha;
   const wantsLocal = inputs.trustLocal && inputs.trustedUsers.length > 0;
-  const [tree, pushRuns, sameShaRuns, prHeads, headTree] = await Promise.all([
+  const [tree, pushRuns, queueRuns, sameShaRuns, prHeads, headTree] = await Promise.all([
     knownTree(ctx) ?? treeFor(gh, ctx.repo, ctx.sha),
     guarded ? runsOf({ event: "push", per_page: 50 }) : [],
+    // Merge queue runs test their own commit too; the same tree may come back under another sha.
+    guarded ? runsOf({ event: "merge_group", per_page: 20 }) : [],
     ctx.event === "push" || ctx.event === "merge_group" ? runsOf({ head_sha: ctx.sha, per_page: 20 }) : [],
     ctx.event === "push" || ctx.event === "merge_group" ? gh.get(`/repos/${ctx.repo}/commits/${ctx.sha}/pulls`).then((p) => p.slice(0, 5).map((x) => x.head.sha), () => []) : [],
     wantsLocal && head ? treeFor(gh, ctx.repo, head).catch(() => "") : ""
@@ -220,7 +222,7 @@ async function decide(gh, ctx, inputs) {
   let runChecks = 0;
   let statusChecks = 0;
   let rejected = false;
-  const sameTree = [...pushRuns, ...sameShaRuns].filter((r) => r.id !== ctx.runId && (r.event === "push" || r.event === "merge_group") && r.head_commit?.tree_id === tree);
+  const sameTree = [...pushRuns, ...queueRuns, ...sameShaRuns].filter((r) => r.id !== ctx.runId && (r.event === "push" || r.event === "merge_group") && r.head_commit?.tree_id === tree);
   for (const r of [...new Map(sameTree.map((r2) => [r2.id, r2])).values()]) {
     if (runChecks++ >= MAX_VALIDATIONS) break;
     if (await jobsPassed(gh, ctx.repo, r.id, Infinity, allowSkipped)) return { skip: true, reason: "this exact file tree already passed this workflow", tree, url: r.html_url };
