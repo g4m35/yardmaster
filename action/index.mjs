@@ -107,9 +107,10 @@ function createGitHub(token, opts = {}) {
 }
 
 // src/ci/guard.ts
-var INTENTIONAL = /* @__PURE__ */ new Set(["workflow_dispatch", "schedule", "repository_dispatch"]);
+var GUARDED_EVENTS = /* @__PURE__ */ new Set(["push", "pull_request", "merge_group"]);
 var VERIFIED_CONTEXT = "yardmaster/verified";
 var ACTIONS_BOT = "github-actions[bot]";
+var MAX_VALIDATIONS = 3;
 function testedContext(workflowPath) {
   return `yardmaster/tested (${workflowPath.split("/").pop() ?? workflowPath})`;
 }
@@ -118,6 +119,11 @@ function treeDescription(tree, extra = "") {
 }
 function mentionsTree(s, tree) {
   return (s.description ?? "").split(/\s+/).includes(tree);
+}
+var escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function runIdFromUrl(url, serverUrl, repo) {
+  const m = (url ?? "").match(new RegExp(`^${escapeRe(serverUrl.replace(/\/+$/, ""))}/${escapeRe(repo)}/actions/runs/(\\d+)$`, "i"));
+  return m ? Number(m[1]) : null;
 }
 function contextFromEnv(env, payload) {
   const ref = env.GITHUB_WORKFLOW_REF ?? "";
@@ -129,78 +135,137 @@ function contextFromEnv(env, payload) {
     payload,
     workflowPath: m?.[1] ?? env.GITHUB_WORKFLOW ?? "workflow",
     runId: Number(env.GITHUB_RUN_ID ?? 0),
-    serverUrl: env.GITHUB_SERVER_URL ?? "https://github.com"
+    serverUrl: env.GITHUB_SERVER_URL ?? "https://github.com",
+    ref: env.GITHUB_REF
   };
 }
 async function treeFor(gh, repo, sha) {
   return (await gh.get(`/repos/${repo}/git/commits/${sha}`)).tree.sha;
 }
-async function candidates(gh, ctx) {
-  const out = /* @__PURE__ */ new Set([ctx.sha]);
-  const head = ctx.payload.pull_request?.head?.sha;
-  if (head) out.add(head);
-  if (ctx.event === "push" || ctx.event === "merge_group") {
-    const prs = await gh.get(`/repos/${ctx.repo}/commits/${ctx.sha}/pulls`).catch(() => []);
-    for (const pr of prs.slice(0, 5)) out.add(pr.head.sha);
-  }
-  return [...out];
+function knownTree(ctx) {
+  return ctx.event === "push" && ctx.payload.after === ctx.sha ? ctx.payload.head_commit?.tree_id || void 0 : void 0;
 }
 async function statusesOf(gh, repo, sha) {
   return gh.paginate(`/repos/${repo}/commits/${sha}/statuses`, null, {}, 300).catch(() => []);
 }
-function makeTrust(gh, repo, trustedUsers) {
-  const cache = /* @__PURE__ */ new Map();
-  const listed = new Set(trustedUsers.map((u) => u.toLowerCase()));
-  return async (login) => {
-    if (!login) return false;
-    const key = login.toLowerCase();
-    if (listed.size) return listed.has(key);
-    if (cache.has(key)) return cache.get(key);
-    const p = await gh.get(`/repos/${repo}/collaborators/${encodeURIComponent(login)}/permission`).catch(() => null);
-    const ok = !!p && (["admin", "write"].includes(p.permission ?? "") || ["admin", "maintain", "write"].includes(p.role_name ?? ""));
-    cache.set(key, ok);
-    return ok;
-  };
+var baseName = (job) => job.replace(/ \(.*\)$/, "");
+async function jobsPassed(gh, repo, runId, before, allowSkipped) {
+  const jobs = await gh.paginate(`/repos/${repo}/actions/runs/${runId}/jobs`, "jobs", { filter: "latest" }, 500).catch(() => null);
+  if (!jobs?.length) return false;
+  const open = [];
+  let lastDone = 0;
+  for (const j of jobs) {
+    if (j.conclusion === "skipped" && allowSkipped.has(baseName(j.name))) continue;
+    const done = j.status === "completed" && !!j.completed_at && Date.parse(j.completed_at) <= before;
+    if (done && j.conclusion !== "success") return false;
+    if (done) lastDone = Math.max(lastDone, Date.parse(j.completed_at));
+    else open.push(j);
+  }
+  if (open.length > 1) return false;
+  const last = open[0];
+  if (!last) return true;
+  if (last.status === "completed" && last.conclusion !== "success") return false;
+  return Date.parse(last.started_at ?? "") >= lastDone;
+}
+function expectedBase(ctx) {
+  if (ctx.event === "pull_request") {
+    const pr = ctx.payload.pull_request;
+    return pr?.base?.ref ? { number: pr.number, ref: pr.base.ref } : null;
+  }
+  const branch = ctx.ref?.startsWith("refs/heads/") ? ctx.ref.slice("refs/heads/".length) : null;
+  return branch ? { ref: branch } : null;
+}
+function sameBase(run, ctx) {
+  const want = expectedBase(ctx);
+  const linked = run.pull_requests ?? [];
+  const ours = (p) => (p.base?.repo?.url ?? "").toLowerCase().endsWith(`/repos/${ctx.repo.toLowerCase()}`) && p.base?.ref === want?.ref && (want?.number === void 0 || p.number === want.number);
+  if (ctx.event === "pull_request") return !!want && linked.some(ours);
+  return !linked.length || !!want && linked.some(ours);
+}
+async function backingRun(gh, ctx, s, onSha, tree, allowSkipped) {
+  const id = runIdFromUrl(s.target_url, ctx.serverUrl, ctx.repo);
+  const posted = Date.parse(s.created_at ?? "");
+  if (!id || id === ctx.runId || !Number.isFinite(posted)) return null;
+  const run = await gh.get(`/repos/${ctx.repo}/actions/runs/${id}`).catch(() => null);
+  if (!run) return null;
+  if ((run.repository?.full_name ?? "").toLowerCase() !== ctx.repo.toLowerCase()) return null;
+  if (run.path !== ctx.workflowPath || !GUARDED_EVENTS.has(run.event) || run.head_sha !== onSha) return null;
+  if (!(posted >= Date.parse(run.run_started_at ?? ""))) return null;
+  if (run.status === "completed" && run.conclusion !== "success") return null;
+  if (run.event !== "pull_request" && run.head_commit?.tree_id !== tree) return null;
+  if (run.event === "pull_request" && !sameBase(run, ctx)) return null;
+  return await jobsPassed(gh, ctx.repo, id, posted, allowSkipped) ? run : null;
+}
+function makeTrust(trustedUsers) {
+  const listed = new Set(trustedUsers.map((u) => u.toLowerCase()).filter((u) => !u.endsWith("[bot]")));
+  return (login) => !!login && !login.toLowerCase().endsWith("[bot]") && listed.has(login.toLowerCase());
 }
 async function decide(gh, ctx, inputs) {
-  const tree = await treeFor(gh, ctx.repo, ctx.sha);
-  if (INTENTIONAL.has(ctx.event)) return { skip: false, reason: `${ctx.event} runs are deliberate, so they always run`, tree };
+  const guarded = GUARDED_EVENTS.has(ctx.event);
   const file = ctx.workflowPath.split("/").pop();
-  const runs = await gh.get(`/repos/${ctx.repo}/actions/workflows/${encodeURIComponent(file)}/runs`, { status: "success", per_page: 50 }).catch(() => ({ workflow_runs: [] }));
-  const sameTree = runs.workflow_runs.find((r) => r.id !== ctx.runId && (r.event === "push" || r.event === "merge_group") && r.head_commit?.tree_id === tree);
-  if (sameTree) return { skip: true, reason: "this exact file tree already passed this workflow", tree, url: sameTree.html_url };
-  const shas = await candidates(gh, ctx);
-  const trust = makeTrust(gh, ctx.repo, inputs.trustedUsers);
+  const runsOf = (query) => gh.get(`/repos/${ctx.repo}/actions/workflows/${encodeURIComponent(file)}/runs`, { status: "success", ...query }).then((r) => r.workflow_runs, () => []);
+  const head = ctx.payload.pull_request?.head?.sha;
+  const wantsLocal = inputs.trustLocal && inputs.trustedUsers.length > 0;
+  const [tree, pushRuns, queueRuns, sameShaRuns, prHeads, headTree] = await Promise.all([
+    knownTree(ctx) ?? treeFor(gh, ctx.repo, ctx.sha),
+    guarded ? runsOf({ event: "push", per_page: 50 }) : [],
+    // Merge queue runs test their own commit too; the same tree may come back under another sha.
+    guarded ? runsOf({ event: "merge_group", per_page: 20 }) : [],
+    ctx.event === "push" || ctx.event === "merge_group" ? runsOf({ head_sha: ctx.sha, per_page: 20 }) : [],
+    ctx.event === "push" || ctx.event === "merge_group" ? gh.get(`/repos/${ctx.repo}/commits/${ctx.sha}/pulls`).then((p) => p.slice(0, 5).map((x) => x.head.sha), () => []) : [],
+    wantsLocal && head ? treeFor(gh, ctx.repo, head).catch(() => "") : ""
+  ]);
+  if (!guarded) return { skip: false, reason: `${ctx.event || "this"} runs always run (the guard only skips push, pull_request and merge_group runs)`, tree };
+  const shas = [.../* @__PURE__ */ new Set([ctx.sha, ...head ? [head] : [], ...prHeads])];
+  const allowSkipped = new Set(inputs.allowSkipped ?? []);
+  const statusesP = Promise.all(shas.map((sha) => statusesOf(gh, ctx.repo, sha)));
+  let runChecks = 0;
+  let statusChecks = 0;
+  let rejected = false;
+  const sameTree = [...pushRuns, ...queueRuns, ...sameShaRuns].filter((r) => r.id !== ctx.runId && (r.event === "push" || r.event === "merge_group") && r.head_commit?.tree_id === tree);
+  for (const r of [...new Map(sameTree.map((r2) => [r2.id, r2])).values()]) {
+    if (runChecks++ >= MAX_VALIDATIONS) break;
+    if (await jobsPassed(gh, ctx.repo, r.id, Infinity, allowSkipped)) return { skip: true, reason: "this exact file tree already passed this workflow", tree, url: r.html_url };
+    rejected = true;
+  }
   const tested = testedContext(ctx.workflowPath);
-  const lookup = async (local) => {
-    for (const sha of shas) {
-      for (const s of await statusesOf(gh, ctx.repo, sha)) {
+  const trust = makeTrust(inputs.trustedUsers);
+  const lookup = async (lists, local2) => {
+    for (let i = 0; i < lists.length; i++) {
+      for (const s of lists[i]) {
         if (s.state !== "success" || !mentionsTree(s, tree)) continue;
-        if (s.context === tested && (s.creator?.login === ACTIONS_BOT || await trust(s.creator?.login))) {
-          return { skip: true, reason: "this exact file tree already passed this workflow (recorded pass)", tree, url: s.target_url ?? void 0 };
+        if (s.context === tested && s.creator?.login === ACTIONS_BOT) {
+          if (statusChecks++ >= MAX_VALIDATIONS) continue;
+          const run = await backingRun(gh, ctx, s, shas[i], tree, allowSkipped);
+          if (run) return { skip: true, reason: "this exact file tree already passed this workflow (recorded pass)", tree, url: run.html_url };
+          rejected = true;
         }
-        if (local && s.context === VERIFIED_CONTEXT && s.creator?.login !== ACTIONS_BOT && await trust(s.creator?.login)) {
-          return { skip: true, reason: `checks passed on ${s.creator?.login}'s machine for this exact file tree (trust-local)`, tree, url: s.target_url ?? void 0 };
+        if (local2 && s.context === VERIFIED_CONTEXT && trust(s.creator?.login)) {
+          return { skip: true, reason: `checks passed on ${s.creator?.login}'s machine for this exact file tree (trust-local)`, tree };
         }
       }
     }
     return null;
   };
-  const found = await lookup(inputs.trustLocal);
+  const found = await lookup(await statusesP, wantsLocal);
   if (found) return found;
-  if (inputs.trustLocal && inputs.waitSeconds > 0) {
+  const signable = ctx.event === "pull_request" ? head && headTree === tree ? head : null : ctx.sha;
+  if (wantsLocal && signable && inputs.waitSeconds > 0) {
     const deadline = Date.now() + inputs.waitSeconds * 1e3;
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, inputs.pollMs ?? 5e3));
-      const again = await lookup(true);
+      const again = await lookup([await statusesOf(gh, ctx.repo, signable)], true);
       if (again) return again;
     }
   }
-  return { skip: false, reason: "no earlier pass of this exact file tree", tree };
+  const why = rejected ? "an earlier pass of this tree was found, but its run skipped or failed jobs, so it does not count" : "no earlier pass of this exact file tree";
+  const local = inputs.trustLocal && !inputs.trustedUsers.length ? " (trust-local is on but ignored: it needs trusted-users)" : "";
+  return { skip: false, reason: `${why}${local}`, tree };
 }
 async function record(gh, ctx) {
-  const tree = await treeFor(gh, ctx.repo, ctx.sha);
   const target = ctx.payload.pull_request?.head?.sha ?? ctx.sha;
+  if (!GUARDED_EVENTS.has(ctx.event)) return { posted: false, sha: target, reason: `${ctx.event || "this"} runs are never recorded` };
+  const tree = knownTree(ctx) ?? await treeFor(gh, ctx.repo, ctx.sha);
   try {
     await gh.post(`/repos/${ctx.repo}/statuses/${target}`, {
       state: "success",
@@ -219,6 +284,7 @@ async function record(gh, ctx) {
 
 // src/ci/action-main.ts
 var input = (name, fallback = "") => (process.env[`INPUT_${name.toUpperCase()}`] ?? fallback).trim();
+var list = (name, sep) => input(name).split(sep).map((s) => s.trim()).filter(Boolean);
 function setOutput(name, value) {
   const file = process.env.GITHUB_OUTPUT;
   if (file) appendFileSync(file, `${name}=${value.replace(/[\r\n]+/g, " ")}
@@ -244,13 +310,15 @@ async function main() {
   if (mode !== "check") throw new Error(`Unknown mode "${mode}". Use "check" or "record".`);
   const d = await decide(gh, ctx, {
     trustLocal: input("trust-local", "false") === "true",
-    trustedUsers: input("trusted-users").split(/[\s,]+/).filter(Boolean),
-    waitSeconds: Number(input("wait-seconds", "20")) || 0
+    trustedUsers: list("trusted-users", /[\s,]+/),
+    waitSeconds: Number(input("wait-seconds", "20")) || 0,
+    allowSkipped: list("allow-skipped", /[\n,]+/)
   });
   setOutput("skip", String(d.skip));
   setOutput("reason", d.reason);
   setOutput("tree", d.tree);
-  const line = d.skip ? `Skipping the suite: ${d.reason}${d.url ? ` (${d.url})` : ""}.` : `Running the suite: ${d.reason}.`;
+  const url = d.url && runIdFromUrl(d.url, ctx.serverUrl, ctx.repo) ? ` (${d.url})` : "";
+  const line = d.skip ? `Skipping the suite: ${d.reason}${url}.` : `Running the suite: ${d.reason}.`;
   console.log(`Yardmaster: ${line}`);
   summary(`**Yardmaster CI guard:** ${line}`);
 }

@@ -17,7 +17,7 @@ jobs:
     outputs:
       skip: ${{ steps.guard.outputs.skip }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - id: guard
         uses: ./
   test:
@@ -31,8 +31,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ matrix.node }}
           cache: npm
@@ -46,20 +46,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           cache: npm
       - run: npm ci
       - run: node scripts/build-binary.mjs
       - run: sh scripts/smoke-binary.sh release/yardmaster-linux-x64
-  record:
-    needs: [test, binary]
+  # One final job: the check to require, and the one that records a real pass.
+  done:
+    needs: [guard, test, binary]
+    if: always()
     runs-on: ubuntu-slim
     timeout-minutes: 5
     permissions: { contents: read, statuses: write }
     steps:
-      - uses: actions/checkout@v4
-      - uses: ./
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
+      # The released guard, not this checkout's: code under review never runs with statuses: write.
+      - if: needs.guard.outputs.skip != 'true' && !contains(needs.*.result, 'skipped')
+        uses: g4m35/yardmaster@c32f498679fe535257356cf1292064b9ce6229df # v0.5.1
         with: { mode: record }

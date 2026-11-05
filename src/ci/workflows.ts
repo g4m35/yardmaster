@@ -119,6 +119,13 @@ export function lintWorkflow(file: WorkflowFile, stats?: WorkflowStats, defaultB
       f('low', 'drafts', 'Draft pull requests run the full suite on every push. Agents often push to drafts many times.', `on:\n  pull_request:\n    types: [opened, synchronize, reopened, ready_for_review]\njobs:\n  test:\n    if: github.event.pull_request.draft != true`);
     }
   }
+  // Jobs that only run shell steps (summaries, classifiers, gates) rarely need 2 cores; 1-core runners cost a third.
+  const slim = Object.entries(jobs).filter(([, j]) => {
+    if (!isObj(j) || typeof j['runs-on'] !== 'string' || !/^ubuntu-(latest|\d{2}\.\d{2})$/.test(j['runs-on'])) return false;
+    if (j.services || j.container || j.strategy || !Array.isArray(j.steps) || !j.steps.length || j.steps.length > 4) return false;
+    return j.steps.every((st) => isObj(st) && typeof st.run === 'string' && st.uses === undefined);
+  }).map(([k]) => k);
+  if (slim.length) f('low', 'slim', `${slim.length} small shell-only job(s) on 2-core runners (${slim.slice(0, 4).join(', ')}). A 1-core runner costs a third as much; each job is billed at least a minute.`, 'runs-on: ubuntu-slim   # 1 core, $0.002/min, jobs up to 15 minutes');
   if (stats && stats.runs >= 3 && stats.jobsPerRun >= 5 && stats.avgJobMinutes < 2.5) {
     f('medium', 'small-jobs', `${stats.jobsPerRun.toFixed(1)} jobs per run averaging ${stats.avgJobMinutes.toFixed(1)} minutes. Each job is rounded up to a whole minute and repeats checkout and install.`, 'Merge short jobs into fewer, longer ones, or move tiny ones to runs-on: ubuntu-slim ($0.002/min).');
   }

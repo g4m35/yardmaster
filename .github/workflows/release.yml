@@ -10,8 +10,7 @@ on:
         description: Release tag to build (must already exist)
         required: true
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 jobs:
   binaries:
     strategy:
@@ -20,10 +19,10 @@ jobs:
         os: [macos-latest, ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || github.ref }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           cache: npm
@@ -31,18 +30,20 @@ jobs:
       - run: node scripts/build-binary.mjs
       - name: Smoke test the binary
         run: sh scripts/smoke-binary.sh "$(ls release/yardmaster-* | grep -v sha256)"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: bin-${{ matrix.os }}
           path: release/yardmaster-*
   github-release:
     needs: binaries
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || github.ref }}
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist-bin
           merge-multiple: true
@@ -60,14 +61,17 @@ jobs:
   npm:
     needs: binaries
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     env:
       # setup-node exports a placeholder NODE_AUTH_TOKEN when none is given, so test the secret itself.
       HAS_NPM_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || github.ref }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org

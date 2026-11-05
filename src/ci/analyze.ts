@@ -1,4 +1,4 @@
-import { jobCost } from './cost.ts';
+import { isLargerRunner, jobCost } from './cost.ts';
 import type { JobRec, RepoHistory, RunRec } from './history.ts';
 
 export interface Bucket {
@@ -75,7 +75,7 @@ export function analyze(h: RepoHistory, days: number): Analysis {
         if (jc.billed > 0) otherRunnerJobs++;
         continue;
       }
-      if (jc.kind === 'macos-larger') largerMacJobs++;
+      if (isLargerRunner(jc.kind)) largerMacJobs++;
       c.minutes += jc.billed;
       c.raw += jc.raw;
       c.usd += jc.usd;

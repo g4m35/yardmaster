@@ -70,7 +70,12 @@ test('runner labels map to GitHub rates; rounding is per job', () => {
   assert.equal(runnerKind(['ubuntu-24.04-arm']), 'linux-arm');
   assert.equal(runnerKind(['ubuntu-slim']), 'linux-slim');
   assert.equal(runnerKind(['macos-15']), 'macos');
-  assert.equal(runnerKind(['macos-latest-xlarge']), 'macos-larger');
+  assert.equal(runnerKind(['macos-latest-xlarge']), 'macos-xlarge');
+  assert.equal(runnerKind(['macos-15-large']), 'macos-large');
+  assert.equal(runnerKind(['xcode-27']), 'macos');
+  assert.equal(runnerKind(['windows-2025-vs2026']), 'windows');
+  assert.equal(runnerKind(['windows-11-vs2026-arm']), 'windows-arm');
+  assert.equal(runnerKind(['windows-11-arm']), 'windows-arm');
   assert.equal(runnerKind(['windows-2025']), 'windows');
   assert.equal(runnerKind(['self-hosted', 'linux']), 'other');
   assert.equal(runnerKind(['blacksmith-2vcpu-ubuntu-2404']), 'other');
@@ -170,9 +175,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - uses: actions/checkout@v4
       - run: npm test
 `;
   assert.deepEqual(lintWorkflow({ path: '.github/workflows/ci.yml', text: tuned }), []);
+  const summary = tuned + `  summary:
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: test "\${{ needs.test.result }}" = success
+`;
+  assert.deepEqual(lintWorkflow({ path: '.github/workflows/ci.yml', text: summary }).map((f) => f.code), ['slim'], 'a shell-only summary job belongs on a 1-core runner');
   const stats = { name: 'CI', path: '.github/workflows/ci.yml', runs: 10, minutes: 100, usd: 0.6, jobsPerRun: 12, avgJobMinutes: 1.2, retestedMinutes: 40 };
   const withStats = lintWorkflow({ path: '.github/workflows/ci.yml', text: tuned.replace('uses: g4m35/yardmaster@v0.4.0', 'run: echo') }, stats);
   assert.ok(withStats.some((f) => f.code === 'no-guard' && f.level === 'high' && f.message.includes('40 minutes')));
@@ -201,60 +216,176 @@ test('GitHub client retries server errors on reads, paginates, and never sends t
 // ---------- the guard Action ----------
 
 function guardCtx(p: Partial<GuardContext> = {}): GuardContext {
-  return { repo: 'acme/app', sha: 'S1', event: 'push', payload: {}, workflowPath: '.github/workflows/ci.yml', runId: 99, serverUrl: 'https://github.com', ...p };
+  return { repo: 'acme/app', sha: 'S1', event: 'push', payload: {}, workflowPath: '.github/workflows/ci.yml', runId: 99, serverUrl: 'https://github.com', ref: 'refs/heads/main', ...p };
 }
 
-const status = (context: string, description: string, login: string) => ({ state: 'success', context, description, target_url: 'https://example/run', creator: { login } });
+const RUN_URL = 'https://github.com/acme/app/actions/runs/7';
+const at = (sec: number) => new Date(Date.parse('2026-11-05T20:00:00Z') + sec * 1000).toISOString();
+const status = (context: string, description: string, login: string, extra: Record<string, unknown> = {}) =>
+  ({ state: 'success', context, description, target_url: RUN_URL, created_at: at(100), creator: { login }, ...extra });
+const job = (name: string, started: number, completed: number | null, conclusion: string | null = 'success') =>
+  ({ name, status: completed === null ? 'in_progress' : 'completed', conclusion: completed === null ? null : conclusion, started_at: at(started), completed_at: completed === null ? null : at(completed) });
+/** A pull request run for H1 that really ran: guard, tests, then the job that posted the status at t=100. */
+const goodJobs = () => [job('guard', 0, 10), job('test (ubuntu-latest, 22)', 12, 80), job('test (macos-latest, 22)', 12, 95), job('done', 96, 104)];
+const goodRun = () => ({ id: 7, path: '.github/workflows/ci.yml', event: 'pull_request', status: 'completed', conclusion: 'success', head_sha: 'H1', run_started_at: at(0), html_url: RUN_URL, repository: { full_name: 'acme/app' } });
 
-test('guard skips a push whose exact tree passed on its pull request, and only then', async () => {
+test('guard skips a push whose exact tree passed on its pull request, only when that run backs the claim', async () => {
   const tested = testedContext('.github/workflows/ci.yml');
-  let headStatuses = [status(tested, 'tree T1', 'github-actions[bot]')];
+  let headStatuses: unknown[] = [];
+  let run: Record<string, unknown> = goodRun();
+  let jobs = goodJobs();
   const m = await mockGitHub({
     'GET /repos/acme/app/git/commits/S1': () => ({ body: { tree: { sha: 'T1' } } }),
     'GET /repos/acme/app/actions/workflows/ci.yml/runs': () => ({ body: { workflow_runs: [] } }),
     'GET /repos/acme/app/commits/S1/pulls': () => ({ body: [{ head: { sha: 'H1' } }] }),
     'GET /repos/acme/app/commits/S1/statuses': () => ({ body: [] }),
     'GET /repos/acme/app/commits/H1/statuses': () => ({ body: headStatuses }),
-    'GET /repos/acme/app/collaborators/mallory/permission': () => ({ body: { permission: 'read', role_name: 'read' } }),
-    'GET /repos/acme/app/collaborators/alice/permission': () => ({ body: { permission: 'write', role_name: 'write' } }),
+    'GET /repos/acme/app/actions/runs/7': () => ({ body: run }),
+    'GET /repos/acme/app/actions/runs/7/jobs': () => ({ body: { total_count: jobs.length, jobs } }),
+    'GET /repos/acme/app/git/commits/M1': () => ({ body: { tree: { sha: 'T1' } } }),
+    'GET /repos/acme/app/commits/M1/statuses': () => ({ body: [] }),
   });
   const inputs = { trustLocal: false, trustedUsers: [], waitSeconds: 0 };
+  // The first argument only names the case; the assertion message says what it proves.
+  const skips = async (_case: string, ctx = guardCtx(), inp: Parameters<typeof decide>[2] = inputs) => (await decide(m.gh, ctx, inp)).skip;
+  const reset = () => {
+    headStatuses = [status(tested, 'tree T1', 'github-actions[bot]')];
+    run = goodRun();
+    jobs = goodJobs();
+  };
+
+  reset();
   const d = await decide(m.gh, guardCtx(), inputs);
   assert.equal(d.skip, true, d.reason);
   assert.equal(d.tree, 'T1');
+  assert.equal(d.url, RUN_URL);
 
   headStatuses = [status(tested, 'tree T2', 'github-actions[bot]')];
-  assert.equal((await decide(m.gh, guardCtx(), inputs)).skip, false, 'a different tree never counts');
+  assert.equal(await skips('tree'), false, 'a different tree never counts');
 
-  headStatuses = [status(tested, 'tree T1', 'mallory')];
-  assert.equal((await decide(m.gh, guardCtx(), inputs)).skip, false, 'a pass recorded by someone without write access is ignored');
+  reset();
+  headStatuses = [status(tested, 'tree T1', 'alice')];
+  assert.equal(await skips('person'), false, 'a pass posted by a person never counts, whatever their access');
 
+  reset();
+  headStatuses = [status(tested, 'tree T1', 'github-actions[bot]', { target_url: 'https://evil.example/acme/app/actions/runs/7' })];
+  assert.equal(await skips('url'), false, 'the status must point at a run of this repo');
+
+  reset();
+  run = { ...goodRun(), path: '.github/workflows/other.yml' };
+  assert.equal(await skips('path'), false, 'a run of another workflow file vouches for nothing (any workflow can post as github-actions[bot])');
+
+  reset();
+  run = { ...goodRun(), head_sha: 'H9' };
+  assert.equal(await skips('sha'), false, 'the run must be for the commit the status is on');
+
+  reset();
+  run = { ...goodRun(), conclusion: 'failure' };
+  assert.equal(await skips('failed'), false, 'a failed run vouches for nothing');
+
+  reset();
+  jobs = [job('guard', 0, 10), job('test (ubuntu-latest, 22)', 11, 11, 'skipped'), job('done', 12, 20)];
+  assert.equal(await skips('chained'), false, 'a run that skipped its own suite (say, on a forged pass) cannot vouch for a tree');
+  assert.equal(await skips('allowed', guardCtx(), { ...inputs, allowSkipped: ['test'] }), true, 'unless the adopter says that job may be skipped');
+
+  reset();
+  run = { ...goodRun(), status: 'in_progress', conclusion: null };
+  jobs = [job('guard', 0, 10), job('test (ubuntu-latest, 22)', 12, 80), job('test (macos-latest, 22)', 12, null)];
+  assert.equal(await skips('early'), false, 'posted while a test job was still running: not a pass');
+
+  reset();
+  run = { ...goodRun(), status: 'in_progress', conclusion: null };
+  jobs = [...goodJobs().slice(0, 3), job('done', 96, null)];
+  assert.equal(await skips('recorder still finishing'), true, 'the recording job itself may still be finishing (auto-merge right after green)');
+
+  reset();
+  headStatuses = [status(tested, 'tree T1', 'github-actions[bot]', { created_at: at(-50) })];
+  assert.equal(await skips('before run'), false, 'a status older than the run it cites was not posted by it');
+
+  // A decoy: the same commit opened as a pull request into a branch whose workflow does nothing.
+  const linked = (number: number, ref: string) => [{ number, base: { ref, repo: { url: 'https://api.github.com/repos/acme/app' } } }];
+  reset();
+  run = { ...goodRun(), pull_requests: linked(12, 'evil') };
+  assert.equal(await skips('open decoy'), false, 'a run of a pull request into another branch vouches for nothing on main');
+  reset();
+  run = { ...goodRun(), pull_requests: linked(8, 'main') };
+  assert.equal(await skips('linked to main'), true);
+
+  const prCtx = guardCtx({ sha: 'M1', event: 'pull_request', payload: { pull_request: { number: 8, head: { sha: 'H1' }, base: { ref: 'main' } } } });
+  reset();
+  run = { ...goodRun(), pull_requests: linked(8, 'main') };
+  assert.equal(await skips('same PR', prCtx), true, 'an earlier run of this same pull request counts');
+  run = { ...goodRun(), pull_requests: linked(12, 'evil') };
+  assert.equal(await skips('decoy PR', prCtx), false, 'on a pull request, a run of another pull request never counts');
+  run = { ...goodRun(), pull_requests: [] };
+  assert.equal(await skips('closed decoy', prCtx), false, 'nor does a run GitHub no longer links to this pull request');
+
+  reset();
+  run = { ...goodRun(), event: 'push', head_commit: { tree_id: 'T5' } };
+  assert.equal(await skips('push tree'), false, 'a push run vouches only for the tree it tested');
+  run = { ...goodRun(), event: 'push', head_commit: { tree_id: 'T1' } };
+  assert.equal(await skips('push tree ok'), true);
+
+  reset();
   headStatuses = [status('yardmaster/verified', 'tree T1 (npm test)', 'alice')];
-  assert.equal((await decide(m.gh, guardCtx(), inputs)).skip, false, 'local signoffs only count with trust-local');
-  assert.equal((await decide(m.gh, guardCtx(), { ...inputs, trustLocal: true })).skip, true);
-  assert.equal((await decide(m.gh, guardCtx(), { ...inputs, trustLocal: true, trustedUsers: ['bob'] })).skip, false, 'trusted-users narrows who counts');
+  assert.equal(await skips('no trust-local'), false, 'local signoffs only count with trust-local');
+  assert.equal(await skips('no list', guardCtx(), { ...inputs, trustLocal: true }), false, 'trust-local needs trusted-users');
+  assert.equal(await skips('listed', guardCtx(), { ...inputs, trustLocal: true, trustedUsers: ['alice'] }), true);
+  assert.equal(await skips('not listed', guardCtx(), { ...inputs, trustLocal: true, trustedUsers: ['bob'] }), false);
+  headStatuses = [status('yardmaster/verified', 'tree T1 (npm test)', 'renovate[bot]')];
+  assert.equal(await skips('bot', guardCtx(), { ...inputs, trustLocal: true, trustedUsers: ['renovate[bot]'] }), false, 'bots never sign off');
 
-  headStatuses = [status(tested, 'tree T1', 'github-actions[bot]')];
-  assert.equal((await decide(m.gh, guardCtx({ event: 'workflow_dispatch' }), inputs)).skip, false, 'manual runs always run');
+  reset();
+  assert.equal(await skips('manual', guardCtx({ event: 'workflow_dispatch' })), false, 'manual runs always run');
+  assert.equal(await skips('prt', guardCtx({ event: 'pull_request_target' })), false, 'pull_request_target tests main\'s sha, so it never skips');
 });
 
-test('guard skips when a push run already passed the same tree, and waits for a late local signoff', async () => {
+test('guard skips when a push run really passed the same tree, and waits only for a signoff that can match', async () => {
   let polls = 0;
+  let headPolls = 0;
+  let pushJobs = [job('guard', 0, 5), job('test', 6, 60)];
   const m = await mockGitHub({
-    'GET /repos/acme/app/git/commits/S2': () => ({ body: { tree: { sha: 'T9' } } }),
-    'GET /repos/acme/app/actions/workflows/ci.yml/runs': () => ({ body: { workflow_runs: [{ id: 5, event: 'push', html_url: 'https://run/5', head_commit: { tree_id: 'T9' } }] } }),
+    'GET /repos/acme/app/actions/workflows/ci.yml/runs': () => ({ body: { workflow_runs: [{ id: 5, event: 'push', html_url: 'https://github.com/acme/app/actions/runs/5', head_commit: { tree_id: 'T9' } }] } }),
+    'GET /repos/acme/app/actions/runs/5/jobs': () => ({ body: { jobs: pushJobs } }),
     'GET /repos/acme/app/git/commits/S3': () => ({ body: { tree: { sha: 'T3' } } }),
     'GET /repos/acme/app/commits/S3/pulls': () => ({ body: [] }),
     'GET /repos/acme/app/commits/S3/statuses': () => ({ body: ++polls >= 3 ? [status('yardmaster/verified', 'tree T3', 'alice')] : [] }),
+    'GET /repos/acme/app/git/commits/M4': () => ({ body: { tree: { sha: 'TM4' } } }),
+    'GET /repos/acme/app/git/commits/H4': () => ({ body: { tree: { sha: 'TH4' } } }),
+    'GET /repos/acme/app/commits/M4/statuses': () => ({ body: [] }),
+    'GET /repos/acme/app/commits/H4/statuses': () => ({ body: (headPolls++, []) }),
   });
-  const d = await decide(m.gh, guardCtx({ sha: 'S2' }), { trustLocal: false, trustedUsers: [], waitSeconds: 0 });
-  assert.equal(d.skip, true);
-  assert.equal(d.url, 'https://run/5');
+  // The push's own payload names its tree: no commit lookup needed.
+  const push = guardCtx({ sha: 'S2', payload: { after: 'S2', head_commit: { tree_id: 'T9' } } });
+  const d = await decide(m.gh, push, { trustLocal: false, trustedUsers: [], waitSeconds: 0 });
+  assert.equal(d.skip, true, d.reason);
+  assert.equal(d.url, 'https://github.com/acme/app/actions/runs/5');
+  assert.ok(!m.calls.includes('GET /repos/acme/app/git/commits/S2'));
+
+  // A merge queue run of the same tree, under another sha, counts too.
+  const queued = await mockGitHub({
+    'GET /repos/acme/app/actions/workflows/ci.yml/runs': (_r, _b, url) => ({ body: { workflow_runs: url.searchParams.get('event') === 'merge_group' ? [{ id: 6, event: 'merge_group', html_url: 'https://github.com/acme/app/actions/runs/6', head_commit: { tree_id: 'T9' } }] : [] } }),
+    'GET /repos/acme/app/actions/runs/6/jobs': () => ({ body: { jobs: [job('guard', 0, 5), job('test', 6, 60)] } }),
+  });
+  assert.equal((await decide(queued.gh, push, { trustLocal: false, trustedUsers: [], waitSeconds: 0 })).url, 'https://github.com/acme/app/actions/runs/6');
+
+  pushJobs = [job('guard', 0, 5), job('test', 6, 6, 'skipped')];
+  const chained = await decide(m.gh, push, { trustLocal: false, trustedUsers: [], waitSeconds: 0 });
+  assert.equal(chained.skip, false, 'a push run that skipped its suite is not a pass');
+  assert.match(chained.reason, /skipped or failed jobs/);
+
   const late = await decide(m.gh, guardCtx({ sha: 'S3' }), { trustLocal: true, trustedUsers: ['alice'], waitSeconds: 2, pollMs: 20 });
   assert.equal(late.skip, true, late.reason);
+
+  // A PR whose head is behind its base tests a merge tree no signoff can carry: don't sit out the wait.
+  const t0 = Date.now();
+  const pr = await decide(m.gh, guardCtx({ sha: 'M4', event: 'pull_request', payload: { pull_request: { head: { sha: 'H4' } } } }), { trustLocal: true, trustedUsers: ['alice'], waitSeconds: 5, pollMs: 20 });
+  assert.equal(pr.skip, false);
+  assert.ok(Date.now() - t0 < 2000, 'no wait when the signoff could never match');
+  assert.equal(headPolls, 1);
 });
 
-test('guard record stores the tested merge tree on the pull request head', async () => {
+test('guard record stores the tested merge tree on the pull request head, and never for other events', async () => {
   const m = await mockGitHub({
     'GET /repos/acme/app/git/commits/M1': () => ({ body: { tree: { sha: 'TM' } } }),
     'POST /repos/acme/app/statuses/H1': () => ({ status: 201, body: {} }),
@@ -266,6 +397,9 @@ test('guard record stores the tested merge tree on the pull request head', async
   assert.deepEqual(m.posts[0], { path: '/repos/acme/app/statuses/H1', body: { state: 'success', context: 'yardmaster/tested (ci.yml)', description: 'tree TM', target_url: 'https://github.com/acme/app/actions/runs/99' } });
   const fork = await record(m.gh, guardCtx({ sha: 'M2', event: 'pull_request', payload: { pull_request: { head: { sha: 'H2' } } } }));
   assert.equal(fork.posted, false, 'fork PR tokens cannot write statuses; that is not an error');
+  const prt = await record(m.gh, guardCtx({ sha: 'M1', event: 'pull_request_target', payload: { pull_request: { head: { sha: 'H1' } } } }));
+  assert.equal(prt.posted, false, 'pull_request_target would vouch for main\'s tree on the PR head');
+  assert.equal(m.posts.length, 2);
 });
 
 test('the bundled Action is up to date with its source', () => {
@@ -301,8 +435,27 @@ test('budget uses GitHub billing numbers when allowed, estimates otherwise', asy
   assert.equal(verdict({ ...est, spentUsd: 12.5 }, cfg).level, 'over');
   assert.notEqual(verdict({ ...est, spentUsd: 12.5, projectedUsd: 12.5 }, { ...cfg, extraUsd: 10 }).level, 'over', 'raising extraUsd takes effect without waiting for a refresh');
   assert.equal(verdict({ ...est, spentUsd: 15, includedUsd: 100 }, cfg).level, 'over', 'the allowance comes from current settings, not the cached state');
+  assert.equal(est.plan, null, 'no plan in the /user reply: assume Free');
+  assert.notEqual(verdict({ ...est, spentUsd: 15, projectedUsd: 15, plan: 'pro' }, cfg).level, 'over', 'a Pro plan includes $18');
+  assert.equal(verdict({ ...billed, overageUsd: 0.4 }, cfg).level, 'over', "GitHub's own overage figure counts even when our sum says otherwise");
   assert.equal(verdict({ ...est, spentUsd: 1, projectedUsd: 11 }, cfg).level, 'warn');
   assert.equal(verdict({ ...est, spentUsd: 1, projectedUsd: 2 }, cfg).level, 'ok');
+});
+
+test('budget takes the allowance from the GitHub plan when the token can see it', async () => {
+  sandbox();
+  const m = await mockGitHub({
+    'GET /users/pat': () => ({ body: { type: 'User', login: 'pat' } }),
+    'GET /user': () => ({ body: { login: 'pat', plan: { name: 'pro' } } }),
+    'GET /users/pat/settings/billing/usage/summary': () => ({ body: { usageItems: [] } }),
+  });
+  const cfg = loadConfig().ci.budget;
+  const s = await computeBudget(m.gh, 'pat', cfg);
+  assert.equal(s.plan, 'pro');
+  assert.equal(s.includedUsd, 18);
+  const pinned = await computeBudget(m.gh, 'pat', { ...cfg, includedUsd: 50 });
+  assert.equal(pinned.includedUsd, 50, 'a configured allowance wins');
+  assert.ok(!m.calls.slice(3).includes('GET /user'), 'no plan lookup when the allowance is configured');
 });
 
 test('job cache notices a re-run: same run id, new attempt', async () => {

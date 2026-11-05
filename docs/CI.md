@@ -20,6 +20,7 @@ one agent.
 | Runs made pointless by a newer push to the same branch | 10 to 40% | push gate, push once |
 | Each job is billed in whole minutes; many tiny jobs waste the remainder | 8 to 30% | fewer, longer jobs |
 | macOS jobs on every pull request (about 10x the Linux price) | varies | run them on `main` only |
+| Small jobs (classify, summaries, labels) on 2-core runners | a few % | `runs-on: ubuntu-slim` ($0.002/min, jobs up to 15 minutes) |
 
 The audit prints the same breakdown for your repo, the workflows that cost most, and fixes ranked by value. Add
 `--owner NAME` to cover every repo of an account, `--json` for scripts.
@@ -52,32 +53,47 @@ budget or in-progress hold. `git push --no-verify` skips all hooks.
 ## 2. The guard (your workflow)
 
 The guard is a GitHub Action that skips a workflow's heavy jobs when **this exact file tree already passed this
-exact workflow**. Add three pieces to the workflow (`ym ci init` prints this):
+exact workflow**. Add three pieces to the workflow. `ym ci init` prints them with the guard pinned to the commit
+behind the current release:
 
 ```yaml
+permissions:
+  contents: read               # jobs get only what they ask for below
+
 jobs:
   guard:                       # 1. decide (one 1-core job, about $0.002)
     runs-on: ubuntu-slim
+    timeout-minutes: 5
     permissions: { actions: read, contents: read, pull-requests: read, statuses: read }
     outputs:
       skip: ${{ steps.guard.outputs.skip }}
     steps:
       - id: guard
-        uses: g4m35/yardmaster@v0.4.0
+        uses: g4m35/yardmaster@<commit sha> # v0.6.0
 
   test:                        # 2. every expensive job
     needs: guard
     if: needs.guard.outputs.skip != 'true'
     # ...your existing job...
 
-  record:                      # 3. remember which tree passed
-    needs: [test]
+  done:                        # 3. the one check to require in branch protection; records what passed
+    needs: [guard, test]       #    list every job here
+    if: always()
     runs-on: ubuntu-slim
+    timeout-minutes: 5
     permissions: { contents: read, statuses: write }
     steps:
-      - uses: g4m35/yardmaster@v0.4.0
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
+      - if: needs.guard.outputs.skip != 'true' && !contains(needs.*.result, 'skipped')
+        uses: g4m35/yardmaster@<commit sha> # v0.6.0
         with: { mode: record }
 ```
+
+The `done` job is both the required check and the recorder, so the guard costs two 1-core jobs per run (about
+$0.004 on a private repo) and adds about 10 seconds before the tests start. Pin the guard to a full commit SHA, never
+a tag: it decides whether your tests run, and a tag can be moved to other code. GitHub's Actions policy can require every action to
+be pinned to a full commit SHA (repository or organization Settings, Actions, General).
 
 How it decides, and why it's safe:
 
@@ -85,28 +101,54 @@ How it decides, and why it's safe:
   tree it actually tested, as a `yardmaster/tested (ci.yml)` commit status on the PR head. After the PR merges,
   the run on `main` finds that status through the merge commit's pull request and skips only if the tree is
   identical, byte for byte. If anything else landed on `main` in between, the tree differs and the suite runs.
-- A `push` run that already passed the same tree (say, the same commit pushed to two branches) also counts.
-- Only statuses written by `github-actions[bot]` (your own workflow) or by someone with write access count.
-  Pull requests from forks get a read-only token, so they can't write one.
-- `workflow_dispatch` and `schedule` runs always run: use them to force a full run.
+- **A status is only a claim**, and anything holding `statuses: write` can post one. So the guard checks it against
+  the run it links to: a run of this same workflow file in this repo, for the commit the status is on, that started
+  before the status was posted and in which every job had passed by then (only the recording job may finish later).
+  Statuses posted by people, by other workflows' runs, or by a run that skipped its own suite never count. The
+  check costs two API reads, only when a candidate status is found.
+- A `push` or merge queue run that passed the same tree also counts, if none of its jobs was skipped.
+- Only `push`, `pull_request` and `merge_group` runs can skip or record. `workflow_dispatch` and `schedule` runs
+  always run (use them to force a full run). Events such as `pull_request_target` and `workflow_run` test a
+  different commit than the one they report, so the guard never skips them.
+- Pull requests from forks get a read-only token, so they can't record anything.
 - If the guard can't decide (API error, missing permission), it says so and the suite runs. It never skips on
   doubt.
-- Jobs skipped by `if:` count as passing for required status checks. If you require a matrix job, require a small
-  summary job instead (a skipped matrix job is reported under its unexpanded name).
-- Deploy jobs shouldn't depend on the guard; only gate the tests.
+- Jobs skipped by `if:` count as passing for required status checks, so require the `done` job, not the test jobs
+  (a skipped matrix job is reported under its unexpanded name).
+- **Jobs that run only on some branches or events** (deploy on `main`, macOS on `main`) are skipped in pull request
+  runs, which voids that run as a pass. Put them in their own workflow, or list them in the guard's
+  `allow-skipped` input (`allow-skipped: deploy`). Never list a test job there. And don't make such jobs depend on
+  the guard, or a pass recorded on a pull request would skip them on `main` too.
+
+A pull request run uses the workflow file from its merge with the base, so a run of a pull request into some other
+branch could have run any workflow at all. On a pull request, a recorded pass therefore only counts if GitHub links
+its run to this same pull request and base. After a merge GitHub drops that link, so the push run on `main` rejects
+runs still linked to an open pull request into another branch, but can't tell a closed one.
+
+What that leaves, and how to close it: someone with write access could open a decoy pull request from the same commit
+into a branch whose workflow does nothing, close it, and have its pass cover the merge on `main` after `main` moved
+past what the real pull request tested. Two settings close it: require the `done` check on `main` (so the real pull
+request's run must pass for real), and require branches to be up to date before merging, or use a merge queue (so
+the tree that lands is the tree that run tested). Without branch protection, anyone with write access can push to
+`main` directly anyway.
+
+Re-running a workflow run moves its start time, so a pass recorded by an earlier attempt stops counting; the
+re-run records again when it passes.
 
 ### Trust local results (opt in)
 
 For solo developers and small teams who trust their own machines (the idea behind
 [basecamp/gh-signoff](https://github.com/basecamp/gh-signoff) and Rails 8.1's local CI): set `"ci": { "trustLocal":
-true }` in `yardmaster.json` and `trust-local: true` on the guard. After the gate's checks pass, Yardmaster posts a
-`yardmaster/verified` status for the pushed commit, and the guard skips the suite if that status matches the
-tree being tested and was posted by someone with write access (or a login listed in `trusted-users`). For a pull
-request that only holds when the PR is up to date with its base, because otherwise the tested merge differs from
-what you checked. `ym ci signoff [commit]` posts one by hand (after checking, if the tree wasn't checked yet).
+true }` in `yardmaster.json`, and `trust-local: true` plus `trusted-users: alice, bob` on the guard. After the
+gate's checks pass, Yardmaster posts a `yardmaster/verified` status for the pushed commit, and the guard skips the
+suite if that status matches the tree being tested and was posted by a listed login. Without `trusted-users` the
+guard ignores signoffs, and bot accounts never count. For a pull request a signoff only matches when the PR is up to
+date with its base (otherwise the tested merge differs from what you checked), and the guard only waits for one
+then. `ym ci signoff [commit]` posts one by hand (after checking, if the tree wasn't checked yet).
 
-Local machines aren't CI machines: services, operating system and secrets differ. Keep `trust-local` off for
-anything where that matters.
+Be clear about what this trusts: any token belonging to a listed login (theirs, their `gh` login on a machine
+running agents) can make a tree skip CI, without running anything. Local machines aren't CI machines either:
+services, operating system and secrets differ. Keep `trust-local` off for anything where that matters.
 
 ## 3. The budget
 
@@ -127,7 +169,10 @@ never waits on it.
 }
 ```
 
-`includedUsd` is your plan's allowance (default 12, GitHub Free). `extraUsd` is paid usage you accept on top.
+`includedUsd` is your plan's allowance. Left unset, Yardmaster asks GitHub for your plan (your own account, or an
+organization you own) and uses its allowance: Free $12, Pro and Team $18, Enterprise Cloud $300; otherwise it
+assumes $12. Copilot cloud sessions draw from the same pool, so leave room for them. `extraUsd` is paid usage you
+accept on top.
 When the allowance plus `extraUsd` is used up, pushes to private repos are held with a clear message (agents are
 told to stop and ask you). Public repos are free on standard runners and are never held.
 

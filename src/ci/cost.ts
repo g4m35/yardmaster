@@ -4,7 +4,7 @@
  * Standard runners are free in public repositories; self-hosted and third-party runners are not billed by GitHub.
  */
 
-export type RunnerKind = 'linux-slim' | 'linux' | 'linux-arm' | 'windows' | 'windows-arm' | 'macos' | 'macos-larger' | 'other';
+export type RunnerKind = 'linux-slim' | 'linux' | 'linux-arm' | 'windows' | 'windows-arm' | 'macos' | 'macos-large' | 'macos-xlarge' | 'other';
 
 export const RATE_USD: Record<Exclude<RunnerKind, 'other'>, number> = {
   'linux-slim': 0.002,
@@ -13,10 +13,12 @@ export const RATE_USD: Record<Exclude<RunnerKind, 'other'>, number> = {
   windows: 0.01,
   'windows-arm': 0.01,
   macos: 0.062,
-  // Larger macOS runners cost more; GitHub bills them from the first minute even in public repos. The standard
-  // macOS rate is a floor, and reports flag these jobs.
-  'macos-larger': 0.062,
+  // Larger runners are billed even in public repos (on Team and Enterprise Cloud they draw from included usage first).
+  'macos-large': 0.077,
+  'macos-xlarge': 0.102,
 };
+
+export const isLargerRunner = (k: RunnerKind): boolean => k === 'macos-large' || k === 'macos-xlarge';
 
 /** Which runner a job asked for, from its `runs-on` labels. Unrecognized labels are self-hosted or third-party. */
 export function runnerKind(labels: string[]): RunnerKind {
@@ -26,10 +28,12 @@ export function runnerKind(labels: string[]): RunnerKind {
     if (l === 'ubuntu-slim') return 'linux-slim';
     if (/^ubuntu-(latest|\d{2}\.\d{2})-arm$/.test(l)) return 'linux-arm';
     if (/^ubuntu-(latest|\d{2}\.\d{2})$/.test(l)) return 'linux';
-    if (/^windows-(latest|\d{4}|11)-arm$/.test(l)) return 'windows-arm';
-    if (/^windows-(latest|\d{4})$/.test(l)) return 'windows';
-    if (/^macos-(latest|\d+)(-intel)?-(large|xlarge)$/.test(l)) return 'macos-larger';
-    if (/^macos-(latest|\d+)(-intel)?$/.test(l)) return 'macos';
+    // Image variants such as windows-2025-vs2026 and windows-11-vs2026-arm bill like the base image.
+    if (/^windows-(latest|\d{4}|11)(-vs\d{4})?-arm$/.test(l)) return 'windows-arm';
+    if (/^windows-(latest|\d{4})(-vs\d{4})?$/.test(l)) return 'windows';
+    if (/^macos-(latest|\d+)-xlarge$/.test(l)) return 'macos-xlarge';
+    if (/^macos-(latest|\d+)(-intel)?-large$/.test(l)) return 'macos-large';
+    if (/^(macos-(latest|\d+)(-intel)?|xcode-\d+)$/.test(l)) return 'macos';
   }
   return 'other';
 }
@@ -64,6 +68,6 @@ export function jobCost(job: JobTiming, repoPrivate: boolean): JobCost {
   const raw = rawMinutes(job);
   const billed = billedMinutes(job);
   if (kind === 'other') return { kind, raw, billed, usd: 0 };
-  const free = !repoPrivate && kind !== 'macos-larger';
+  const free = !repoPrivate && !isLargerRunner(kind);
   return { kind, raw, billed, usd: free ? 0 : billed * RATE_USD[kind] };
 }

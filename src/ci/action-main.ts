@@ -1,9 +1,11 @@
 // Entry point of the GitHub Action (bundled into action/index.mjs by scripts/build-action.mjs).
 import { appendFileSync, readFileSync } from 'node:fs';
 import { createGitHub } from './github.ts';
-import { contextFromEnv, decide, record, type GuardContext } from './guard.ts';
+import { contextFromEnv, decide, record, runIdFromUrl, type GuardContext } from './guard.ts';
 
 const input = (name: string, fallback = ''): string => (process.env[`INPUT_${name.toUpperCase()}`] ?? fallback).trim();
+// Logins never contain spaces; job names often do.
+const list = (name: string, sep: RegExp): string[] => input(name).split(sep).map((s) => s.trim()).filter(Boolean);
 
 function setOutput(name: string, value: string): void {
   const file = process.env.GITHUB_OUTPUT;
@@ -30,13 +32,16 @@ async function main(): Promise<void> {
   if (mode !== 'check') throw new Error(`Unknown mode "${mode}". Use "check" or "record".`);
   const d = await decide(gh, ctx, {
     trustLocal: input('trust-local', 'false') === 'true',
-    trustedUsers: input('trusted-users').split(/[\s,]+/).filter(Boolean),
+    trustedUsers: list('trusted-users', /[\s,]+/),
     waitSeconds: Number(input('wait-seconds', '20')) || 0,
+    allowSkipped: list('allow-skipped', /[\n,]+/),
   });
   setOutput('skip', String(d.skip));
   setOutput('reason', d.reason);
   setOutput('tree', d.tree);
-  const line = d.skip ? `Skipping the suite: ${d.reason}${d.url ? ` (${d.url})` : ''}.` : `Running the suite: ${d.reason}.`;
+  // Only ever print a link to one of this repo's runs: the URL came from the API, but never echo arbitrary text.
+  const url = d.url && runIdFromUrl(d.url, ctx.serverUrl, ctx.repo) ? ` (${d.url})` : '';
+  const line = d.skip ? `Skipping the suite: ${d.reason}${url}.` : `Running the suite: ${d.reason}.`;
   console.log(`Yardmaster: ${line}`);
   summary(`**Yardmaster CI guard:** ${line}`);
 }
