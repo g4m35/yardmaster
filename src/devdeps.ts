@@ -232,8 +232,9 @@ export async function dedupeGroup(g: DepsGroup, opts: { dryRun?: boolean } = {})
     // The project keeps its own caches (not the other copy's).
     const caches: string[] = [];
     for (const c of TOOL_CACHES) {
-      if (!existsSync(join(original, c))) continue;
+      // The other copy's caches never stay: the project gets exactly its own back, or none.
       if (existsSync(join(d.path, c))) removeFast(join(d.path, c), batch);
+      if (!existsSync(join(original, c))) continue;
       renameSync(join(original, c), join(d.path, c));
       caches.push(c);
     }

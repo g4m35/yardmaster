@@ -273,6 +273,9 @@ test('identical installs elsewhere on the machine can be shared, byte-identical 
   const group = scan.identical[0]!;
   assert.deepEqual(group.dirs.map((d) => d.project.split('/').pop()).sort(), ['one', 'three', 'two']);
   const keep = group.dirs[0]!.project.split('/').pop();
+  // A cache only the kept copy has must not leak into the other project.
+  mkdirSync(join(group.dirs[0]!.path, '.turbo'), { recursive: true });
+  writeFileSync(join(group.dirs[0]!.path, '.turbo', 'state'), `{"project":"${keep}"}`);
   const cow = await clonesAreFree(root);
   const applied = await dedupeGroup(group);
   if (!cow) {
@@ -289,8 +292,11 @@ test('identical installs elsewhere on the machine can be shared, byte-identical 
   assert.match(readFileSync(join(root, 'three', 'node_modules', 'pkg2', 'f2.js'), 'utf8'), /patched/);
   const owner = target.split('/').slice(-2, -1)[0];
   assert.equal(readFileSync(join(target, '.vite', 'vitest', 'results.json'), 'utf8'), `{"project":"${owner}"}`, 'the project kept its own cache');
+  assert.ok(!existsSync(join(target, '.turbo')), "the other project's cache did not come along");
   assert.ok(existsSync(applied.replaced[0]!.original), 'the original is kept for undo');
   const undo = restoreLatest();
   assert.deepEqual(undo.restored, [target]);
   assert.ok(existsSync(join(target, 'pkg1', 'f1.js')));
+  assert.ok(!existsSync(join(target, '.turbo')), 'undo restores the original exactly');
+  assert.equal(readFileSync(join(target, '.vite', 'vitest', 'results.json'), 'utf8'), `{"project":"${owner}"}`);
 });
