@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { availableParallelism } from 'node:os';
 import * as z from 'zod/v4';
@@ -330,13 +330,106 @@ export function resolveConfig(layers: unknown[]): Config {
   return parsed.data;
 }
 
+// ---------------- unknown settings ----------------
+
+type Def = { type: string; shape?: Record<string, z.ZodType>; innerType?: z.ZodType; valueType?: z.ZodType; element?: z.ZodType };
+const defOf = (s: z.ZodType): Def => (s as unknown as { _zod: { def: Def } })._zod.def;
+
+/** The object (or record) schema under defaults, optionals and nullables. */
+function core(s: z.ZodType): Def {
+  let d = defOf(s);
+  while (d.innerType && ['default', 'optional', 'nullable', 'prefault', 'readonly', 'catch'].includes(d.type)) d = defOf(d.innerType);
+  return d;
+}
+
+function distance(a: string, b: string): number {
+  const prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    let diag = prev[0]!;
+    prev[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const up = prev[j]!;
+      prev[j] = Math.min(prev[j]! + 1, prev[j - 1]! + 1, diag + (a[i - 1] === b[j - 1] ? 0 : 1));
+      diag = up;
+    }
+  }
+  return prev[b.length]!;
+}
+
+function suggest(key: string, known: string[]): string | null {
+  const k = key.toLowerCase();
+  let best: { name: string; score: number } | null = null;
+  for (const name of known) {
+    const n = name.toLowerCase();
+    const score = n === k ? 0 : n.startsWith(k) || k.startsWith(n) ? 1 : distance(k, n);
+    if (score <= Math.max(2, Math.floor(name.length / 4)) && (!best || score < best.score)) best = { name, score };
+  }
+  return best?.name ?? null;
+}
+
+/**
+ * Settings Yardmaster doesn't know, with a likely intended name. Unknown keys are otherwise dropped without a word,
+ * which turns a typo in a spending cap into no cap at all. Keys starting with "$" or "//" are treated as comments.
+ */
+export function unknownSettings(raw: unknown, schema: z.ZodType = ConfigSchema, at = ''): string[] {
+  const d = core(schema);
+  if (Array.isArray(raw)) return d.type === 'array' && d.element ? raw.flatMap((v, i) => unknownSettings(v, d.element!, `${at.replace(/\.$/, '')}[${i}].`)) : [];
+  if (!isPlainObject(raw)) return [];
+  if (d.type === 'record' && d.valueType) return Object.entries(raw).flatMap(([k, v]) => unknownSettings(v, d.valueType!, `${at}${k}.`));
+  if (d.type !== 'object' || !d.shape) return [];
+  const shape = d.shape;
+  const out: string[] = [];
+  for (const [k, v] of Object.entries(raw)) {
+    if (k.startsWith('$') || k.startsWith('//')) continue;
+    const field = shape[k];
+    if (field) {
+      out.push(...unknownSettings(v, field, `${at}${k}.`));
+      continue;
+    }
+    const hint = suggest(k, Object.keys(shape));
+    out.push(`"${at}${k}" is not a Yardmaster setting${hint ? `; did you mean "${at}${hint}"?` : ''}`);
+  }
+  return out;
+}
+
+/** Problems per config file, re-checked whenever the file changes. */
+const warned = new Map<string, { stamp: number; problems: string[] }>();
+const reported = new Set<string>();
+
+/** Unknown settings found in the config files read so far, by file. */
+export function configWarnings(): { file: string; problems: string[] }[] {
+  return [...warned].filter(([, w]) => w.problems.length).map(([file, w]) => ({ file, problems: w.problems }));
+}
+
+/** Problems not handed out before: a long-running hub reports each one once, including ones from later edits. */
+export function newConfigWarnings(): string[] {
+  const out: string[] = [];
+  for (const { file, problems } of configWarnings()) {
+    for (const p of problems) {
+      const line = `${file}: ${p}`;
+      if (!reported.has(line)) {
+        reported.add(line);
+        out.push(line);
+      }
+    }
+  }
+  return out;
+}
+
+function readChecked(file: string): unknown {
+  const raw = readJson(file);
+  const stamp = existsSync(file) ? statSync(file).mtimeMs : 0;
+  if (warned.get(file)?.stamp !== stamp) warned.set(file, { stamp, problems: unknownSettings(raw) });
+  return raw;
+}
+
 export function loadGlobalConfigRaw(): unknown {
   return readJson(paths.globalConfig());
 }
 
 export function loadConfig(projectRoot?: string, overrides: unknown = {}): Config {
-  const layers: unknown[] = [loadGlobalConfigRaw()];
-  if (projectRoot) layers.push(readJson(join(projectRoot, PROJECT_CONFIG_FILE)));
+  const layers: unknown[] = [readChecked(paths.globalConfig())];
+  if (projectRoot) layers.push(readChecked(join(projectRoot, PROJECT_CONFIG_FILE)));
   layers.push(overrides);
   return resolveConfig(layers);
 }
