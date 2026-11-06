@@ -2,7 +2,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { sandbox, sh, tempDir, until } from './helpers.ts';
+import { sandbox, settleTasks, sh, tempDir, until } from './helpers.ts';
 import { Hub } from '../src/hub.ts';
 import { openDb } from '../src/db.ts';
 import { planCleanup, runCleanup } from '../src/janitor.ts';
@@ -33,8 +33,7 @@ async function startHub(globalConfig: Record<string, unknown> = {}, projectConfi
   const project = await hub.coord.registerProject(box.repo);
   const add = (tasks: Parameters<Hub['coord']['addTasks']>[1]) => hub.coord.addTasks(project.id, tasks, 'test');
   const get = (id: string) => hub.coord.getTask(id)!;
-  const settle = (ids: string[], timeout = 40_000) =>
-    until(() => ids.map(get), (ts) => ts.every((t) => ['done', 'needs_human', 'failed', 'canceled'].includes(t.status)), timeout, `tasks ${ids.join(',')} to settle`);
+  const settle = (ids: string[], timeout = 40_000) => settleTasks(hub.coord, ids, box.root, timeout) as Promise<Task[]>;
   return { ...box, hub, project, add, get, settle };
 }
 
