@@ -31,6 +31,7 @@ export function expandHome(p: string): string {
 }
 
 export const paths = {
+  home: () => yardHome(),
   db: () => join(yardHome(), 'yardmaster.db'),
   logs: () => ensureDir(join(yardHome(), 'logs')),
   tmp: () => ensureDir(join(yardHome(), 'tmp')),

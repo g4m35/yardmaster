@@ -304,3 +304,9 @@ test('a worker can still report a failed upload on a task it owns that is alread
   s.hub.coord.updateTask(id, { status: 'running', assignee: 'machine:other', attempts: 2 });
   assert.throws(() => s.hub.coord.updateTaskIfOwner(id, { ...owner, statuses: ['running', 'verifying', 'ready'] }, { status: 'needs_human' }));
 });
+
+test('a hub that finds another hub took over its home stops instead of running alongside it', async () => {
+  const s = await startHub();
+  writeFileSync(join(s.home, 'hub.lock'), `${process.ppid} 1\n`);
+  await until(() => s.hub.coord.eventsSince(0, null, 500).some((e) => e.kind === 'hub.lock-lost'), (x) => x, 10_000, 'lock-lost event');
+});

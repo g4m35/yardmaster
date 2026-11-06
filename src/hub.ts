@@ -19,7 +19,7 @@ import { loadConfig, verifySlotsFor, worktreeRootOf } from './config.ts';
 import { purgeTrash } from './fastfs.ts';
 import { detectAgents } from './adapters/index.ts';
 import { hubToken, machineId, paths } from './paths.ts';
-import { acquireHubLock } from './hublock.ts';
+import { acquireHubLock, holdsHubLock } from './hublock.ts';
 import { git, revParse } from './git.ts';
 import { loadPlugins, type LoadedPlugins } from './plugins.ts';
 import { notify } from './notify.ts';
@@ -96,14 +96,21 @@ export class Hub {
   }
 
   private releaseLock: () => void = () => undefined;
+  private lockFile = '';
 
   async start(): Promise<string> {
     // Before anything else: a second hub on this home would treat the first one's agents as orphans.
-    this.releaseLock = await acquireHubLock();
+    this.lockFile = join(paths.home(), 'hub.lock');
+    this.releaseLock = await acquireHubLock(this.lockFile);
     try {
       return await this.startLocked();
     } catch (err) {
+      // Undo everything a partial start set up, so nothing schedules on behalf of a hub that never ran.
+      this.coord.onChange = null;
+      if (this.kickTimer) clearTimeout(this.kickTimer);
+      for (const t of this.timers) clearInterval(t);
       await new Promise<void>((r) => (this.server?.listening ? this.server.close(() => r()) : r()));
+      this.server = null;
       this.releaseLock();
       throw err;
     }
@@ -188,6 +195,12 @@ export class Hub {
     }
     this.looping = true;
     try {
+      if (n % 4 === 0 && !holdsHubLock(this.lockFile)) {
+        // Another hub took over this home (only possible in a rare three-way start race): two hubs must never run.
+        this.coord.event(null, null, 'error', 'hub.lock-lost', 'Another hub took over this Yardmaster home; this one is stopping.');
+        void this.stop();
+        return;
+      }
       if (n % 3 === 0) await this.heartbeat();
       await this.worker.tick();
       // Merges (and their re-verification) run in the background so a long test run never stalls scheduling.

@@ -54,6 +54,11 @@ async function stillOwned(owner: Owner, file: string): Promise<boolean> {
 
 export class HubAlreadyRunning extends Error {}
 
+/** Whether this process still holds the lock: a hub checks this as it runs and stops if another took it over. */
+export function holdsHubLock(file = join(yardHome(), 'hub.lock')): boolean {
+  return held.has(file) && readOwner(file)?.pid === process.pid;
+}
+
 /** Takes the lock or throws HubAlreadyRunning. Returns the release function. */
 export async function acquireHubLock(file = join(yardHome(), 'hub.lock')): Promise<() => void> {
   const started = await processStartTime(process.pid).catch(() => null);
@@ -90,7 +95,8 @@ export async function acquireHubLock(file = join(yardHome(), 'hub.lock')): Promi
       }
       const moved = readOwner(aside);
       if (moved && (await stillOwned(moved, file))) {
-        // We moved a live hub's lock: it was taken over between our check and the rename. Put it back and yield.
+        // We moved a live hub's lock: it was taken over between our check and the rename. Put it back and yield. If
+        // a third hub linked its lock in meanwhile, the live hub notices it no longer holds the lock and stops.
         try {
           linkSync(aside, file);
         } catch (err) {
