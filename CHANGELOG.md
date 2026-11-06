@@ -1,16 +1,35 @@
 # Changelog
 
-## Unreleased
-- Codex spend: reasoning tokens were counted twice (Codex's output count already includes them), and default prices were from an older model. Codex now defaults to GPT-6.1 Sol prices, and its cheap tier uses GPT-6 Luna ($0.10 / $0.50 per million tokens).
-- Reviews leave lockfiles out of the size that triggers a review and out of the diff the reviewer reads, so a dependency bump no longer costs a 15k-token review.
-- Background Claude runs no longer load web search and fetch, which unattended coding doesn't need.
-- Small tasks start cheap: with no tier given, a task that touches 1 to 3 specific files with a short ask starts on the cheap tier when the project has checks (Haiku 5.5 costs about a twentieth of Sonnet 5.5). Failures retry, then escalate. `cheapFirst: false` turns it off.
-- `ym connect` installs the zero-token hooks for Claude Code and Codex by default; `--no-hooks` skips them.
-- `ym disk --dedupe` is experimental: applying it needs `--experimental --yes`. Scanning, restoring and purging are unchanged.
-- The MCP server and the CI commands load only when used, so other commands start faster.
-- Background Claude Code agents that edit files run in Claude Code's sandbox by default: writes only inside the task's worktree and temp folders, network only to common package registries and GitHub (other hosts are refused instead of prompting), no unsandboxed escape hatch. Configure or turn off with `agents.claude.sandbox`.
-- Hub calls time out (60 s; `task.wait` gets its own wait plus 15 s), and worker bundle transfers stop after 10 minutes, so a hub that stops answering can't hang the CLI, a worker or an MCP call forever.
-- Tests: a test file left with open handles is ended instead of holding the CI job; test jobs stop after 10 minutes.
+## 0.7.0
+The audit release: safer by default, cheaper per task, and fast at any amount of history. The full list of what was found and why is in docs/ROADMAP.md.
+
+**Safety**
+- One hub per Yardmaster home. A second `ym hub run` used to run startup recovery before failing on its port, killing the first hub's agents and resetting merges in progress. A lock (pid plus process start time, replaced atomically on takeover) now refuses it, the port is bound before recovery, and a hub that finds another took over its home stops.
+- Background Claude Code agents that edit files run in Claude Code's sandbox: writes only inside the task's worktree and temp folders, network only to common package registries and GitHub (other hosts are refused, not prompted for), no unsandboxed escape hatch. `agents.<name>.sandbox` adds hosts or folders, or turns it off.
+- Agents and check commands never get the hub's token or address in their environment, and `~/.yardmaster` is private to its owner (0700).
+- A task's own checks run in addition to the project's, never instead of them, and `yardmaster.json` always gets a review when an agent changes it.
+- The RPC endpoint accepts only the API's own method names; a worker's error report is fenced to the attempt it owns.
+
+**Cost**
+- Small tasks start cheap: with no tier given, a task that touches 1 to 3 specific files with a short ask starts on the cheap tier when the project has checks (Haiku 5.5 costs about a twentieth of Sonnet 5.5). `cheapFirst: false` turns it off.
+- A task that fails the same way twice gets one try on a stronger model before it comes to you; `retry.escalate: false` is honored everywhere.
+- `ym plan` is capped (10 minutes; 40 turns and the budget where the CLI supports them), refuses when today's budget is used up, stops on Ctrl-C, and its spend counts toward the daily budget and `ym report` even when planning fails.
+- Codex spend: reasoning tokens were counted twice, and prices were from an older model. Codex now defaults to GPT-6.1 Sol prices, and its cheap tier uses GPT-6 Luna.
+- Reviews leave lockfiles out, so a dependency bump no longer costs a large review; background Claude runs no longer load web search and fetch.
+- Unknown settings are reported with the one probably meant ("budget.daily": did you mean "budget.dailyUsd"?), so a typo can't silently remove a spending cap.
+
+**Speed and reliability**
+- Scheduling and the board read only open work: with 20,000 finished tasks, picking the next task went from 253 ms to 0.5 ms and the board from 230 ms to 2.9 ms.
+- One import graph per repo in memory instead of up to 20 (about 20 MB each on a big repo); the standalone binary's hooks skip a health check round trip.
+- Fixed runs that stayed "running" forever when a fast agent exited before the runner was listening (mostly on remote workers).
+- Hub calls time out (60 s; `task.wait` gets its wait plus 15 s) and worker bundle transfers after 10 minutes.
+- Database upgrades no longer crash when several processes open it at once, and a database from a newer Yardmaster is refused.
+- `ym connect` installs the zero-token hooks for Claude Code and Codex by default (`--no-hooks` skips them); the MCP server and CI commands load only when used.
+- `ym disk --dedupe` is experimental: applying it needs `--experimental --yes`.
+
+**Releases and tests**
+- Release tags must match the version in the code and sit on main; pre-releases never become "latest"; npm publishes only after the GitHub release.
+- A test file left with open handles is ended instead of holding the CI job; test jobs stop after 10 minutes; task waits in tests report where each task stopped.
 
 ## 0.6.0
 CI guard hardening, plus cheaper and more accurate CI accounting. Upgrade the guard by pinning the new commit SHA that `ym ci init` prints.

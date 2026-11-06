@@ -24,7 +24,7 @@ Based on a six-sector audit of v0.6.0 (architecture, performance, agent cost, se
 | Edit hook, standalone binary vs npm build | 92 ms vs 52 ms |
 | Git processes per task | about 44 |
 
-## Fix now
+## Fix now (done in 0.7.0)
 
 1. **Hardening batch** (details after release): one hub per home folder, a private home folder, no hub credentials in agent environments, task checks that add to the project's checks instead of replacing them.
 2. **Database upgrades that can't crash** when several processes start at once, and a clear error for a database from a newer release.
@@ -34,6 +34,8 @@ Based on a six-sector audit of v0.6.0 (architecture, performance, agent cost, se
 6. **Small correctness fixes**: RPC timeouts, ownership checks on task updates, honest "partial work saved" messages, and caps and budget tracking for the planner.
 
 ## Faster and cheaper
+
+Done in 0.7.0: cheap-first routing, stopping the rescans of finished tasks, Codex metering and prices, binary hooks, one import graph per repo, leaving lockfiles out of reviews, lazy-loaded MCP and CI, no web tools in background runs. Still open: subscription limits, budgets for non-Claude agents, fewer git calls, worktree reuse on big repos, cache hit rate in the report.
 
 | Change | Gain | Effort |
 |---|---|---|
@@ -55,7 +57,7 @@ Based on a six-sector audit of v0.6.0 (architecture, performance, agent cost, se
 
 1. **Review and land from inside your agent**: diff, full result and land as MCP tools; a diff view and Land button in the dashboard.
 2. **Setup that doesn't break**: a stable `ym` path in agent configs, `ym doctor` checks every registration, and a guided `ym setup`.
-3. **Sandboxed background agents** by default.
+3. **Sandboxed background agents** by default (done in 0.7.0).
 4. **"Done means tested," even without tests**: `ym init` asks for a check, and untested work is marked.
 5. **A CLI that explains itself**: per-command help, unknown flags rejected, next-step hints, short task ids, `ym land --squash`.
 6. **More agents through the Agent Client Protocol**, and live runs of Cursor and Gemini before calling them supported.
