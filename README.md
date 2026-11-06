@@ -68,7 +68,7 @@ Want to see it first without spending tokens? `ym demo` starts an isolated sandb
 | `ym doctor` | Check your setup |
 | `ym presets` | `frugal`, `balanced`, `fast`, `careful` |
 
-`ym add` options: `--files a,b` (what it will change), `--after t-123`, `--agent codex`, `--tier cheap|standard|strong`, `--verify "npm test"`, `--budget 1.5`, `--best-of 2`, `--review always|never`, `--no-changes-ok` (for reviews and research).
+`ym add` options: `--files a,b` (what it will change), `--after t-123`, `--agent codex`, `--tier cheap|standard|strong`, `--verify "npm run e2e"` (extra checks, on top of the project's), `--budget 1.5`, `--best-of 2`, `--review always|never`, `--no-changes-ok` (for reviews and research).
 
 ## Making agents better
 

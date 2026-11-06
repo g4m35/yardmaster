@@ -24,7 +24,7 @@ import { runMcp } from './mcp.ts';
 import { applyConnect, connectPlan, hookPlan, installHooks, installSkill, selfCommand } from './connect.ts';
 import { HOOK_EVENTS, runHook } from './hook.ts';
 import { creatorPrompt, loadPlugins, scaffoldPlugin, testPlugin } from './plugins.ts';
-import { planGoal } from './planner.ts';
+import { PlanError, planGoal } from './planner.ts';
 import { VERSION } from './version.ts';
 import { serviceFiles, installService, uninstallService } from './service.ts';
 import { inSea } from './assets.ts';
@@ -250,10 +250,29 @@ async function cmdPlan(a: Args) {
   const root = (await mainRepoRoot(process.cwd())) ?? die('Run inside a git repository.');
   const config = loadConfig(root);
   const agent = flag(a, 'agent') ?? detectAgents(config)[0] ?? die('No coding agent installed to plan with.');
-  console.log(dim(`Asking ${getAdapter(agent, config)?.label ?? agent} to plan (read-only)...`));
-  const { tasks, costUsd } = await planGoal(goal, { cwd: root, agent, config });
-  console.log(bold(`\nPlan (${tasks.length} tasks${costUsd !== null ? `, planning cost ${formatUsd(costUsd)}` : ''}):`));
+  const client = await getClient(a);
+  const daily = config.budget.dailyUsd;
+  const spent = await client['budget.today']({});
+  if (daily !== null && spent >= daily) die(`Today's budget is used up (${formatUsd(spent)} of ${formatUsd(daily)}). Raise budget.dailyUsd or plan tomorrow.`);
+  const budgetUsd = Math.min(config.budget.perTaskUsd ?? Infinity, daily !== null ? daily - spent : Infinity);
+  console.log(dim(`Asking ${getAdapter(agent, config)?.label ?? agent} to plan (read-only${Number.isFinite(budgetUsd) ? `, budget ${formatUsd(budgetUsd)}` : ''})...`));
+  // Counted against today's budget whether or not planning succeeds. A failure to record it never costs the plan.
+  const record = async (s: { costUsd: number; tokensIn: number; tokensOut: number; model: string | null }) => {
+    if (!s.costUsd && !s.tokensIn) return;
+    const projectId = await projectIdFor(root).catch(() => null);
+    await client['spend.record']({ projectId, agent, role: 'plan', ...s }).catch((err: Error) => console.error(yellow(`! Couldn't record the planning spend (${formatUsd(s.costUsd)}): ${err.message}`)));
+  };
+  let plan: Awaited<ReturnType<typeof planGoal>>;
+  try {
+    plan = await planGoal(goal, { cwd: root, agent, config, budgetUsd: Number.isFinite(budgetUsd) ? budgetUsd : null });
+  } catch (err) {
+    if (err instanceof PlanError) await record(err.spend);
+    throw err;
+  }
+  const { tasks, costUsd } = plan;
+  console.log(bold(`\nPlan (${tasks.length} tasks, planning cost ${formatUsd(costUsd)}):`));
   for (const t of tasks) console.log(`  ${cyan(t.key ?? '-')} ${t.title} ${dim(`[${t.tier ?? 'auto'}${t.files?.length ? `; ${t.files.join(', ')}` : ''}${t.after?.length ? `; after ${t.after.join(', ')}` : ''}]`)}`);
+  await record(plan);
   let go = Boolean(a.flags.yes);
   if (!go && process.stdin.isTTY) {
     const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -261,9 +280,9 @@ async function cmdPlan(a: Args) {
     rl.close();
   }
   if (!go) return console.log(dim('Nothing queued. Re-run with --yes to queue.'));
-  const client = await getClient(a, { needHub: true });
-  const project = await currentProject(client, root);
-  const res = await client['task.add']({ projectId: project.id, tasks, createdBy: `plan:${agent}` });
+  const hubClient = await getClient(a, { needHub: true });
+  const target = await currentProject(hubClient, root);
+  const res = await hubClient['task.add']({ projectId: target.id, tasks, createdBy: `plan:${agent}` });
   console.log(green(`✔ Queued ${res.created.length} task(s).`) + (res.duplicates.length ? yellow(` Skipped ${res.duplicates.length} duplicate(s).`) : ''));
 }
 
@@ -462,7 +481,7 @@ async function cmdReport(a: Args) {
   const secs = (n: number | null | undefined) => (n === null || n === undefined ? 'n/a' : n < 90 ? `${Math.round(n)}s` : `${(n / 60).toFixed(1)} min`);
   console.log(bold(`Last ${days} day${days === 1 ? '' : 's'}${projectId ? '' : ', all projects'}`));
   console.log(`  Tasks: ${green(`${r.tasks.done} merged`)}, ${r.tasks.open} open, ${r.tasks.needsYou ? yellow(`${r.tasks.needsYou} need you`) : '0 need you'}, ${r.tasks.failed} failed, ${r.tasks.canceled} canceled`);
-  console.log(`  Spend: ${bold(usd(r.spend.total))}${r.spend.estimated ? dim(' (partly estimated)') : ''}  (agents ${usd(r.spend.implement)}, reviews ${usd(r.spend.review)})`);
+  console.log(`  Spend: ${bold(usd(r.spend.total))}${r.spend.estimated ? dim(' (partly estimated)') : ''}  (agents ${usd(r.spend.implement)}, reviews ${usd(r.spend.review)}${r.spend.plan ? `, planning ${usd(r.spend.plan)}` : ''})`);
   console.log(`  Per merged task: ${bold(usd(r.perMergedTask))}   Wasted on work that never merged: ${r.wasted > 0 ? yellow(usd(r.wasted)) : usd(0)}`);
   if (r.retries.runs) {
     const saved = r.retries.avgFresh && r.retries.avgResumed !== null ? dim(` (a resumed retry cost ${usd(r.retries.avgResumed)} on average vs ${usd(r.retries.avgFresh)} fresh)`) : '';

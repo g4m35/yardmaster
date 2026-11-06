@@ -78,8 +78,9 @@ export function worktreePathFor(config: Config, project: Project, taskId: string
   return join(worktreeRootOf(config), `${project.name}-${project.id.slice(2, 8)}`, taskId);
 }
 
-function verifyCommands(task: Task, config: Config): string[] {
-  return task.verify ?? config.verify;
+/** A task's own checks run in addition to the project's: work never merges on a lower bar than the project sets. */
+export function verifyCommands(task: Pick<Task, 'verify'>, config: Pick<Config, 'verify'>): string[] {
+  return [...config.verify, ...(task.verify ?? []).filter((c) => !config.verify.includes(c))];
 }
 
 function shellQuote(s: string): string {
@@ -89,9 +90,10 @@ function shellQuote(s: string): string {
 /** The checks a task runs on itself: quick, change-scoped ones when configured, otherwise the full list. */
 export function taskChecks(task: Task, config: Config, files: string[]): string[] {
   // Quick checks are only safe when the full suite runs later, at merge time.
-  if (task.verify || !config.verifyQuick.length || config.integration.mode === 'none') return verifyCommands(task, config);
+  if (!config.verifyQuick.length || config.integration.mode === 'none') return verifyCommands(task, config);
   const list = files.map(shellQuote).join(' ');
-  return config.verifyQuick.filter((c) => !c.includes('{files}') || files.length).map((c) => c.replaceAll('{files}', list));
+  const quick = config.verifyQuick.filter((c) => !c.includes('{files}') || files.length).map((c) => c.replaceAll('{files}', list));
+  return [...quick, ...(task.verify ?? []).filter((c) => !quick.includes(c))];
 }
 
 /**
@@ -104,7 +106,7 @@ export function taskChecks(task: Task, config: Config, files: string[]): string[
  * and floods its context with test output, and Yardmaster runs the checks again anyway.
  */
 function doneMeans(task: Task, config: Config): string {
-  const quick = !task.verify && config.verifyQuick.length && config.integration.mode !== 'none';
+  const quick = config.verifyQuick.length && config.integration.mode !== 'none';
   if (quick) {
     const cmds = config.verifyQuick.map((c) => `\`${c.replaceAll('{files}', '<the files you changed>')}\``).join(', ');
     return `## Done means\nThese pass for your changes: ${cmds}. The full suite runs once at merge time, so you don't need to run all of it.`;
@@ -472,16 +474,16 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
       case 'lost':
         return { status: 'superseded', message: stopped.message };
       case 'preempted':
-        await commitAll(wt, `yardmaster: partial work on ${task.title} (${task.id})`).catch(() => false);
+        await savePartialWork(ctx, wt);
         await update(ctx, { status: 'queued', pending_rebase: true, attempts: Math.max(0, task.attempts - 1), assignee: null, machine_id: null, lease_until: null, retry_note: 'You were paused because another task was editing the same files. Its work is now merged into your branch.' });
         await event(ctx, 'warn', 'task.preempted', stopped.message);
         return { status: 'queued', message: stopped.message };
       case 'redirected':
-        await commitAll(wt, `yardmaster: partial work on ${task.title} (${task.id})`).catch(() => false);
+        await savePartialWork(ctx, wt);
         await update(ctx, { status: 'queued', control: null, attempts: Math.max(0, task.attempts - 1), assignee: null, machine_id: null, lease_until: null, not_before: null });
         return { status: 'queued', message: stopped.message };
       case 'shutdown':
-        await commitAll(wt, `yardmaster: partial work on ${task.title} (${task.id})`).catch(() => false);
+        await savePartialWork(ctx, wt);
         await update(ctx, { status: 'queued', attempts: Math.max(0, task.attempts - 1), assignee: null, machine_id: null, lease_until: null, retry_note: 'Your previous run was interrupted because Yardmaster restarted. Continue from the current state of the worktree.' });
         return { status: 'queued', message: stopped.message };
       case 'loop':
@@ -661,6 +663,16 @@ async function finishNeedsHuman(ctx: RunContext, message: string, runId?: string
   return { status: 'needs_human', message };
 }
 
+/** Commits what an interrupted agent left, so the next attempt starts from it. If that fails, say so plainly. */
+async function savePartialWork(ctx: RunContext, wt: string): Promise<void> {
+  const { task } = ctx;
+  try {
+    await commitAll(wt, `yardmaster: partial work on ${task.title} (${task.id})`);
+  } catch (err) {
+    await event(ctx, 'warn', 'task.partial_uncommitted', `Couldn't commit the interrupted work on "${task.title}" (${clip((err as Error).message, 200)}). It stays uncommitted in ${wt}, and the next attempt starts from there.`);
+  }
+}
+
 /**
  * Retry policy. Identical failures stop early (no burning budget on the same error), otherwise retry
  * with the failure as context and, if enabled, a stronger model.
@@ -670,6 +682,14 @@ async function retryOrStop(ctx: RunContext, totals: TaskPatch, message: string, 
   const same = task.error_fp === fingerprint ? task.same_error_count + 1 : 1;
   const base: TaskPatch = { last_error: clip(message, 3000), error_fp: fingerprint, same_error_count: same, lease_until: null };
   if (same >= config.retry.sameFailureLimit) {
+    // The same model failing the same way again rarely changes; a stronger one often does. Once per tier, with a
+    // fresh session (the old one is anchored on its failed approach), then stop.
+    const stronger = config.retry.escalate ? escalate(task.tier) : task.tier;
+    if (stronger !== task.tier && task.attempts < task.max_attempts) {
+      await update(ctx, { ...base, agent_session: null, status: 'queued', tier: stronger, not_before: null, assignee: null, machine_id: null, retry_note: clip(message, 2500) });
+      await event(ctx, 'warn', 'task.retry', `"${task.title}" failed the same way ${same} times; trying once more with a stronger model (${stronger}). ${clip(message, 200)}`);
+      return { status: 'queued', message };
+    }
     return finishNeedsHuman(ctx, `It failed the same way ${same} times, so it was stopped to save budget. ${message}`, undefined, base);
   }
   if (task.attempts >= task.max_attempts) {
@@ -679,7 +699,7 @@ async function retryOrStop(ctx: RunContext, totals: TaskPatch, message: string, 
   }
   // A stronger (pricier) model only after a second failure, or when the agent got stuck: a first failure is usually
   // fixed by the same model once it sees the error, and resuming its session makes that retry cheap.
-  const tier = opts.escalateNow || (config.retry.escalate && task.attempts >= 2) ? escalate(task.tier) : task.tier;
+  const tier = config.retry.escalate && (opts.escalateNow || task.attempts >= 2) ? escalate(task.tier) : task.tier;
   // Waiting only helps with flaky infrastructure; a failed check or a missing change won't fix itself by waiting.
   const wait = opts.backoff === false ? 0 : config.retry.backoffSeconds * 1000 * task.attempts;
   // A stuck agent starts over with a fresh session; anything else continues where it left off.

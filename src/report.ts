@@ -8,7 +8,7 @@ import type { Db } from './db.ts';
 export interface Report {
   days: number;
   tasks: { done: number; failed: number; needsYou: number; canceled: number; open: number };
-  spend: { total: number; implement: number; review: number; estimated: boolean };
+  spend: { total: number; implement: number; review: number; plan: number; estimated: boolean };
   /** Total spend of merged tasks (all their attempts and reviews) divided by how many merged. */
   perMergedTask: number | null;
   /** Spend that produced nothing merged: tasks that failed or were canceled, plus failed attempts of merged ones. */
@@ -62,6 +62,10 @@ export function buildReport(db: Db, opts: { projectId?: string | null; days: num
     .all(...args) as unknown as RunRow[];
   const tasks = db.prepare(`SELECT t.id, t.status, t.created_at, t.started_at, t.ready_at, t.finished_at FROM tasks t WHERE (t.created_at >= ? OR t.updated_at >= ?)${scope}`).all(since, ...args) as unknown as TaskRow[];
   const status = new Map(tasks.map((t) => [t.id, t.status]));
+  // Planning isn't a task, so it isn't in the join above; it still counts toward what was spent.
+  const planScope = opts.projectId ? ' AND task_id = ?' : '';
+  const planArgs = opts.projectId ? [since, `plan:${opts.projectId}`] : [since];
+  const plan = (db.prepare(`SELECT COALESCE(SUM(cost_usd), 0) AS s FROM runs WHERE role = 'plan' AND started_at >= ?${planScope}`).get(...planArgs) as { s: number }).s;
 
   const count = (s: string) => tasks.filter((t) => t.status === s).length;
   const sum = (rs: RunRow[]) => rs.reduce((n, r) => n + r.cost_usd, 0);
@@ -100,7 +104,7 @@ export function buildReport(db: Db, opts: { projectId?: string | null; days: num
   return {
     days: opts.days,
     tasks: { done: done.size, failed: count('failed'), needsYou: count('needs_human'), canceled: count('canceled'), open: tasks.filter((t) => ['queued', 'running', 'verifying', 'ready', 'merging'].includes(t.status)).length },
-    spend: { total: sum(runs), implement: sum(impl), review: sum(runs.filter((r) => r.role === 'review')), estimated: runs.some((r) => r.cost_estimated) },
+    spend: { total: sum(runs) + plan, implement: sum(impl), review: sum(runs.filter((r) => r.role === 'review')), plan, estimated: runs.some((r) => r.cost_estimated) },
     perMergedTask: done.size ? doneSpend / done.size : null,
     wasted,
     retries: { runs: retries.length, resumed: resumed.length, avgFresh: avg(fresh), avgResumed: avg(resumed) },

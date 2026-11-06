@@ -159,7 +159,7 @@ export const NewTaskSchema = z.object({
   after: z.array(z.string()).optional().describe('Task ids (or batch keys) that must be done first.'),
   agent: z.string().optional().describe('Force a specific agent (claude, codex, opencode, cursor, gemini, or a plugin).'),
   tier: TierSchema.optional().describe('cheap | standard | strong. Picks model size; omitted = inferred.'),
-  verify: z.array(z.string()).optional().describe('Shell commands that must pass, e.g. ["npm test"]. Defaults to project config.'),
+  verify: z.array(z.string()).optional().describe('Extra shell commands that must pass, e.g. ["npm run e2e"]. They run in addition to the project checks, never instead of them.'),
   priority: z.number().int().min(-10).max(10).optional(),
   budgetUsd: z.number().positive().optional(),
   allowNoChanges: z.boolean().optional().describe('True for research/review tasks that may not edit files.'),
