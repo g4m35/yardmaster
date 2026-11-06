@@ -8,6 +8,12 @@ export const TIERS = ['cheap', 'standard', 'strong'] as const;
 export type Tier = (typeof TIERS)[number];
 export const TierSchema = z.enum(TIERS);
 
+/** Package registries and source hosts installs and builds commonly need. */
+export const SANDBOX_DOMAINS = [
+  'registry.npmjs.org', '*.npmjs.org', 'registry.yarnpkg.com', 'pypi.org', 'files.pythonhosted.org', 'crates.io', '*.crates.io',
+  'proxy.golang.org', 'sum.golang.org', 'rubygems.org', 'repo.maven.apache.org', 'github.com', '*.githubusercontent.com', 'codeload.github.com',
+] as const;
+
 const AgentSettingsSchema = z.object({
   enabled: z.boolean().default(true),
   command: z.string().optional(),
@@ -31,6 +37,21 @@ const AgentSettingsSchema = z.object({
   effort: z.partialRecord(TierSchema, z.string()).default({}),
   /** On retry, continue the previous session instead of starting over (it keeps what the agent already read). */
   resume: z.boolean().default(true),
+  /**
+   * Claude Code's sandbox for background runs that edit files: shell commands can write only inside the task's
+   * worktree and temp folders (never your checkout, the repo's .git folder or Yardmaster's own files), and reach only
+   * the listed hosts. Unattended runs can't answer a prompt, so any other host is refused, not asked about. Where the
+   * sandbox can't start (Linux without bubblewrap), commands run as before. Codex has its own (workspace-write).
+   */
+  sandbox: z
+    .object({
+      enabled: z.boolean().default(true),
+      /** Hosts shell commands may reach; the defaults cover the common package registries and GitHub. */
+      allowedDomains: z.array(z.string()).default([...SANDBOX_DOMAINS]),
+      /** Extra folders shell commands may write to (for tools that keep caches outside the project). */
+      allowWrite: z.array(z.string()).default([]),
+    })
+    .prefault({}),
 });
 export type AgentSettings = z.infer<typeof AgentSettingsSchema>;
 
@@ -268,19 +289,20 @@ export const PRESETS: Record<Config['preset'], ConfigInput> = {
   },
 };
 
+const DEFAULT_SANDBOX = (): AgentSettings['sandbox'] => ({ enabled: true, allowedDomains: [...SANDBOX_DOMAINS], allowWrite: [] });
 const AGENT_BASE = { enabled: true, extraArgs: [], autonomy: 'workspace', context: 'lean', effort: {}, resume: true } as const;
 
 export function defaultAgentSettings(over: Partial<AgentSettings> = {}): AgentSettings {
-  return { ...AGENT_BASE, models: {}, maxParallel: 2, extraArgs: [], effort: {}, ...over };
+  return { ...AGENT_BASE, models: {}, maxParallel: 2, extraArgs: [], effort: {}, sandbox: DEFAULT_SANDBOX(), ...over };
 }
 
 export const DEFAULT_AGENTS: Record<string, AgentSettings> = {
-  claude: { ...AGENT_BASE, models: { cheap: 'haiku', standard: 'sonnet', strong: 'opus' }, maxParallel: 3, extraArgs: [], effort: {} },
-  codex: { ...AGENT_BASE, models: {}, maxParallel: 3, extraArgs: [], effort: {} },
-  opencode: { ...AGENT_BASE, models: {}, maxParallel: 2, extraArgs: [], effort: {} },
-  cursor: { ...AGENT_BASE, models: {}, maxParallel: 2, extraArgs: [], effort: {} },
-  gemini: { ...AGENT_BASE, models: {}, maxParallel: 2, extraArgs: [], effort: {} },
-  mock: { ...AGENT_BASE, models: {}, maxParallel: 8, extraArgs: [], effort: {} },
+  claude: { ...AGENT_BASE, models: { cheap: 'haiku', standard: 'sonnet', strong: 'opus' }, maxParallel: 3, extraArgs: [], effort: {}, sandbox: DEFAULT_SANDBOX() },
+  codex: { ...AGENT_BASE, models: {}, maxParallel: 3, extraArgs: [], effort: {}, sandbox: DEFAULT_SANDBOX() },
+  opencode: { ...AGENT_BASE, models: {}, maxParallel: 2, extraArgs: [], effort: {}, sandbox: DEFAULT_SANDBOX() },
+  cursor: { ...AGENT_BASE, models: {}, maxParallel: 2, extraArgs: [], effort: {}, sandbox: DEFAULT_SANDBOX() },
+  gemini: { ...AGENT_BASE, models: {}, maxParallel: 2, extraArgs: [], effort: {}, sandbox: DEFAULT_SANDBOX() },
+  mock: { ...AGENT_BASE, models: {}, maxParallel: 8, extraArgs: [], effort: {}, sandbox: DEFAULT_SANDBOX() },
 };
 
 export const DEFAULT_ROUTING: Record<Tier, string[]> = {
@@ -436,7 +458,7 @@ export function loadConfig(projectRoot?: string, overrides: unknown = {}): Confi
 }
 
 export function agentSettings(config: Config, agent: string): AgentSettings {
-  const base: AgentSettings = DEFAULT_AGENTS[agent] ?? { ...AGENT_BASE, models: {}, maxParallel: 2, extraArgs: [], effort: {} };
+  const base: AgentSettings = DEFAULT_AGENTS[agent] ?? { ...AGENT_BASE, models: {}, maxParallel: 2, extraArgs: [], effort: {}, sandbox: DEFAULT_SANDBOX() };
   const over = config.agents[agent] ?? {};
   return { ...base, ...over, models: { ...base.models, ...(over.models ?? {}) }, effort: { ...base.effort, ...(over.effort ?? {}) } };
 }
