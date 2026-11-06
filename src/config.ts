@@ -303,7 +303,7 @@ export function defaultAgentSettings(over: Partial<AgentSettings> = {}): AgentSe
 
 export const DEFAULT_AGENTS: Record<string, AgentSettings> = {
   claude: { ...AGENT_BASE, models: { cheap: 'haiku', standard: 'sonnet', strong: 'opus' }, maxParallel: 3, extraArgs: [], effort: {}, sandbox: DEFAULT_SANDBOX() },
-  codex: { ...AGENT_BASE, models: {}, maxParallel: 3, extraArgs: [], effort: {}, sandbox: DEFAULT_SANDBOX() },
+  codex: { ...AGENT_BASE, models: { cheap: 'gpt-6-luna' }, maxParallel: 3, extraArgs: [], effort: {}, sandbox: DEFAULT_SANDBOX() },
   opencode: { ...AGENT_BASE, models: {}, maxParallel: 2, extraArgs: [], effort: {}, sandbox: DEFAULT_SANDBOX() },
   cursor: { ...AGENT_BASE, models: {}, maxParallel: 2, extraArgs: [], effort: {}, sandbox: DEFAULT_SANDBOX() },
   gemini: { ...AGENT_BASE, models: {}, maxParallel: 2, extraArgs: [], effort: {}, sandbox: DEFAULT_SANDBOX() },
@@ -318,7 +318,9 @@ export const DEFAULT_ROUTING: Record<Tier, string[]> = {
 
 /** Rough list prices (USD per million tokens) for estimating spend when an agent CLI reports tokens but not dollars. */
 export const DEFAULT_PRICING: Record<string, z.infer<typeof PriceSchema>> = {
-  codex: { inPerM: 1.25, cachedInPerM: 0.125, outPerM: 10 },
+  // Codex's default model for ChatGPT sign-in is GPT-6.1 Sol; its small model is GPT-6 Luna (checked 2026-11).
+  codex: { inPerM: 2, cachedInPerM: 0.1, outPerM: 10 },
+  'codex:gpt-6-luna': { inPerM: 0.1, cachedInPerM: 0.01, outPerM: 0.5 },
   cursor: { inPerM: 1.25, cachedInPerM: 0.125, outPerM: 10 },
   gemini: { inPerM: 1.25, cachedInPerM: 0.31, outPerM: 10 },
   default: { inPerM: 3, cachedInPerM: 0.3, outPerM: 15 },
@@ -474,7 +476,8 @@ export function routingFor(config: Config, tier: Tier): string[] {
 
 export function priceFor(config: Config, agent: string, model?: string | null) {
   return (
-    (model ? config.pricing[`${agent}:${model}`] : undefined) ??
+    // Most specific first: your price for this model, the built-in one, then per agent, then the fallback.
+    (model ? config.pricing[`${agent}:${model}`] ?? DEFAULT_PRICING[`${agent}:${model}`] : undefined) ??
     config.pricing[agent] ??
     DEFAULT_PRICING[agent] ??
     config.pricing.default ??

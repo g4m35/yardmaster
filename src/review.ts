@@ -1,3 +1,4 @@
+import { LOCKFILES } from './warmstart.ts';
 import * as z from 'zod/v4';
 import { AGENT_FAMILY, agentSettings, type Config } from './config.ts';
 import { chooseReviewer } from './router.ts';
@@ -48,8 +49,11 @@ export function shouldReview(task: Task, config: Config, files: string[], change
   }
 }
 
+/** Everything except lockfiles: a dependency bump rewrites thousands of their lines and says nothing worth reviewing. */
+export const REVIEWED_PATHS = ['--', '.', ...LOCKFILES.map((f) => `:(exclude,glob)**/${f}`)];
+
 export async function changedLineCount(cwd: string, base: string): Promise<number> {
-  const r = await git(cwd, ['diff', '--numstat', `${base}...HEAD`], { allowFail: true });
+  const r = await git(cwd, ['diff', '--numstat', `${base}...HEAD`, ...REVIEWED_PATHS], { allowFail: true });
   return r.stdout.split('\n').reduce((n, line) => {
     const [a, d] = line.split('\t');
     return n + (Number(a) || 0) + (Number(d) || 0);
@@ -81,7 +85,7 @@ export async function runReview(opts: { task: Task; config: Config; implementer:
   const reviewer = chooseReviewer(opts.config, opts.implementer, opts.installed, AGENT_FAMILY);
   if (!reviewer) return { skipped: 'no reviewer agent is installed on this machine' };
   const stat = (await git(opts.cwd, ['diff', '--stat', `${opts.base}...HEAD`], { allowFail: true })).stdout;
-  const patch = (await git(opts.cwd, ['diff', `${opts.base}...HEAD`], { allowFail: true })).stdout;
+  const patch = (await git(opts.cwd, ['diff', `${opts.base}...HEAD`, ...REVIEWED_PATHS], { allowFail: true })).stdout;
   const diff = `${stat}\n${patch.length > 60_000 ? patch.slice(0, 60_000) + '\n[diff truncated]' : patch}`;
   const settings = agentSettings(opts.config, reviewer);
   const r = await runOneShot({
