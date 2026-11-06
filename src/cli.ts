@@ -674,6 +674,9 @@ async function cmdMcp(a: Args) {
   let client: Client;
   if (remote) client = remoteClient(remote, flag(a, 'token') ?? process.env.YARDMASTER_TOKEN ?? hubToken());
   else {
+    // Inside a background task the hub is whoever launched it; never start a stray one (on a remote worker there is
+    // no local hub, and the agent's tools then just say so).
+    if (process.env.YARDMASTER_TASK_ID && !(await runningHubUrl())) die('No Yardmaster hub on this machine for this background task.');
     const url = (await runningHubUrl()) ?? (await startHubInBackground());
     client = remoteClient(url, hubToken());
   }

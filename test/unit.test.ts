@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync as writeFile } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync as writeFile } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { inferScope, matches, patternsOverlap, scopesOverlap } from '../src/scope.ts';
 import { findCycle } from '../src/graph.ts';
@@ -11,12 +12,15 @@ import { resolveConfig, unknownSettings } from '../src/config.ts';
 import { spawn } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { openDb, SCHEMA_VERSION } from '../src/db.ts';
-import { tmpdir } from 'node:os';
 import { claude, codex, opencode } from '../src/adapters/builtin.ts';
 import { taskChecks, verifyCommands } from '../src/runner.ts';
 import { planGoal } from '../src/planner.ts';
 import { createServer } from 'node:http';
 import { remoteClient, RPC_TIMEOUT_MS, rpcDeadline } from '../src/rpc.ts';
+import { acquireHubLock, HubAlreadyRunning } from '../src/hublock.ts';
+import { cleanEnv } from '../src/proc.ts';
+import { dispatch } from '../src/api.ts';
+import { yardHome } from '../src/paths.ts';
 
 const wd = { repeatThreshold: 4, oscillationCycles: 3, sameToolErrorLimit: 3, stallMinutes: 1, awaitingInputMinutes: 0.5, maxRuntimeMinutes: 10 };
 
@@ -196,6 +200,45 @@ test('hub calls give up when the hub stops answering; task.wait gets its own wai
   }
 });
 
+test('the hub lock lets one hub run per home, survives races, and takes over a dead or reused owner', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ym-lock-'));
+  try {
+    const file = join(dir, 'hub.lock');
+    const release = await acquireHubLock(file);
+    await assert.rejects(acquireHubLock(file), HubAlreadyRunning);
+    release();
+    (await acquireHubLock(file))();
+
+    // Two hubs starting at the same moment: exactly one wins.
+    const both = await Promise.allSettled([acquireHubLock(file), acquireHubLock(file)]);
+    assert.equal(both.filter((r) => r.status === 'fulfilled').length, 1);
+    for (const r of both) if (r.status === 'fulfilled') r.value();
+
+    // Three hubs at once over a stale lock: still exactly one winner, never two.
+    writeFile(file, '999999999 1\n');
+    const three = await Promise.allSettled([acquireHubLock(file), acquireHubLock(file), acquireHubLock(file)]);
+    assert.equal(three.filter((r) => r.status === 'fulfilled').length, 1);
+    for (const r of three) if (r.status === 'fulfilled') r.value();
+
+    // The owner exited.
+    writeFile(file, '999999999 1\n');
+    const dead = await acquireHubLock(file);
+    assert.equal(readFileSync(file, 'utf8').split(' ')[0], String(process.pid));
+    dead();
+
+    // The pid is alive but belongs to a process that started later than the lock says (a reused pid).
+    writeFile(file, `${process.ppid} 1\n`);
+    (await acquireHubLock(file))();
+
+    // A half-written lock from someone starting right now is respected.
+    writeFile(file, '');
+    await assert.rejects(acquireHubLock(file), HubAlreadyRunning);
+    rmSync(file);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a task's own checks run in addition to the project's, never instead of them", () => {
   assert.deepEqual(verifyCommands({ verify: null }, { verify: ['npm test'] }), ['npm test']);
   assert.deepEqual(verifyCommands({ verify: ['true'] }, { verify: ['npm test'] }), ['npm test', 'true']);
@@ -279,6 +322,27 @@ test('many processes opening a new database at once all succeed; a newer schema 
     raw.close();
     assert.throws(() => openDb(file), /newer Yardmaster/);
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('agents never get the hub token; method names come only from the API; the home folder is private', async () => {
+  process.env.YARDMASTER_TOKEN = 'secret-value';
+  try {
+    assert.equal(cleanEnv().YARDMASTER_TOKEN, undefined);
+  } finally {
+    delete process.env.YARDMASTER_TOKEN;
+  }
+  await assert.rejects(dispatch({} as never, 'constructor', {}), /Unknown method constructor/);
+  await assert.rejects(dispatch({} as never, 'toString', {}), /Unknown method/);
+  const before = process.env.YARDMASTER_HOME;
+  const dir = mkdtempSync(join(tmpdir(), 'ym-home-'));
+  process.env.YARDMASTER_HOME = join(dir, 'h');
+  try {
+    assert.equal(statSync(yardHome()).mode & 0o777, 0o700);
+  } finally {
+    if (before === undefined) delete process.env.YARDMASTER_HOME;
+    else process.env.YARDMASTER_HOME = before;
     rmSync(dir, { recursive: true, force: true });
   }
 });
