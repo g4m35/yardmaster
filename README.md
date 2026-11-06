@@ -182,6 +182,8 @@ Background agents run lean by default: your CLAUDE.md, AGENTS.md, hooks and perm
 
 Costs are what the agent reports (Claude Code, OpenCode). For agents that only report tokens (Codex, Gemini) they are estimates from list prices, shown as "est.". Override them in `pricing`.
 
+An optional, separately installed **JEV effort router** can lower reasoning effort for first-attempt Claude Code/Codex tasks after Yardmaster selects the agent and model. It is off by default, starts in shadow mode when enabled, preserves manual settings and retries, and falls back to normal effort on failure. Configuration is local to each worker; no router keys or private source are bundled. See [setup and limits](docs/JEV.md), including separate classification costs.
+
 ## Plugins
 
 Everything an agent needs is a small plugin, the same shape as the built-ins. Let your agent write one:
@@ -212,7 +214,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). For the research behind it (Ga
 
 ## Status
 
-Early (0.7). Tested end to end with the mock agent (107 tests, including the CI gate, guard, budget and audit against a mock GitHub API and real git pushes, and policies, cross-model review rounds, lessons and their credit, critical-path ordering, races, merge trains, import-graph coupling, hooks, the minimal MCP profile, and parallel scheduling, scopes, dependencies, loops, budgets, retries, conflicts, edit-time overlap, approval, cleanup safety, a two-machine run, the MCP server, pause/redirect, supervisor warnings, disk holds and artifact trimming, and regression tests for cancel-during-verify, stale attempts, detached HEADs and hand edits in the integration worktree). Smoke-tested with real Claude Code and Codex. The Cursor and Gemini adapters follow their documented stream formats but haven't been run against live sessions yet.
+Early (0.8). Tested end to end with deterministic agents and real repositories, including the CI gate, guard, budget and audit against a mock GitHub API and real git pushes, policies, cross-model review rounds, lessons, critical-path ordering, races, merge trains, import-graph coupling, hooks, the minimal MCP profile, parallel scheduling, scopes, dependencies, loops, budgets, retries, conflicts, edit-time overlap, approval, cleanup safety, two-machine execution, the MCP server, pause/redirect, supervisor warnings, disk holds and artifact trimming. JEV tests cover routing, fallback, manual effort, retry escalation, shutdown/cancellation and worker-local configuration with fake subprocesses. Earlier releases were smoke-tested with real Claude Code and Codex; this JEV integration has no measured task-level savings claim. The Cursor and Gemini adapters follow their documented stream formats but haven't been run against live sessions yet.
 
 ## License
 

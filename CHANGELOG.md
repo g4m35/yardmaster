@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.0
+- Optional JEV reasoning-effort integration for first-attempt Claude Code and Codex tasks. Uses a separately installed provider-neutral JSON CLI; no new dependency, credentials, or private router source. Disabled by default, shadow by default when enabled, with exact model/effort bindings and cache-policy gates.
+- Preserves explicit effort settings, retry escalation, resumed sessions, agent/model selection, coding prompts, permissions and verification. Bound Claude launches suppress duplicate native JEV routing, including on recovery and fallback.
+- Bounded router subprocess with strict response validation, output limits, timeout/cancellation cleanup and unchanged-effort fallback. Each worker uses its own local command/configuration and repository path. Routing latency/status appear in task logs and the run's phase timings; classification dollar usage is not reported by the external contract and remains outside Yardmaster budgets.
+- Fixed shutdown/cancellation gaps during worktree preparation, remote base fetching, prelaunch bookkeeping and coding-process startup. Canceled/superseded tasks cannot start after a routing wait, and pending shutdown reaches an agent spawned during startup bookkeeping.
+- Regression coverage uses fake router/agent subprocesses, real repositories and the remote-worker path; no live inference is required. Setup and limitations: [docs/JEV.md](docs/JEV.md).
+
 ## 0.7.0
 The audit release: safer by default, cheaper per task, and fast at any amount of history. The full list of what was found and why is in docs/ROADMAP.md.
 
