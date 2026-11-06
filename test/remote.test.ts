@@ -2,6 +2,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { Client as McpClient } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { sandbox, sh, until } from './helpers.ts';
@@ -59,7 +60,11 @@ test('a second machine runs the work and ships it back as a git bundle', async (
     const done = await until(() => created.map((t) => hub!.coord.getTask(t.id)!), (ts) => ts.every((t) => ['done', 'needs_human', 'failed'].includes(t.status)), 90_000, 'remote tasks').catch((err: Error) => {
       // A rare stall on busy CI machines: show what each task last did, so the next failure is diagnosable.
       const trail = created.map((t) => hub!.coord.eventsSince(0, null, 50, t.id).map((e) => `${t.id} ${e.kind}: ${e.message}`).join('\n')).join('\n');
-      throw new Error(`${err.message.slice(0, 300)}\nEvents:\n${trail}\nWorker: ${JSON.stringify([...worker.active.keys()])}`);
+      const runs = created.map((t) => JSON.stringify(hub!.coord.latestRun(t.id) ?? null)).join('\n');
+      // Every process this test still has running, with its command line: shows what is stuck (agent, git, ...).
+      const tree = spawnSync('ps', ['-A', '-o', 'pid=,ppid=,etime=,command='], { encoding: 'utf8' }).stdout
+        .split('\n').filter((l) => l.trim() && (l.includes(box.root) || l.includes(`${process.pid} `))).join('\n');
+      throw new Error(`${err.message.slice(0, 300)}\nEvents:\n${trail}\nRuns:\n${runs}\nWorker: ${JSON.stringify([...worker.active.keys()])}\nProcesses:\n${tree}`);
     });
     assert.deepEqual(done.map((t) => t.status), ['done', 'done'], JSON.stringify(done.map((t) => t.attention)));
     for (const t of done) assert.equal(hub.coord.latestRun(t.id)!.machine_id, 'm-laptop');
