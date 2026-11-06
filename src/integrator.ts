@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path';
 import type { Coordinator } from './coordinator.ts';
 import { addWorktree, branchExists, conflictedFiles, git, isAncestor, isClean, isLinkedWorktreeOf, removeWorktree, revParse } from './git.ts';
 import { rememberChecked } from './ci/verified.ts';
-import { runVerify, Semaphore } from './runner.ts';
+import { runVerify, Semaphore, verifyCommands } from './runner.ts';
 import { runShell } from './proc.ts';
 import { lockHash, refreshDeps, siblingWorktrees } from './warmstart.ts';
 import { clip, errorFingerprint, tail } from './text.ts';
@@ -231,8 +231,8 @@ export class Integrator {
       return this.onConflict(project, task, config, files);
     }
     // Quick per-task checks mean the full suite hasn't run on this change yet, so run it now.
-    const baseMoved = !task.base_sha || task.base_sha !== before || (!task.verify && config.verifyQuick.length > 0);
-    const commands = task.verify ?? config.verify;
+    const baseMoved = !task.base_sha || task.base_sha !== before || config.verifyQuick.length > 0;
+    const commands = verifyCommands(task, config);
     if (baseMoved && commands.length) {
       this.coord.event(project.id, task.id, 'info', 'integration.reverify', `Re-checking "${task.title}" combined with work merged since it started`);
       await this.prepareDeps(project, path, config, task.worktree ? [task.worktree] : []);

@@ -1,4 +1,4 @@
-import { test, after } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -75,26 +75,32 @@ test('parallel work, file-scope waits, dependencies, and safe integration', asyn
   for (const id of [a, b, c, d]) assert.equal(s.get(id).worktree, null, 'merged worktrees are cleaned up');
 });
 
-test('a looping agent is stopped, escalated once, then handed to a human', async () => {
+test('a looping agent is stopped, escalated, given one try on the strongest model, then handed to a human', async () => {
   const s = await startHub({ watchdog: { repeatThreshold: 4 } });
   const [t] = s.add([{ title: 'Investigate config loading', prompt: '@mock loop', agent: 'mock', tier: 'cheap' }]).created;
   const [final] = await s.settle([t!.id]);
   assert.equal(final!.status, 'needs_human');
-  assert.equal(final!.attempts, 2, 'stopped after the same failure twice, not after max attempts');
-  assert.equal(final!.tier, 'standard', 'escalated to a stronger model for the second attempt');
-  assert.match(final!.attention!, /same way 2 times/);
+  assert.equal(final!.attempts, 3, 'one try per tier, then stopped');
+  assert.equal(final!.tier, 'strong', 'a repeated failure gets the strongest model before a human is asked');
+  assert.match(final!.attention!, /same way 3 times/);
   for (const r of s.hub.coord.runsFor(t!.id)) {
     assert.equal(r.stop_reason, 'loop');
     assert.ok(!isAlive(r.pid), 'agent process was killed');
   }
 });
 
-test('the same verification failure stops early instead of burning all attempts', async () => {
+test('the same verification failure gets one stronger try, then stops instead of burning all attempts', async () => {
   const s = await startHub({ retry: { maxAttempts: 5, backoffSeconds: 0 } });
   const [t] = s.add([{ title: 'Add feature flag', prompt: '@mock write flags.js BROKEN', agent: 'mock' }]).created;
   const [final] = await s.settle([t!.id]);
   assert.equal(final!.status, 'needs_human');
-  assert.equal(final!.attempts, 2);
+  assert.equal(final!.attempts, 3, 'standard twice, then strong once');
+  assert.equal(final!.tier, 'strong');
+  const noEscalation = await startHub({ retry: { maxAttempts: 5, backoffSeconds: 0, escalate: false } });
+  const [u] = noEscalation.add([{ title: 'Add feature flag', prompt: '@mock write flags.js BROKEN', agent: 'mock' }]).created;
+  const [stopped] = await noEscalation.settle([u!.id]);
+  assert.equal(stopped!.attempts, 2, 'with escalation off it stops at the second identical failure');
+  assert.equal(stopped!.tier, 'standard');
   assert.match(final!.last_error!, /BROKEN found in flags.js/);
 });
 
@@ -274,6 +280,14 @@ test('merging works on a machine where git has no name or email configured', asy
     if (prev.n === undefined) delete process.env.GIT_CONFIG_NOSYSTEM;
     else process.env.GIT_CONFIG_NOSYSTEM = prev.n;
   }
+});
+
+test('spend outside a task (planning) counts toward the daily budget without skewing agent stats', async () => {
+  const s = await startHub();
+  const before = s.hub.coord.spentToday();
+  s.hub.coord.recordSpend({ projectId: s.project.id, agent: 'mock', model: null, costUsd: 1.25, tokensIn: 100, tokensOut: 10, role: 'plan', machineId: s.hub.machineId });
+  assert.ok(Math.abs(s.hub.coord.spentToday() - before - 1.25) < 1e-9);
+  assert.deepEqual(s.hub.coord.agentStats(s.project.id), {}, 'planning runs are not implementation track record');
 });
 
 test('a broken project config is reported but never stops the hub from starting', async () => {

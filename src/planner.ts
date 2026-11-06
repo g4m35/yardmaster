@@ -1,9 +1,7 @@
-import { spawn } from 'node:child_process';
-import { createInterface } from 'node:readline';
 import * as z from 'zod/v4';
 import { getAdapter } from './adapters/index.ts';
 import { agentSettings, type Config } from './config.ts';
-import { cleanEnv } from './proc.ts';
+import { runOneShot } from './oneshot.ts';
 import { NewTaskSchema, type NewTask } from './types.ts';
 
 const PlanSchema = z.object({ tasks: z.array(NewTaskSchema).min(1).max(30) });
@@ -34,30 +32,42 @@ export function extractJson(text: string): unknown {
   return JSON.parse(candidate.slice(start, end + 1));
 }
 
-/** Uses one read-only agent run to turn a plain-language goal into a task graph. */
-export async function planGoal(goal: string, opts: { cwd: string; agent: string; config: Config }): Promise<{ tasks: NewTask[]; costUsd: number | null }> {
-  const adapter = getAdapter(opts.agent, opts.config);
-  if (!adapter) throw new Error(`Unknown agent ${opts.agent}`);
-  const settings = agentSettings(opts.config, opts.agent);
-  const spec = adapter.build({ prompt: planningPrompt(goal), cwd: opts.cwd, model: settings.models.strong ?? null, settings, readOnly: true });
-  const child = spawn(spec.command, spec.args, { cwd: opts.cwd, env: cleanEnv(spec.env), stdio: [spec.stdin !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
-  if (spec.stdin !== undefined) child.stdin?.end(spec.stdin);
-  let result = '';
-  let lastText = '';
-  let cost: number | null = null;
-  let stderr = '';
-  child.stderr?.on('data', (d) => (stderr += d));
-  const rl = createInterface({ input: child.stdout! });
-  rl.on('line', (line) => {
-    for (const ev of adapter.parse(line)) {
-      if (ev.type === 'result') result = ev.text;
-      if (ev.type === 'text') lastText += ev.text + '\n';
-      if (ev.type === 'usage' && ev.cumulative && ev.costUsd !== undefined) cost = ev.costUsd;
-    }
+/** Planning failed after spending something: the spend still has to be counted. */
+export class PlanError extends Error {
+  readonly spend: { costUsd: number; tokensIn: number; tokensOut: number; model: string | null };
+  constructor(message: string, spend: PlanError['spend']) {
+    super(message);
+    this.spend = spend;
+  }
+}
+
+/**
+ * Uses one read-only agent run to turn a plain-language goal into a task graph. Always stopped after 10 minutes;
+ * agents whose CLI supports it (Claude Code) are also held to 40 turns and the given dollar budget.
+ */
+export async function planGoal(goal: string, opts: { cwd: string; agent: string; config: Config; budgetUsd?: number | null }): Promise<{ tasks: NewTask[]; costUsd: number; tokensIn: number; tokensOut: number; model: string | null }> {
+  if (!getAdapter(opts.agent, opts.config)) throw new Error(`Unknown agent ${opts.agent}`);
+  const model = agentSettings(opts.config, opts.agent).models.strong ?? null;
+  const budget = opts.budgetUsd ?? opts.config.budget.perTaskUsd;
+  const r = await runOneShot({
+    agent: opts.agent, config: opts.config, prompt: planningPrompt(goal), cwd: opts.cwd, model, readOnly: true, tier: 'strong',
+    timeoutMs: 10 * 60_000, maxTurns: 40, budgetUsd: budget ?? undefined, interruptible: true,
   });
-  const code = await new Promise<number>((r) => child.on('close', (c) => r(c ?? 1)));
-  if (code !== 0 && !result && !lastText) throw new Error(`${adapter.label} failed to plan: ${stderr.trim().slice(-400)}`);
-  const parsed = PlanSchema.safeParse(extractJson(result || lastText));
-  if (!parsed.success) throw new Error(`The plan was not in the expected shape: ${z.prettifyError(parsed.error)}`);
-  return { tasks: parsed.data.tasks, costUsd: cost };
+  const spend = { costUsd: r.costUsd, tokensIn: r.tokensIn, tokensOut: r.tokensOut, model };
+  if (r.interrupted) throw new PlanError('Planning was interrupted.', spend);
+  if (!r.ok && !r.text) throw new PlanError(`The planner failed: ${r.error || 'it stopped without output (it may have hit the 10-minute limit)'}`, spend);
+  // The final message first (structured agents); then everything printed, for plain CLIs that print over many lines.
+  let json: unknown;
+  try {
+    json = extractJson(r.text);
+  } catch {
+    try {
+      json = extractJson(r.allText);
+    } catch (err) {
+      throw new PlanError((err as Error).message, spend);
+    }
+  }
+  const parsed = PlanSchema.safeParse(json);
+  if (!parsed.success) throw new PlanError(`The plan was not in the expected shape: ${z.prettifyError(parsed.error)}`, spend);
+  return { tasks: parsed.data.tasks, costUsd: r.costUsd, tokensIn: r.tokensIn, tokensOut: r.tokensOut, model };
 }

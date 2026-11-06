@@ -536,6 +536,16 @@ export class Coordinator {
     }[];
   }
 
+  /** Records spend outside any task (planning), so the daily budget sees it. */
+  recordSpend(s: { projectId: string | null; agent: string; model: string | null; costUsd: number; tokensIn: number; tokensOut: number; role: string; machineId: string }): void {
+    const now = Date.now();
+    this.db
+      .prepare(`INSERT INTO runs (id, task_id, attempt, machine_id, agent, model, status, cost_usd, tokens_in, tokens_out, cost_estimated, started_at, ended_at, role)
+                VALUES (?, ?, 0, ?, ?, ?, 'succeeded', ?, ?, ?, 0, ?, ?, ?)`)
+      .run(shortId('r'), `${s.role}:${s.projectId ?? 'none'}`, s.machineId, s.agent, s.model, s.costUsd, s.tokensIn, s.tokensOut, now, now, s.role);
+    this.invalidate();
+  }
+
   spentToday(): number {
     return this.memo('spent', () => this.spentTodayUncached());
   }

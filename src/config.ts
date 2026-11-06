@@ -121,6 +121,7 @@ export const ConfigSchema = z.object({
     })
     .default({ maxAttempts: 3, escalate: true, sameFailureLimit: 2, backoffSeconds: 20 }),
   hotFiles: z.array(z.string()).default([
+    'yardmaster.json',
     'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb', 'Cargo.lock', 'poetry.lock', 'uv.lock', 'go.sum',
     '**/migrations/**', '.github/workflows/**',
   ]),
