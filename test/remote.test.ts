@@ -1,19 +1,21 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { Client as McpClient } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { sandbox, sh, until } from './helpers.ts';
 import { Hub } from '../src/hub.ts';
 import { openDb } from '../src/db.ts';
-import { remoteClient } from '../src/api.ts';
+import { remoteClient, type Client } from '../src/api.ts';
 import { WorkerLoop } from '../src/worker.ts';
 import { Semaphore } from '../src/runner.ts';
 import { httpTransport } from '../src/transport.ts';
-import { loadConfig, resolveConfig } from '../src/config.ts';
+import { EffortRoutingSchema, loadConfig, resolveConfig } from '../src/config.ts';
 import { claudePreTool } from '../src/hook.ts';
+import { claude } from '../src/adapters/builtin.ts';
+import { registerAdapter } from '../src/adapters/index.ts';
 
 let hub: Hub | null = null;
 const cleanups: (() => Promise<void> | void)[] = [];
@@ -109,6 +111,213 @@ test('an agent that exits while the hub is slow to answer is still seen as finis
     clearInterval(timer);
     worker.stopAll('shutdown', 'test over');
     await worker.drain();
+  }
+});
+
+test('remote workers use only their own JEV command and bindings, including disabled defaults', async () => {
+  await hub?.stop();
+  hub = null;
+  for (const enabled of [true, false]) {
+    const box = sandbox({
+      agents: { claude: { enabled: true, models: { standard: 'worker-test-model' } } },
+      review: { mode: 'never' }, worktree: { warmStart: 'off' },
+    });
+    const hubMarker = join(box.root, 'hub-router-ran');
+    const workerCapture = join(box.root, 'worker-request.json');
+    const agentCapture = join(box.root, 'agent-launch.json');
+    const hubRouter = join(box.root, 'hub-router.mjs');
+    const workerRouter = join(box.root, 'worker-router.mjs');
+    const fakeAgent = join(box.root, 'fake-agent.mjs');
+    writeFileSync(hubRouter, `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(hubMarker)}, 'wrong machine');`);
+    writeFileSync(workerRouter, `import { writeFileSync } from 'node:fs';
+let input=''; for await (const c of process.stdin) input += c;
+const q=JSON.parse(input); writeFileSync(${JSON.stringify(workerCapture)}, JSON.stringify(q));
+console.log(JSON.stringify({v:1,requestId:q.requestId,sessionId:q.sessionId,providerInstanceId:q.providerInstanceId,model:q.model,
+status:'apply',reason:'difficulty_lower',level:'low',patch:{optionId:q.capability.optionId,value:'low'},judge:null}));
+`);
+    writeFileSync(fakeAgent, `import { writeFileSync } from 'node:fs';
+writeFileSync(${JSON.stringify(agentCapture)}, process.argv[2]);
+writeFileSync('remote-result.txt', 'remote verified');
+console.log(JSON.stringify({type:'result',subtype:'success',result:'done',usage:{},total_cost_usd:0}));
+`);
+    const binding = { agent: 'claude', model: 'worker-test-model', efforts: ['low', 'medium', 'high'], cacheImpact: 'preserves-prefix' };
+    const baseConfig = JSON.parse(readFileSync(join(box.home, 'config.json'), 'utf8'));
+    writeFileSync(join(box.home, 'config.json'), JSON.stringify({ ...baseConfig,
+      effortRouting: { enabled: true, mode: 'active', command: [process.execPath, hubRouter], bindings: [{ ...binding, model: 'hub-only-model' }] },
+    }));
+    const testHub = new Hub({ db: openDb(join(box.home, 'worker-config.db')), token: 'tok', machineId: 'm-hub', quiet: true });
+    const project = await testHub.coord.registerProject(box.repo);
+    const clone = join(box.root, 'worker-clone');
+    sh(box.root, 'git', ['clone', '-q', box.repo, clone]);
+    const local = resolveConfig([loadConfig(), {
+      worktreeRoot: join(box.root, 'worker-worktrees'),
+      effortRouting: enabled
+        ? EffortRoutingSchema.parse({ enabled: true, mode: 'active', command: [process.execPath, workerRouter], bindings: [binding] })
+        : EffortRoutingSchema.parse({}),
+    }]);
+    registerAdapter({ ...claude, build(ctx) {
+      const spec = claude.build(ctx);
+      return { ...spec, command: process.execPath, args: [fakeAgent, JSON.stringify(spec)] };
+    } });
+    const worker = new WorkerLoop({
+      client: testHub.client, machineId: 'm-worker', repos: () => ({ [project.id]: clone }), agents: () => ['claude'],
+      localConfig: () => local, verifySlots: new Semaphore(1),
+    });
+    try {
+      const task = testHub.coord.addTasks(project.id, [{ title: 'Fix remote spelling', prompt: 'Correct a spelling error.', files: ['remote-result.txt'], agent: 'claude', tier: 'standard' }], 'test').created[0]!;
+      await worker.tick();
+      const done = await until(() => testHub.coord.getTask(task.id)!, (t) => ['ready', 'needs_human', 'failed'].includes(t.status), 30000, 'remote JEV task');
+      assert.equal(done.status, 'ready', done.attention ?? '');
+      assert.equal(existsSync(hubMarker), false, 'hub executable never runs on the worker');
+      assert.equal(existsSync(workerCapture), enabled, 'a worker with default disabled JEV never inherits the hub binding');
+      const launch = JSON.parse(readFileSync(agentCapture, 'utf8'));
+      assert.equal(launch.args[launch.args.indexOf('--effort') + 1], enabled ? 'low' : 'medium');
+      if (enabled) {
+        const request = JSON.parse(readFileSync(workerCapture, 'utf8'));
+        assert.equal(request.projectDir, clone, 'JEV checks scope against the worker-local checkout');
+        assert.equal(request.model, 'worker-test-model');
+      }
+      assert.equal(testHub.coord.latestRun(task.id)!.machine_id, 'm-worker');
+      assert.equal(sh(done.worktree!, 'git', ['show', 'HEAD:remote-result.txt']), 'remote verified');
+    } finally {
+      worker.stopAll('shutdown', 'test over');
+      await worker.drain();
+      registerAdapter(claude);
+      testHub.coord.db.close();
+    }
+  }
+});
+
+test('shutdown during remote base fetch prevents JEV and coding-agent launch afterward', async () => {
+  await hub?.stop();
+  hub = null;
+  const box = sandbox({ review: { mode: 'never' }, worktree: { warmStart: 'off' } });
+  const testHub = new Hub({ db: openDb(join(box.home, 'fetch-stop.db')), token: 'tok', machineId: 'm-hub', quiet: true });
+  const project = await testHub.coord.registerProject(box.repo);
+  const clone = join(box.root, 'fetch-clone');
+  sh(box.root, 'git', ['clone', '-q', box.repo, clone]);
+  // Create a new hub commit after cloning, forcing the worker through fetchBase.
+  writeFileSync(join(box.repo, 'later.txt'), 'new base');
+  sh(box.repo, 'git', ['add', 'later.txt']);
+  sh(box.repo, 'git', ['commit', '-q', '-m', 'new base']);
+  const agentMarker = join(box.root, 'agent-started');
+  const routerMarker = join(box.root, 'router-started');
+  const agentScript = join(box.root, 'never-agent.mjs');
+  const routerScript = join(box.root, 'never-router.mjs');
+  writeFileSync(agentScript, `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(agentMarker)}, 'unexpected');`);
+  writeFileSync(routerScript, `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(routerMarker)}, 'unexpected');`);
+  // Force a Claude route without requiring any installed provider binary or live inference.
+  registerAdapter({ ...claude, build(ctx) { const spec = claude.build(ctx); return { ...spec, command: process.execPath, args: [agentScript] }; } });
+  const local = resolveConfig([loadConfig(), {
+    agents: { claude: { enabled: true, models: { standard: 'fetch-test-model' } } },
+    worktreeRoot: join(box.root, 'fetch-worktrees'),
+    effortRouting: { enabled: true, mode: 'active', command: [process.execPath, routerScript],
+      bindings: [{ agent: 'claude', model: 'fetch-test-model', efforts: ['low', 'medium', 'high'], cacheImpact: 'preserves-prefix' }] },
+  }]);
+  // The claim uses the hub's configured agents, while execution uses this worker's installation.
+  const config = JSON.parse(readFileSync(join(box.home, 'config.json'), 'utf8'));
+  writeFileSync(join(box.home, 'config.json'), JSON.stringify({ ...config, agents: { claude: { enabled: true, models: { standard: 'fetch-test-model' } } } }));
+  let releaseFetch!: () => void;
+  const fetchGate = new Promise<void>((resolve) => { releaseFetch = resolve; });
+  let fetchStarted = false;
+  let uploads = 0;
+  const worker = new WorkerLoop({
+    client: testHub.client, machineId: 'm-fetch', repos: () => ({ [project.id]: clone }), agents: () => ['claude'],
+    localConfig: () => local, verifySlots: new Semaphore(1),
+    transport: {
+      async fetchBase() {
+        fetchStarted = true;
+        await fetchGate;
+        sh(clone, 'git', ['fetch', '-q', 'origin', 'main']);
+      },
+      async uploadBranch() { uploads++; },
+    },
+  });
+  try {
+    const task = testHub.coord.addTasks(project.id, [{ title: 'Fix a remote typo', prompt: 'Correct a typo.', files: ['answer.txt'], agent: 'claude', tier: 'standard' }], 'test').created[0]!;
+    await worker.tick();
+    await until(() => fetchStarted, Boolean, 10000, 'base fetch gate');
+    worker.stopAll('shutdown', 'stop during fetch');
+    releaseFetch();
+    await until(() => worker.active.size, (n) => n === 0, 15000, 'worker drain after fetch stop');
+    const current = testHub.coord.getTask(task.id)!;
+    assert.equal(current.status, 'queued', current.attention ?? '');
+    assert.equal(current.attempts, 0, 'shutdown does not consume a coding attempt');
+    assert.equal(existsSync(routerMarker), false);
+    assert.equal(existsSync(agentMarker), false);
+    assert.equal(uploads, 0);
+  } finally {
+    releaseFetch();
+    worker.stopAll('shutdown', 'test over');
+    await worker.drain();
+    registerAdapter(claude);
+    testHub.coord.db.close();
+  }
+});
+
+test('shutdown while a remote claim is in flight returns the claim without launching work', async () => {
+  await hub?.stop();
+  hub = null;
+  const box = sandbox({ agents: { claude: { enabled: true, models: { standard: 'claim-test-model' } } }, review: { mode: 'never' }, worktree: { warmStart: 'off' } });
+  const testHub = new Hub({ db: openDb(join(box.home, 'claim-stop.db')), token: 'tok', machineId: 'm-hub', quiet: true });
+  const project = await testHub.coord.registerProject(box.repo);
+  const routerMarker = join(box.root, 'claim-router-started');
+  const agentMarker = join(box.root, 'claim-agent-started');
+  const routerScript = join(box.root, 'claim-router.mjs');
+  const agentScript = join(box.root, 'claim-agent.mjs');
+  writeFileSync(routerScript, `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(routerMarker)}, 'unexpected');`);
+  writeFileSync(agentScript, `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(agentMarker)}, 'unexpected');`);
+  registerAdapter({ ...claude, build(ctx) { const spec = claude.build(ctx); return { ...spec, command: process.execPath, args: [agentScript] }; } });
+  let releaseClaim!: () => void;
+  const claimGate = new Promise<void>((resolve) => { releaseClaim = resolve; });
+  let claimReady = false;
+  const client = new Proxy(testHub.client, {
+    get(target, key: keyof Client) {
+      if (key !== 'worker.claim') return target[key];
+      return async (p: Parameters<Client['worker.claim']>[0]) => {
+        const claim = await target['worker.claim'](p);
+        claimReady = true;
+        await claimGate;
+        return claim;
+      };
+    },
+  });
+  let transportCalls = 0;
+  const worker = new WorkerLoop({
+    client, machineId: 'm-claim', repos: () => ({ [project.id]: box.repo }), agents: () => ['claude'], verifySlots: new Semaphore(1),
+    localConfig: () => resolveConfig([loadConfig(), {
+      effortRouting: { enabled: true, mode: 'active', command: [process.execPath, routerScript],
+        bindings: [{ agent: 'claude', model: 'claim-test-model', efforts: ['low', 'medium', 'high'], cacheImpact: 'preserves-prefix' }] },
+    }]),
+    transport: {
+      async fetchBase() { transportCalls++; },
+      async uploadBranch() { transportCalls++; },
+    },
+  });
+  try {
+    const task = testHub.coord.addTasks(project.id, [{ title: 'Fix claim spelling', prompt: 'Correct spelling.', files: ['answer.txt'], agent: 'claude', tier: 'standard' }], 'test').created[0]!;
+    const ticking = worker.tick();
+    await until(() => claimReady, Boolean, 10000, 'claim response gate');
+    assert.equal(testHub.coord.getTask(task.id)!.status, 'running', 'the hub has already reserved this task');
+    worker.stopAll('shutdown', 'stop while claiming');
+    releaseClaim();
+    await ticking;
+    assert.equal(worker.active.size, 0);
+    const current = testHub.coord.getTask(task.id)!;
+    assert.equal(current.status, 'queued', current.attention ?? '');
+    assert.equal(current.attempts, 0);
+    assert.equal(current.assignee, null);
+    assert.equal(current.lease_until, null);
+    assert.equal(testHub.coord.latestRun(task.id), null);
+    assert.equal(existsSync(routerMarker), false);
+    assert.equal(existsSync(agentMarker), false);
+    assert.equal(transportCalls, 0);
+  } finally {
+    releaseClaim();
+    worker.stopAll('shutdown', 'test over');
+    await worker.drain();
+    registerAdapter(claude);
+    testHub.coord.db.close();
   }
 });
 

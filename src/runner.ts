@@ -20,6 +20,7 @@ import type { TaskPatch } from './coordinator.ts';
 import { changedLineCount, formatIssues, runReview, shouldReview } from './review.ts';
 import { siblingWorktrees, warmStart } from './warmstart.ts';
 import { UsageMeter } from './usage.ts';
+import { routeEffort } from './jev.ts';
 
 export class Semaphore {
   private queue: (() => void)[] = [];
@@ -228,6 +229,13 @@ export async function runAttempt(ctx: RunContext): Promise<RunOutcome> {
 
 async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   const { api, task, config } = ctx;
+  let preparationStop: { reason: StopReason; message: string } | null = null;
+  const preparationAbort = new AbortController();
+  // Install before the first await: shutdown must also stop attempts preparing a worktree or waiting on JEV.
+  ctx.onSpawn?.((reason, message) => {
+    preparationStop = { reason, message };
+    preparationAbort.abort();
+  });
   // Where the attempt's time went: prepare (worktree, dependencies), agent, collect (commit, scope, bookkeeping), verify, review.
   const phases: Record<string, number> = {};
   let phaseStart = Date.now();
@@ -295,17 +303,52 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   const pinned = !resumeId && adapter.resumable ? randomUUID() : null;
   const baseline = resumeId ? task.session_cost : 0;
   const remaining = task.budget_usd !== null ? Math.max(0, task.budget_usd - task.cost_usd) + baseline : null;
+  phase('prepare');
+  const effort = await routeEffort({ config: config.effortRouting, agent: ctx.agent, model: ctx.model, settings,
+    tier: task.tier, task, repoPath: ctx.repoPath, signal: preparationAbort.signal });
+  if (config.effortRouting.enabled) phase('route');
+  const launchSettings = effort.effort ? { ...settings, effort: { ...settings.effort, [task.tier]: effort.effort } } : settings;
   const spec = adapter.build({
-    prompt, cwd: wt, model: ctx.model, settings, tier: task.tier, budgetUsd: remaining,
+    prompt, cwd: wt, model: ctx.model, settings: launchSettings, tier: task.tier, budgetUsd: remaining,
     session: resumeId ? { resume: resumeId } : pinned ? { pin: pinned } : undefined,
   });
+  if (ctx.agent === 'claude' && effort.managed) spec.env = { ...spec.env, JEV_ROUTER_HOST_ROUTING: '1' };
+  const beforeLaunch = async (): Promise<RunOutcome | null> => {
+    // The routing wait may outlive a cancellation, redirect or ownership change. Never launch stale work.
+    const current = await api['task.peek']({ id: task.id });
+    if (current.assignee !== task.assignee || current.attempts !== task.attempts || !['running', 'canceled'].includes(current.status)) return { status: 'superseded', message: 'This attempt no longer owns the task.' };
+    const pending = preparationStop as { reason: StopReason; message: string } | null;
+    if (current.status === 'canceled' || pending?.reason === 'canceled') return { status: 'canceled', message: 'Canceled before the agent started.' };
+    const reason = pending?.reason ?? (current.control === 'stop-pause' ? 'shutdown' : current.control === 'redirect' ? 'redirected' : current.control === 'stop' ? 'stopped' : null);
+    if (!reason) return null;
+    if (reason === 'lost') return { status: 'superseded', message: 'This attempt no longer owns the task.' };
+    if (reason === 'shutdown' || reason === 'redirected') {
+      await savePartialWork(ctx, wt);
+      await update(ctx, { status: 'queued', control: null, attempts: Math.max(0, task.attempts - 1), assignee: null, machine_id: null, lease_until: null, not_before: null });
+      return { status: 'queued', message: pending?.message ?? 'Paused before the agent started.' };
+    }
+    return finishNeedsHuman(ctx, pending?.message ?? 'Stopped before the agent started.');
+  };
+  if (config.effortRouting.enabled || preparationStop) {
+    const stopped = await beforeLaunch();
+    if (stopped) return stopped;
+  }
   phase('prepare');
 
   const rawLog = join(paths.logs(), `${task.id}-${task.attempts}.jsonl`);
   const runId = await api['run.start']({ taskId: task.id, machineId: ctx.machineId, agent: ctx.agent, model: ctx.model, logPath: rawLog, lessons: context.lessonIds });
   const log = new LogBuffer(api, runId);
   log.push(`start ${adapter.label}${ctx.model ? ` (${ctx.model})` : ''} in ${wt}${resumeId ? ` (continuing session ${resumeId.slice(0, 8)})` : ''}`);
+  if (effort.status !== 'disabled') log.push(`JEV effort: ${effort.status} (${effort.reason}, ${effort.latencyMs} ms)`);
   if (resumeId) await api['run.update']({ runId, patch: { resumed: true } });
+  if (config.effortRouting.enabled || preparationStop) {
+    const stopped = await beforeLaunch();
+    if (stopped) {
+      await log.close();
+      await api['run.update']({ runId, patch: { status: 'stopped', ended_at: Date.now(), stop_reason: 'before_launch' } });
+      return stopped;
+    }
+  }
   let sessionId: string | null = resumeId ?? pinned;
   let toolCalls = 0;
 
@@ -364,6 +407,9 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
     setTimeout(() => killGroup(child.pid, 'SIGKILL'), 5000).unref();
   };
   ctx.onSpawn?.(requestStop);
+  // A stop may arrive after spawn while pid/session bookkeeping is awaiting the hub.
+  const pendingStop = preparationStop as { reason: StopReason; message: string } | null;
+  if (pendingStop) requestStop(pendingStop.reason, pendingStop.message);
 
   const spent = () => meter.spent;
   const onEvent = (ev: AgentEvent) => {

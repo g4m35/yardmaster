@@ -8,6 +8,25 @@ export const TIERS = ['cheap', 'standard', 'strong'] as const;
 export type Tier = (typeof TIERS)[number];
 export const TierSchema = z.enum(TIERS);
 
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh'] as const;
+export const EffortLevelSchema = z.enum(EFFORT_LEVELS);
+/** Separately installed JEV JSON CLI. Execution settings belong to each worker, never to the hub's machine. */
+export const EffortRoutingSchema = z.object({
+  enabled: z.boolean().default(false),
+  mode: z.enum(['shadow', 'active']).default('shadow'),
+  command: z.array(z.string().min(1)).min(1).default(['jev-router', 'route']),
+  timeoutMs: z.number().int().min(100).max(30_000).default(5000),
+  bindings: z.array(z.object({
+    agent: z.enum(['claude', 'codex']),
+    /** Exact model id passed to the CLI; aliases and CLI defaults need their own verified binding. */
+    model: z.string().min(1),
+    efforts: z.array(EffortLevelSchema).min(1).max(4),
+    cacheImpact: z.enum(['preserves-prefix', 'may-reset', 'unknown']).default('unknown'),
+    allowCacheReset: z.boolean().default(false),
+  })).default([]),
+});
+export type EffortRouting = z.infer<typeof EffortRoutingSchema>;
+
 /** Package registries and source hosts installs and builds commonly need. */
 export const SANDBOX_DOMAINS = [
   'registry.npmjs.org', '*.npmjs.org', 'registry.yarnpkg.com', 'pypi.org', 'files.pythonhosted.org', 'crates.io', '*.crates.io',
@@ -116,6 +135,8 @@ export const ConfigSchema = z.object({
   defaultTier: TierSchema.optional(),
   agents: z.record(z.string(), AgentSettingsSchema.partial()).default({}),
   routing: z.partialRecord(TierSchema, z.array(z.string())).default({}),
+  /** Optional, machine-local JEV effort selection. Off by default; does not replace agent/model routing. */
+  effortRouting: EffortRoutingSchema.prefault({}),
   budget: z
     .object({
       perTaskUsd: z.number().nullable().default(3),

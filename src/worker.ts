@@ -187,6 +187,14 @@ export class WorkerLoop {
         for (const a of this.active.values()) runningByAgent[a.agent] = (runningByAgent[a.agent] ?? 0) + 1;
         const claim = await this.client['worker.claim']({ machineId: this.machineId, agents: this.agents(), repos: this.repos(), runningByAgent });
         if (!claim) break;
+        if (this.stopped) {
+          // A shutdown may have happened while the hub was handing us this claim, before an active entry existed.
+          await this.client['task.update']({ id: claim.task.id,
+            owner: { attempt: claim.task.attempts, assignee: claim.task.assignee ?? '', statuses: ['running'] },
+            patch: { status: 'queued', attempts: Math.max(0, claim.task.attempts - 1), assignee: null, machine_id: null, lease_until: null },
+          });
+          break;
+        }
         this.launch(claim);
       }
     } finally {
@@ -197,9 +205,11 @@ export class WorkerLoop {
   private launch(claim: NonNullable<Awaited<ReturnType<Client['worker.claim']>>>): void {
     const { task, project, route } = claim;
     const entry: Active = { task, agent: route.agent };
+    let pendingStop: { reason: StopReason; message: string } | null = null;
+    entry.stop = (reason, message) => { pendingStop = { reason, message }; };
     this.active.set(task.id, entry);
     const local = this.local();
-    const config = resolveConfig([claim.config, { agents: deepMerge(claim.config.agents, local.agents), worktreeRoot: local.worktreeRoot }]);
+    const config = resolveConfig([claim.config, { agents: deepMerge(claim.config.agents, local.agents), worktreeRoot: local.worktreeRoot, effortRouting: local.effortRouting }]);
     const repoPath = this.repos()[project.id]!;
     void (async () => {
       try {
@@ -207,7 +217,10 @@ export class WorkerLoop {
         if (this.transport && !(await revParse(repoPath, claim.startPoint))) await this.transport.fetchBase(project, repoPath, claim.startPoint);
         const outcome = await runAttempt({
           api: this.client, machineId: this.machineId, task, project, repoPath, agent: route.agent, model: route.model, config,
-          startPoint: claim.startPoint, verifySlots: this.verifySlots, onSpawn: (stop) => (entry.stop = stop), installed: this.agents(),
+          startPoint: claim.startPoint, verifySlots: this.verifySlots, onSpawn: (stop) => {
+            entry.stop = stop;
+            if (pendingStop) stop(pendingStop.reason, pendingStop.message);
+          }, installed: this.agents(),
         });
         if (outcome.status === 'ready' && this.transport) {
           const fresh = (await this.client['task.get']({ id: task.id })).task;
