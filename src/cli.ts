@@ -20,7 +20,6 @@ import { STATUS_LABEL, type Task } from './types.ts';
 import { WorkerLoop } from './worker.ts';
 import { Semaphore } from './runner.ts';
 import { httpTransport } from './transport.ts';
-import { runMcp } from './mcp.ts';
 import { applyConnect, connectPlan, hookPlan, installHooks, installSkill, selfCommand } from './connect.ts';
 import { HOOK_EVENTS, runHook } from './hook.ts';
 import { creatorPrompt, loadPlugins, scaffoldPlugin, testPlugin } from './plugins.ts';
@@ -32,7 +31,6 @@ import { runMockAgent } from './mockagent.ts';
 import { TIERS, defaultAgentSettings, verifySlotsFor } from './config.ts';
 import { detectVerify } from './detect.ts';
 import { dedupeGroup, defaultScanRoots, purgeDedupeTrash, restoreLatest, scanDeps } from './devdeps.ts';
-import { runCi } from './ci/cli.ts';
 
 // ---------- tiny argument parser ----------
 
@@ -70,7 +68,7 @@ function parseArgs(argv: string[]): Args {
 }
 
 const SHORT: Record<string, string> = { f: 'follow', n: 'lines', y: 'yes', j: 'json', h: 'help' };
-const BOOLEAN_FLAGS = new Set(['scan', 'dedupe', 'restore', 'purge', 'with-hooks', 'no-skill', 'now', 'version', 'follow', 'yes', 'json', 'help', 'all', 'dry-run', 'foreground', 'force', 'no-changes-ok', 'watch', 'with-hook', 'no-hub', 'open', 'draft', 'quiet', 'hooks-path']);
+const BOOLEAN_FLAGS = new Set(['scan', 'dedupe', 'restore', 'purge', 'with-hooks', 'no-hooks', 'experimental', 'no-skill', 'now', 'version', 'follow', 'yes', 'json', 'help', 'all', 'dry-run', 'foreground', 'force', 'no-changes-ok', 'watch', 'with-hook', 'no-hub', 'open', 'draft', 'quiet', 'hooks-path']);
 
 const flag = (a: Args, k: string) => (typeof a.flags[k] === 'string' ? (a.flags[k] as string) : undefined);
 const list = (a: Args, k: string) => flag(a, k)?.split(',').map((s) => s.trim()).filter(Boolean);
@@ -160,7 +158,7 @@ const HELP = `${bold('Yardmaster')} ${VERSION}: run many coding agents at once w
 ${bold('Get started')}
   ym init                      set up this repo (detects your agents and test command)
   ym connect [agent|all]       add Yardmaster tools + skill to Claude Code, Codex, Cursor, OpenCode, Gemini
-                               (--with-hooks: zero-token coordination for Claude Code and Codex)
+                               (also installs zero-token hooks for Claude Code and Codex; --no-hooks to skip)
   ym add "what you want"       queue work (--files, --after, --agent, --tier cheap|standard|strong)
   ym plan "a bigger goal"      let an agent split a goal into parallel tasks (--yes to queue them)
   ym status                    what's happening (--watch, --all, --json)
@@ -417,9 +415,11 @@ async function cmdDiskDeps(a: Args): Promise<boolean> {
   }
   console.log(dim('Sizes count every copy in full; copies that are already clones of each other take less real space.'));
   if (!a.flags.dedupe) {
-    if (reclaim > 0) console.log(`\nShare them: ${cyan('ym disk --dedupe')} (dry run first; originals are kept for undo until ${cyan('ym disk --purge')} or 3 days).`);
+    if (reclaim > 0) console.log(`\nShare them (experimental): ${cyan('ym disk --dedupe')} shows what would change; add ${cyan('--experimental --yes')} to do it. Originals are kept for undo until ${cyan('ym disk --purge')} or 3 days.`);
     return true;
   }
+  // It replaces dependency folders across projects (other tools' worktrees included), so it stays opt-in for now.
+  if (a.flags.yes && !a.flags.experimental) die('Sharing installs is experimental: it replaces node_modules folders across your projects. Review the dry run, then add --experimental --yes. Undo with ym disk --restore.');
   const apply = !!a.flags.yes;
   let freed = 0;
   for (const g of r.identical) {
@@ -633,7 +633,8 @@ async function cmdConnect(a: Args) {
   const which_ = a._[1] ?? 'all';
   const agents = which_ === 'all' ? ['claude', 'codex', 'cursor', 'opencode', 'gemini'].filter((x) => x !== 'cursor' || which('cursor-agent') || existsSync(join(process.env.HOME ?? '', '.cursor'))).filter((x) => x !== 'gemini' || which('gemini')).filter((x) => x !== 'opencode' || which('opencode')) : which_.split(',');
   const steps = connectPlan(agents);
-  const withHooks = Boolean(a.flags['with-hooks'] || a.flags['with-hook']);
+  // Hooks are the zero-token part (file reservations, the edit guard, a session briefing): on unless asked not to.
+  const withHooks = !a.flags['no-hooks'];
   const hookTargets = (['claude', 'codex'] as const).filter((x) => agents.includes(x) && which(x));
   if (a.flags['dry-run']) {
     for (const s of steps) console.log(s.skipped ? dim(`- ${s.agent}: ${s.skipped}`) : `- ${bold(s.agent)}: ${s.action}\n    ${dim(s.command?.join(' ') ?? '')}`);
@@ -645,7 +646,7 @@ async function cmdConnect(a: Args) {
   if (!a.flags['no-skill']) console.log(green(`✔ skill installed: ${installSkill().join(', ')}`));
   if (withHooks) {
     for (const t of hookTargets) console.log(green(`✔ ${t} hooks: ${installHooks(t)}`) + (t === 'codex' ? dim('  (approve them once with /hooks in Codex)') : ''));
-  } else console.log(dim('Tip: add --with-hooks for automatic file reservations and live board updates with no tool calls.'));
+  } else console.log(dim('Hooks skipped (--no-hooks). Without them agents reserve files and see the board only through tool calls.'));
   console.log(dim('\nRestart open agent sessions to load the new tools. T3 Code picks these up through its Claude Code and Codex agents.'));
 }
 
@@ -658,6 +659,8 @@ async function cmdMcp(a: Args) {
     const url = (await runningHubUrl()) ?? (await startHubInBackground());
     client = remoteClient(url, hubToken());
   }
+  // Loaded only for this command: the MCP SDK is the slowest import, and every other command skips it.
+  const { runMcp } = await import('./mcp.ts');
   await runMcp(client);
 }
 
@@ -869,7 +872,7 @@ async function main() {
     case 'presets': return cmdPresets();
     case 'dashboard': return cmdDashboard(a);
     case 'demo': return cmdDemo(a);
-    case 'ci': return runCi(a._[1], { positional: a._.slice(2), flag: (k) => flag(a, k), has: (k) => a.flags[k] !== undefined }, { bold, dim, red, green, yellow, cyan });
+    case 'ci': return (await import('./ci/cli.ts')).runCi(a._[1], { positional: a._.slice(2), flag: (k) => flag(a, k), has: (k) => a.flags[k] !== undefined }, { bold, dim, red, green, yellow, cyan });
     case 'version': case '--version': return console.log(VERSION);
     default: die(`Unknown command "${cmd}". Run "ym help".`);
   }

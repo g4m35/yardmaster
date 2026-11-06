@@ -109,7 +109,7 @@ After `ym connect`, your agent has these tools:
 | `yard_control` | Retry, cancel, stop, approve, or redirect with a note |
 | `yard_learn` | Save repo knowledge for future agents |
 
-`ym connect` also installs a short skill that teaches agents when and how to fan out. Add `--with-hooks` for Claude Code and Codex to coordinate with zero tool calls: a briefing at session start, board changes before a prompt (only when something changed), automatic reservation of files the agent edits, and a guard on edits to files another agent holds. Hooks fail open: if the hub isn't running, nothing is blocked. Why this layering beats MCP alone: [docs/INTEGRATION.md](docs/INTEGRATION.md).
+`ym connect` also installs a short skill that teaches agents when and how to fan out. For Claude Code and Codex it also installs hooks that coordinate with zero tool calls (skip them with `--no-hooks`): a briefing at session start, board changes before a prompt (only when something changed), automatic reservation of files the agent edits, and a guard on edits to files another agent holds. Hooks fail open: if the hub isn't running, nothing is blocked. Why this layering beats MCP alone: [docs/INTEGRATION.md](docs/INTEGRATION.md).
 
 ## More machines
 

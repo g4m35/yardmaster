@@ -286,3 +286,17 @@ test('a broken project config is reported but never stops the hub from starting'
   await again.start();
   assert.ok(again.coord.eventsSince(0, null, 500).some((e) => e.kind === 'config.invalid'));
 });
+
+test('with cheap-first on, a small checked task starts cheap and a security task does not', async () => {
+  const s = await startHub({ cheapFirst: true });
+  s.hub.coord.setPaused(null, true, 'test');
+  const [small, hard, pinned] = s.add([
+    { title: 'Fix the pager label', prompt: 'Change the label in pager.js', files: ['pager.js'], agent: 'mock' },
+    { title: 'Fix the auth token check', prompt: 'Tighten authentication in auth.js', files: ['auth.js'], agent: 'mock' },
+    { title: 'Fix the footer', prompt: 'Footer text', files: ['footer.js'], tier: 'standard', agent: 'mock' },
+  ]).created;
+  assert.equal(small!.tier, 'cheap');
+  assert.equal(hard!.tier, 'strong');
+  assert.equal(pinned!.tier, 'standard', 'a tier set by hand is kept');
+  for (const t of [small, hard, pinned]) s.hub.coord.updateTask(t!.id, { status: 'canceled' });
+});

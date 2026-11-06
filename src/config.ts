@@ -83,6 +83,11 @@ export const ConfigSchema = z.object({
    * once per merge train, so agents get feedback sooner without weakening what lands.
    */
   verifyQuick: z.array(z.string()).default([]),
+  /**
+   * Start small tasks (1 to 3 specific files, a short ask) on the cheap tier when the project has checks; a failure
+   * retries and then escalates. Tasks that name a tier, or read as hard (security, architecture...), are unaffected.
+   */
+  cheapFirst: z.boolean().default(true),
   verifyTimeoutMinutes: z.number().default(20),
   /** How many task check runs at once. Unset: about one per 4 CPU cores, up to maxParallel. Merge checks get their own slot. */
   verifyParallel: z.number().int().min(1).optional(),

@@ -1,7 +1,7 @@
 import { tx, type Db } from './db.ts';
 import { loadConfig, routingFor, type Config, type Tier } from './config.ts';
 import { findCycle } from './graph.ts';
-import { chooseAgent, inferTier, type AgentStats, type RouteChoice } from './router.ts';
+import { chooseAgent, inferTier, isSmallCheckedTask, type AgentStats, type RouteChoice } from './router.ts';
 import { applyPolicies } from './policies.ts';
 import { coupling, type ImportGraph } from './imports.ts';
 import { addLesson, widenScope } from './lessons.ts';
@@ -230,7 +230,10 @@ export class Coordinator {
         const { input, prompt, id } = plan;
         const explicit = input.files?.map(normalizePattern) ?? [];
         const scope = explicit.length ? explicit : inferScope(`${input.title}\n${prompt}`);
-        const guessed: Tier = input.tier ?? inferTier(`${input.title} ${prompt}`, cfg.defaultTier ?? 'standard');
+        const inferred = inferTier(`${input.title} ${prompt}`, cfg.defaultTier ?? 'standard');
+        // Cheap first for small tasks with checks; anything flagged hard, or set by hand, keeps its tier.
+        const checks = cfg.verify.length > 0 || (input.verify?.length ?? 0) > 0;
+        const guessed: Tier = input.tier ?? (cfg.cheapFirst && inferred === 'standard' && isSmallCheckedTask(scope, prompt, checks) ? 'cheap' : inferred);
         const { effects, matched } = applyPolicies(cfg, { title: input.title, prompt, scope, tier: guessed, createdBy });
         const tier: Tier = input.tier ?? effects.tier ?? guessed;
         const bestOf = input.bestOf ?? effects.bestOf ?? 1;

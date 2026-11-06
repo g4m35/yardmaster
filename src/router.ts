@@ -10,6 +10,14 @@ export function inferTier(text: string, fallback: Tier = 'standard'): Tier {
   return fallback;
 }
 
+/**
+ * Small enough for the cheap tier: 1 to 3 specific files (no "**" globs), a short ask, and checks that will catch a
+ * mistake. A failure retries, then escalates, so the worst case is a retry; the usual case costs about a twentieth.
+ */
+export function isSmallCheckedTask(scope: string[], prompt: string, hasChecks: boolean): boolean {
+  return hasChecks && scope.length >= 1 && scope.length <= 3 && scope.every((s) => !s.includes('**')) && prompt.length <= 600;
+}
+
 export function escalate(tier: Tier): Tier {
   const i = TIERS.indexOf(tier);
   return TIERS[Math.min(TIERS.length - 1, i + 1)]!;
