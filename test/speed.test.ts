@@ -118,6 +118,25 @@ test('Claude Code runs lean by default: no MCP, skills or optional tools; effort
   assert.ok(mcp.includes('--mcp-config /me/mcp.json'), 'chosen MCP servers can be kept in lean runs');
 });
 
+test('background Claude runs are sandboxed by default: worktree-only writes, listed hosts only, no escape hatch', () => {
+  const settingsOf = (args: string[]) => {
+    const i = args.indexOf('--settings');
+    return i === -1 ? null : (JSON.parse(args[i + 1]!) as { sandbox: { enabled: boolean; allowUnsandboxedCommands: boolean; network: { allowedDomains: string[]; strictAllowlist: boolean }; filesystem?: { allowWrite: string[] } } });
+  };
+  const s = settingsOf(claude.build({ prompt: 'x', cwd: '/w', model: null, settings: defaultAgentSettings() }).args)!;
+  assert.equal(s.sandbox.enabled, true);
+  assert.equal(s.sandbox.allowUnsandboxedCommands, false);
+  assert.equal(s.sandbox.network.strictAllowlist, true, 'unattended runs refuse unlisted hosts instead of waiting on a prompt');
+  assert.ok(s.sandbox.network.allowedDomains.includes('registry.npmjs.org'));
+  assert.equal(s.sandbox.filesystem, undefined);
+  const extra = settingsOf(claude.build({ prompt: 'x', cwd: '/w', model: null, settings: defaultAgentSettings({ sandbox: { enabled: true, allowedDomains: ['example.com'], allowWrite: ['~/.cache/tool'] } }) }).args)!;
+  assert.deepEqual(extra.sandbox.network.allowedDomains, ['example.com']);
+  assert.deepEqual(extra.sandbox.filesystem, { allowWrite: ['~/.cache/tool'] });
+  assert.equal(settingsOf(claude.build({ prompt: 'x', cwd: '/w', model: null, settings: defaultAgentSettings({ sandbox: { enabled: false, allowedDomains: [], allowWrite: [] } }) }).args), null, 'it can be turned off');
+  assert.equal(settingsOf(claude.build({ prompt: 'x', cwd: '/w', model: null, settings: defaultAgentSettings(), readOnly: true }).args), null, 'read-only reviews need no sandbox');
+  assert.equal(settingsOf(claude.build({ prompt: 'x', cwd: '/w', model: null, settings: defaultAgentSettings({ autonomy: 'full' }) }).args), null, 'full autonomy is the user saying no limits');
+});
+
 test('Codex resumes with exec resume and gets effort and sandbox as config', () => {
   const fresh = codex.build({ prompt: 'x', cwd: '/w', model: 'gpt-5.5', settings: defaultAgentSettings(), tier: 'strong' }).args;
   assert.deepEqual(fresh.slice(0, 5), ['exec', '--json', '--skip-git-repo-check', '-C', '/w']);
