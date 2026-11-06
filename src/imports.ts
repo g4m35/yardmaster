@@ -122,7 +122,10 @@ export async function importGraph(root: string, ref = 'HEAD'): Promise<ImportGra
     for (const d of out) (rdeps.get(d) ?? rdeps.set(d, new Set()).get(d)!).add(f);
   }
   const graph = { files, deps, rdeps };
-  if (cache.size > 20) cache.delete(cache.keys().next().value!);
+  // One graph per repo: an older HEAD's graph is never asked for again once the repo moved on, and each one can be
+  // tens of megabytes on a big repo (measured: about 20 MB each, 400 MB with 20 kept).
+  for (const k of cache.keys()) if (k.startsWith(`${root}@`)) cache.delete(k);
+  if (cache.size >= 20) cache.delete(cache.keys().next().value!);
   cache.set(key, graph);
   return graph;
 }

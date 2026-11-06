@@ -56,9 +56,10 @@ export function boardSummary(coord: Coordinator, projectId?: string | null, supe
 }
 
 function boardSummaryInPass(coord: Coordinator, projectId?: string | null, supervisor?: Supervisor) {
-  const tasks = coord.listTasks(projectId ?? null);
-  const counts: Record<string, number> = {};
-  for (const t of tasks) counts[t.status] = (counts[t.status] ?? 0) + 1;
+  // Open work, plus the latest failures for "needs you": the board costs the same with any amount of history.
+  const tasks = [...coord.openTasks(projectId ?? null), ...coord.recentlyFinished(projectId, 'failed', 20)];
+  const totals = coord.taskTotals(projectId ?? null);
+  const counts = totals.counts;
   const now = Date.now();
   const active = tasks
     .filter((t) => !TERMINAL_STATUSES.includes(t.status) && t.status !== 'needs_human')
@@ -84,13 +85,13 @@ function boardSummaryInPass(coord: Coordinator, projectId?: string | null, super
     counts,
     active,
     attention: attentionItems(coord, tasks),
-    recentDone: tasks.filter((t) => t.status === 'done').sort((a, b) => (b.finished_at ?? 0) - (a.finished_at ?? 0)).slice(0, 8).map((t) => ({ id: t.id, title: t.title, summary: clip(t.summary, 160), cost: t.cost_usd, finishedAt: t.finished_at })),
+    recentDone: coord.recentlyFinished(projectId, 'done', 8).map((t) => ({ id: t.id, title: t.title, summary: clip(t.summary, 160), cost: t.cost_usd, finishedAt: t.finished_at })),
     spentToday: coord.spentToday(),
     dailyBudget: (() => {
       const pid = projectId ?? coord.listProjects()[0]?.id;
       return pid ? coord.configFor(pid).budget.dailyUsd : null;
     })(),
-    totalSpent: tasks.reduce((s, t) => s + t.cost_usd, 0),
+    totalSpent: totals.spent,
     machines: coord.listMachines().map((m) => ({ id: m.id, name: m.name, online: now - m.last_seen < 60_000, isHub: m.is_hub, agents: m.info.agents, running: m.info.running, maxParallel: m.info.maxParallel, diskFreeGb: m.info.diskFreeGb ?? null, worktreesGb: m.info.worktreesGb ?? null, loadPerCpu: m.info.loadPerCpu, freeMemMb: m.info.freeMemMb })),
     paused: coord.pausedState(projectId),
     warnings: (supervisor?.current(projectId) ?? []).map((w) => ({ taskId: w.taskId, message: w.message, since: w.since })),
@@ -168,7 +169,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       if (!task) throw new Error(`No task ${p.id}`);
       const cfg = coord.configFor(task.project_id);
       // A raced dependency is represented by whichever member won.
-      const winner = (d: Task) => (d.race_group ? coord.listTasks(d.project_id, ['done']).find((x) => x.race_group === d.race_group) ?? d : d);
+      const winner = (d: Task) => (d.race_group ? coord.raceMembers(d.race_group).find((x) => x.status === 'done') ?? d : d);
       const others = coord.activeScopes(task.project_id, task.id).map(({ task: o, scope }) => ({ id: o.id, title: o.title, scope }));
       const graph = cfg.coupling !== 'off' ? coord.graphs.get(task.project_id) : undefined;
       const coupled = graph && task.scope.length

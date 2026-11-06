@@ -86,6 +86,10 @@ const MIGRATIONS: string[] = [
   ALTER TABLE runs ADD COLUMN phases TEXT NOT NULL DEFAULT '{}';
   ALTER TABLE runs ADD COLUMN resumed INTEGER NOT NULL DEFAULT 0;
   `,
+  `
+  CREATE INDEX tasks_project_finished ON tasks(project_id, status, finished_at);
+  CREATE INDEX tasks_race ON tasks(race_group);
+  `,
 ];
 
 export type Db = DatabaseSync;
