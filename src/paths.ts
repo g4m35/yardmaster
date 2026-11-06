@@ -1,11 +1,26 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync, statSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
+const privateHomes = new Set<string>();
+
+/** Yardmaster's home holds prompts, agent output and the hub token: private to its owner (0700). */
 export function yardHome(): string {
   const home = process.env.YARDMASTER_HOME ?? join(homedir(), '.yardmaster');
-  mkdirSync(home, { recursive: true });
+  if (!privateHomes.has(home)) {
+    const created = mkdirSync(home, { recursive: true, mode: 0o700 });
+    // Tighten a folder this user owns; leave one owned by someone else (or on a read-only disk) as it is.
+    const st = statSync(home);
+    if ((created || st.uid === process.getuid?.()) && (st.mode & 0o077) !== 0) {
+      try {
+        chmodSync(home, 0o700);
+      } catch (err) {
+        if (!['EPERM', 'EROFS', 'EACCES'].includes((err as NodeJS.ErrnoException).code ?? '')) throw err;
+      }
+    }
+    privateHomes.add(home);
+  }
   return home;
 }
 
@@ -16,6 +31,7 @@ export function expandHome(p: string): string {
 }
 
 export const paths = {
+  home: () => yardHome(),
   db: () => join(yardHome(), 'yardmaster.db'),
   logs: () => ensureDir(join(yardHome(), 'logs')),
   tmp: () => ensureDir(join(yardHome(), 'tmp')),

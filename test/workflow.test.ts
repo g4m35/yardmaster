@@ -282,6 +282,40 @@ test('merging works on a machine where git has no name or email configured', asy
   }
 });
 
+test('a second hub on the same home is refused before it touches anything, and the first keeps its agents', async () => {
+  const s = await startHub();
+  const { created } = s.add([{ title: 'Long task', prompt: '@mock sleep 60000', agent: 'mock' }]);
+  const running = await until(() => s.get(created[0]!.id), (t) => t.status === 'running', 20_000, 'task to start');
+  // The run row (and its pid) can land a moment after the task flips to running.
+  const run = await until(() => s.hub.coord.latestRun(running.id), (r) => !!r?.pid, 10_000, 'agent pid');
+  const pid = run!.pid!;
+  const second = new Hub({ db: openDb(join(s.home, 'y.db')), token: 'test-token', machineId: s.hub.machineId, port: 0, host: '127.0.0.1', includeMock: true, tickMs: 150, quiet: true });
+  await assert.rejects(second.start(), /already running/);
+  await new Promise((r) => setTimeout(r, 500));
+  assert.equal(s.get(running.id).status, 'running', 'the first hub\'s task was not recovered');
+  assert.equal(s.hub.coord.latestRun(running.id)!.id, run!.id, 'no new run was started');
+  assert.ok(isAlive(pid), 'the agent is still alive');
+  s.hub.coord.updateTask(running.id, { control: 'cancel' });
+});
+
+test('a worker can still report a failed upload on a task it owns that is already ready, but not after losing it', async () => {
+  const s = await startHub();
+  const { created } = s.add([{ title: 'Owned task', prompt: '@mock write x.txt x', agent: 'mock' }]);
+  const id = created[0]!.id;
+  s.hub.coord.updateTask(id, { status: 'ready', assignee: 'machine:m-laptop', attempts: 1 });
+  const owner = { attempt: 1, assignee: 'machine:m-laptop' };
+  assert.throws(() => s.hub.coord.updateTaskIfOwner(id, owner, { attention: 'x' }), /stale|superseded|no longer/i);
+  assert.equal(s.hub.coord.updateTaskIfOwner(id, { ...owner, statuses: ['running', 'verifying', 'ready'] }, { status: 'needs_human', attention: 'upload failed' }).status, 'needs_human');
+  s.hub.coord.updateTask(id, { status: 'running', assignee: 'machine:other', attempts: 2 });
+  assert.throws(() => s.hub.coord.updateTaskIfOwner(id, { ...owner, statuses: ['running', 'verifying', 'ready'] }, { status: 'needs_human' }));
+});
+
+test('a hub that finds another hub took over its home stops instead of running alongside it', async () => {
+  const s = await startHub();
+  writeFileSync(join(s.home, 'hub.lock'), `${process.ppid} 1\n`);
+  await until(() => s.hub.coord.eventsSince(0, null, 500).some((e) => e.kind === 'hub.lock-lost'), (x) => x, 10_000, 'lock-lost event');
+});
+
 test('spend outside a task (planning) counts toward the daily budget without skewing agent stats', async () => {
   const s = await startHub();
   const before = s.hub.coord.spentToday();

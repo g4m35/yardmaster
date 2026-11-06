@@ -18,6 +18,11 @@ export function cleanEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv 
   // Nested Claude Code sessions refuse to start when they think they are inside another session.
   delete env.CLAUDECODE;
   delete env.CLAUDE_CODE_ENTRYPOINT;
+  // The hub's admin token never reaches agents or check commands. The hub address goes too: a child that finds a hub
+  // address but no token would call that hub with this machine's own token, so children find the hub (and its token)
+  // through the owner-only files in the Yardmaster home instead.
+  delete env.YARDMASTER_TOKEN;
+  delete env.YARDMASTER_HUB;
   return { ...env, ...extra };
 }
 
