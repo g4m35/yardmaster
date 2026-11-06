@@ -40,6 +40,18 @@ export const claude: Adapter = {
     else if (ctx.settings.autonomy === 'full') args.push('--permission-mode', 'bypassPermissions');
     // Edits are auto-accepted and shell is allowed so the agent can run tests; the user's own deny rules still apply.
     else args.push('--permission-mode', 'acceptEdits', '--allowedTools', 'Bash');
+    const sandbox = ctx.settings.sandbox;
+    if (!ctx.readOnly && ctx.settings.autonomy !== 'full' && sandbox?.enabled) {
+      // Passed as CLI settings, the layer that may set a strict allowlist; your own settings files stay untouched.
+      args.push('--settings', JSON.stringify({
+        sandbox: {
+          enabled: true,
+          allowUnsandboxedCommands: false,
+          network: { allowedDomains: sandbox.allowedDomains, strictAllowlist: true },
+          ...(sandbox.allowWrite.length ? { filesystem: { allowWrite: sandbox.allowWrite } } : {}),
+        },
+      }));
+    }
     if (ctx.settings.context === 'lean') {
       // CLAUDE.md, hooks and permission rules still load; MCP servers, skills and optional tools don't.
       args.push('--strict-mcp-config');
