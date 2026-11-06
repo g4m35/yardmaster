@@ -332,6 +332,9 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
     }),
 
     'budget.today': method(z.object({}), () => coord.spentToday()),
+    'spend.record': method(z.object({ projectId: z.string().nullable(), agent: Id, model: z.string().nullable(), costUsd: z.number().min(0), tokensIn: z.number().int().min(0), tokensOut: z.number().int().min(0), role: z.enum(['plan']) }), (p) =>
+      coord.recordSpend({ ...p, machineId: hooks.machineId }),
+    ),
     'report.summary': method(z.object({ projectId: z.string().nullish(), days: z.number().min(1).max(365).default(7) }), (p) => buildReport(coord.db, { projectId: p.projectId ?? null, days: p.days })),
     'clean.plan': method(z.object({ projectId: z.string().optional() }), (p) => {
       if (!hooks.cleanPlan) throw new Error('Cleanup runs on the hub machine.');
