@@ -15,7 +15,7 @@ import { recover, planCleanup, runCleanup } from './janitor.ts';
 import { Supervisor } from './supervisor.ts';
 import { inSea, readAsset } from './assets.ts';
 import { importGraph } from './imports.ts';
-import { loadConfig, verifySlotsFor, worktreeRootOf } from './config.ts';
+import { loadConfig, newConfigWarnings, verifySlotsFor, worktreeRootOf } from './config.ts';
 import { purgeTrash } from './fastfs.ts';
 import { detectAgents } from './adapters/index.ts';
 import { hubToken, machineId, paths } from './paths.ts';
@@ -122,6 +122,7 @@ export class Hub {
     this.lastNotified = this.coord.lastEventId();
     this.coord.writeManagedRoots();
     const cfg = loadConfig();
+    this.reportConfig();
     const host = this.opts.host ?? cfg.hub.host;
     const port = this.opts.port ?? cfg.hub.port;
     this.server = createServer((req, res) => void this.handle(req, res));
@@ -187,6 +188,24 @@ export class Hub {
     }
   }
 
+  /** Config problems (a broken file, unknown settings) as warnings; never a reason not to run. */
+  private reportConfig(): void {
+    for (const p of this.coord.listProjects()) {
+      if (!existsSync(p.root)) continue;
+      try {
+        loadConfig(p.root);
+      } catch (err) {
+        const line = `${p.name}: ${(err as Error).message}`;
+        if (this.invalidConfigs.has(line)) continue;
+        this.invalidConfigs.add(line);
+        this.coord.event(p.id, null, 'warn', 'config.invalid', line);
+      }
+    }
+    for (const line of newConfigWarnings()) this.coord.event(null, null, 'warn', 'config.unknown', line);
+  }
+
+  private readonly invalidConfigs = new Set<string>();
+
   private async loop(n: number): Promise<void> {
     // Never overlap ticks: a slow git call must not start a second scheduling pass alongside the first.
     if (this.looping) {
@@ -202,6 +221,7 @@ export class Hub {
         return;
       }
       if (n % 3 === 0) await this.heartbeat();
+      if (n % 20 === 0) this.reportConfig();
       await this.worker.tick();
       // Merges (and their re-verification) run in the background so a long test run never stalls scheduling.
       for (const p of this.coord.listProjects()) if (existsSync(p.root)) void this.integrator.step(p.id);
