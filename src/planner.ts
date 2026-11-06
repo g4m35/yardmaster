@@ -51,15 +51,21 @@ export async function planGoal(goal: string, opts: { cwd: string; agent: string;
   const budget = opts.budgetUsd ?? opts.config.budget.perTaskUsd;
   const r = await runOneShot({
     agent: opts.agent, config: opts.config, prompt: planningPrompt(goal), cwd: opts.cwd, model, readOnly: true, tier: 'strong',
-    timeoutMs: 10 * 60_000, maxTurns: 40, budgetUsd: budget ?? undefined,
+    timeoutMs: 10 * 60_000, maxTurns: 40, budgetUsd: budget ?? undefined, interruptible: true,
   });
   const spend = { costUsd: r.costUsd, tokensIn: r.tokensIn, tokensOut: r.tokensOut, model };
+  if (r.interrupted) throw new PlanError('Planning was interrupted.', spend);
   if (!r.ok && !r.text) throw new PlanError(`The planner failed: ${r.error || 'it stopped without output (it may have hit the 10-minute limit)'}`, spend);
+  // The final message first (structured agents); then everything printed, for plain CLIs that print over many lines.
   let json: unknown;
   try {
     json = extractJson(r.text);
-  } catch (err) {
-    throw new PlanError((err as Error).message, spend);
+  } catch {
+    try {
+      json = extractJson(r.allText);
+    } catch (err) {
+      throw new PlanError((err as Error).message, spend);
+    }
   }
   const parsed = PlanSchema.safeParse(json);
   if (!parsed.success) throw new PlanError(`The plan was not in the expected shape: ${z.prettifyError(parsed.error)}`, spend);

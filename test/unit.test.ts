@@ -220,3 +220,19 @@ test('quick checks still run for a task that adds its own checks', () => {
   const task = { verify: ['npm run e2e'] } as Parameters<typeof taskChecks>[0];
   assert.deepEqual(taskChecks(task, config, ['a.ts']), ['eslint a.ts', 'npm run e2e']);
 });
+
+test('Ctrl-C during planning stops the planner instead of leaving it running', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ym-plan-int-'));
+  try {
+    const script = join(dir, 'slow.sh');
+    writeFile(script, 'cat > /dev/null\nsleep 30\n');
+    const config = resolveConfig([{ agents: { slowbot: { command: `sh ${script}` } } }]);
+    const started = Date.now();
+    const plan = planGoal('anything', { cwd: dir, agent: 'slowbot', config });
+    setTimeout(() => process.kill(process.pid, 'SIGINT'), 500);
+    await assert.rejects(plan, /interrupted/);
+    assert.ok(Date.now() - started < 10_000, 'it stopped right away, not after the agent finished');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
