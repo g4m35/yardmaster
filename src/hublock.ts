@@ -1,4 +1,4 @@
-import { linkSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { yardHome } from './paths.ts';
@@ -52,6 +52,24 @@ async function stillOwned(owner: Owner, file: string): Promise<boolean> {
   return now === null || Math.abs(now - owner.started) < 2000;
 }
 
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** The takeover lock: held for the moment it takes to replace a stale hub lock. A leftover one from a crash expires. */
+async function takeTakeover(file: string, mine: string): Promise<boolean> {
+  const takeover = `${file}.takeover`;
+  try {
+    linkSync(mine, takeover);
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+  }
+  const holder = readOwner(takeover);
+  const age = Date.now() - (statSync(takeover, { throwIfNoEntry: false })?.mtimeMs ?? Date.now());
+  if (age > 10_000 || (holder && !(await stillOwned(holder, takeover)) && holder.pid !== process.pid)) rmSync(takeover, { force: true });
+  return false;
+}
+
 export class HubAlreadyRunning extends Error {}
 
 /** Whether this process still holds the lock: a hub checks this as it runs and stops if another took it over. */
@@ -65,7 +83,7 @@ export async function acquireHubLock(file = join(yardHome(), 'hub.lock')): Promi
   const mine = `${file}.${process.pid}.${randomBytes(4).toString('hex')}`;
   writeFileSync(mine, `${process.pid} ${started ?? ''}\n`, { mode: 0o600 });
   try {
-    for (let attempt = 0; attempt < 5; attempt++) {
+    for (let attempt = 0; attempt < 60; attempt++) {
       try {
         linkSync(mine, file);
         held.add(file);
@@ -83,29 +101,36 @@ export async function acquireHubLock(file = join(yardHome(), 'hub.lock')): Promi
       if (!owner) {
         // Unreadable content: only a lock written by some other tool or a damaged disk. Leave a fresh one alone.
         const age = Date.now() - (statSync(file, { throwIfNoEntry: false })?.mtimeMs ?? 0);
-        if (age < 10_000) continue;
-      }
-      // Stale. Move it aside atomically; if someone else already replaced it, the next round sees theirs.
-      const aside = `${file}.stale.${randomBytes(4).toString('hex')}`;
-      try {
-        renameSync(file, aside);
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
-        throw err;
-      }
-      const moved = readOwner(aside);
-      if (moved && (await stillOwned(moved, file))) {
-        // We moved a live hub's lock: it was taken over between our check and the rename. Put it back and yield. If
-        // a third hub linked its lock in meanwhile, the live hub notices it no longer holds the lock and stops.
-        try {
-          linkSync(aside, file);
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+        if (age < 10_000) {
+          await sleep(50);
+          continue;
         }
-        rmSync(aside, { force: true });
-        throw new HubAlreadyRunning(`A Yardmaster hub is already running for ${dirname(file)} (pid ${moved.pid}).`);
       }
-      rmSync(aside, { force: true });
+      // Stale. Taking it over must never leave the lock path empty, or a third hub could link its own lock in while
+      // we look. So one takeover at a time (a second lock, held only for this), and the stale lock is replaced in a
+      // single atomic rename. Plain acquirers can't get in meanwhile: their link fails while the old file exists.
+      if (!(await takeTakeover(file, mine))) {
+        await sleep(50);
+        continue;
+      }
+      try {
+        // Released meanwhile: take it the normal way instead, so we never replace a lock someone just linked in.
+        if (!existsSync(file)) continue;
+        const again = readOwner(file);
+        if (again && (await stillOwned(again, file))) {
+          throw new HubAlreadyRunning(`A Yardmaster hub is already running for ${dirname(file)} (pid ${again.pid}).`);
+        }
+        const replacement = `${mine}.new`;
+        writeFileSync(replacement, readFileSync(mine), { mode: 0o600 });
+        renameSync(replacement, file);
+        held.add(file);
+        return () => {
+          if (!held.delete(file)) return;
+          if (readOwner(file)?.pid === process.pid) rmSync(file, { force: true });
+        };
+      } finally {
+        if (readOwner(`${file}.takeover`)?.pid === process.pid) rmSync(`${file}.takeover`, { force: true });
+      }
     }
     throw new HubAlreadyRunning(`Could not take the hub lock at ${file}: another hub kept starting at the same moment.`);
   } finally {

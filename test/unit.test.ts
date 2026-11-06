@@ -212,6 +212,12 @@ test('the hub lock lets one hub run per home, survives races, and takes over a d
     assert.equal(both.filter((r) => r.status === 'fulfilled').length, 1);
     for (const r of both) if (r.status === 'fulfilled') r.value();
 
+    // Three hubs at once over a stale lock: still exactly one winner, never two.
+    writeFile(file, '999999999 1\n');
+    const three = await Promise.allSettled([acquireHubLock(file), acquireHubLock(file), acquireHubLock(file)]);
+    assert.equal(three.filter((r) => r.status === 'fulfilled').length, 1);
+    for (const r of three) if (r.status === 'fulfilled') r.value();
+
     // The owner exited.
     writeFile(file, '999999999 1\n');
     const dead = await acquireHubLock(file);
