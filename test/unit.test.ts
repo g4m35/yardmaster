@@ -1,20 +1,22 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync as writeFile } from 'node:fs';
 import { join } from 'node:path';
 import { inferScope, matches, patternsOverlap, scopesOverlap } from '../src/scope.ts';
 import { findCycle } from '../src/graph.ts';
 import { Watchdog } from '../src/watchdog.ts';
 import { errorFingerprint, jaccard, wordSet } from '../src/text.ts';
 import { chooseAgent, escalate, inferTier } from '../src/router.ts';
-import { resolveConfig } from '../src/config.ts';
+import { resolveConfig, unknownSettings } from '../src/config.ts';
+import { spawn } from 'node:child_process';
+import { DatabaseSync } from 'node:sqlite';
+import { openDb, SCHEMA_VERSION } from '../src/db.ts';
+import { tmpdir } from 'node:os';
 import { claude, codex, opencode } from '../src/adapters/builtin.ts';
 import { taskChecks, verifyCommands } from '../src/runner.ts';
 import { planGoal } from '../src/planner.ts';
-import { mkdtempSync, rmSync, writeFileSync as writeFile } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
-import { remoteClient, rpcDeadline, RPC_TIMEOUT_MS } from '../src/rpc.ts';
+import { remoteClient, RPC_TIMEOUT_MS, rpcDeadline } from '../src/rpc.ts';
 
 const wd = { repeatThreshold: 4, oscillationCycles: 3, sameToolErrorLimit: 3, stallMinutes: 1, awaitingInputMinutes: 0.5, maxRuntimeMinutes: 10 };
 
@@ -232,6 +234,50 @@ test('Ctrl-C during planning stops the planner instead of leaving it running', a
     setTimeout(() => process.kill(process.pid, 'SIGINT'), 500);
     await assert.rejects(plan, /interrupted/);
     assert.ok(Date.now() - started < 10_000, 'it stopped right away, not after the agent finished');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('package.json and src/version.ts carry the same version (release tags must match both)', async () => {
+  const { VERSION } = await import('../src/version.ts');
+  const pkg = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8')) as { version: string };
+  assert.equal(VERSION, pkg.version);
+});
+
+test('config typos are reported with the setting that was probably meant', () => {
+  const problems = unknownSettings({ budget: { daily: 1 }, maxparallel: 9, reveiw: { mode: 'never' }, agents: { claude: { modle: 'x' } }, $schema: 'x', '// note': 'ok', retry: { escalate: true } });
+  assert.deepEqual(problems, [
+    '"budget.daily" is not a Yardmaster setting; did you mean "budget.dailyUsd"?',
+    '"maxparallel" is not a Yardmaster setting; did you mean "maxParallel"?',
+    '"reveiw" is not a Yardmaster setting; did you mean "review"?',
+    '"agents.claude.modle" is not a Yardmaster setting; did you mean "agents.claude.models"?',
+  ]);
+  assert.deepEqual(unknownSettings({ zzzzqqq: 1 }), ['"zzzzqqq" is not a Yardmaster setting']);
+  const inList = unknownSettings({ policies: [{ set: { teir: 'strong' } }] });
+  assert.equal(inList.length, 1);
+  assert.match(inList[0]!, /"policies\[0\]\.set\.teir" is not a Yardmaster setting; did you mean "policies\[0\]\.set\.tier"\?/);
+  assert.deepEqual(unknownSettings({ maxParallel: 2, budget: { dailyUsd: 5 } }), []);
+});
+
+test('many processes opening a new database at once all succeed; a newer schema is refused', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ym-db-'));
+  try {
+    const file = join(dir, 'y.db');
+    const src = join(import.meta.dirname, '..', 'src', 'db.ts');
+    const code = `import { openDb } from ${JSON.stringify(src)}; openDb(${JSON.stringify(file)}).close();`;
+    const codes = await Promise.all(Array.from({ length: 6 }, () => new Promise<number>((res) => {
+      const p = spawn(process.execPath, ['--input-type=module', '-e', code], { stdio: 'ignore' });
+      p.on('close', (c) => res(c ?? 1));
+    })));
+    assert.deepEqual(codes, [0, 0, 0, 0, 0, 0]);
+    const db = openDb(file);
+    assert.equal((db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value: string }).value, String(SCHEMA_VERSION));
+    db.close();
+    const raw = new DatabaseSync(file);
+    raw.prepare("UPDATE meta SET value = ? WHERE key = 'schema_version'").run(String(SCHEMA_VERSION + 1));
+    raw.close();
+    assert.throws(() => openDb(file), /newer Yardmaster/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

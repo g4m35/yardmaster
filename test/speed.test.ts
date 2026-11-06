@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { sandbox, sh, tempDir, until } from './helpers.ts';
+import { sandbox, settleTasks, sh, tempDir, until } from './helpers.ts';
 import { cloneTree, removeFast, removeWorktreeFast } from '../src/fastfs.ts';
 import { clonesAreFree, lockHash, warmStart } from '../src/warmstart.ts';
 import { claude, codex, CLAUDE_CODING_TOOLS } from '../src/adapters/builtin.ts';
@@ -168,7 +168,7 @@ async function startHub(projectConfig: Record<string, unknown> = {}) {
   const project = await h.coord.registerProject(box.repo);
   const add = (tasks: Parameters<Hub['coord']['addTasks']>[1]) => h.coord.addTasks(project.id, tasks, 'test').created;
   const get = (id: string) => h.coord.getTask(id)!;
-  const settle = (ids: string[], ms = 60_000) => until(() => ids.map(get), (ts) => ts.every((t) => ['done', 'needs_human', 'failed', 'canceled'].includes(t.status)), ms, 'settle');
+  const settle = (ids: string[], ms = 60_000) => settleTasks(h.coord, ids, box.root, ms) as Promise<Task[]>;
   return { box, hub: h, project, add, get, settle };
 }
 

@@ -92,25 +92,66 @@ export type Db = DatabaseSync;
 
 export function openDb(file = paths.db()): Db {
   const db = new DatabaseSync(file);
-  db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = OFF; PRAGMA synchronous = NORMAL;');
+  // The busy timeout comes first: switching to WAL needs a lock another process (a hub, a hook) may be holding.
+  db.exec('PRAGMA busy_timeout = 5000;');
+  enableWal(db);
+  db.exec('PRAGMA foreign_keys = OFF; PRAGMA synchronous = NORMAL;');
   migrate(db);
   return db;
 }
 
-function migrate(db: Db): void {
-  db.exec('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
-  const row = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value: string } | undefined;
-  let version = row ? Number(row.value) : 0;
-  while (version < MIGRATIONS.length) {
-    tx(db, () => {
-      db.exec(MIGRATIONS[version]!);
-      version++;
-      db.prepare("INSERT INTO meta(key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(String(version));
-    });
+/**
+ * WAL mode is stored in the file, so only the first opener ever switches it. SQLite answers that switch with "busy"
+ * immediately, without the busy timeout, when other connections are opening the same new file, so retry briefly.
+ */
+function enableWal(db: Db): void {
+  const pause = new Int32Array(new SharedArrayBuffer(4));
+  const deadline = Date.now() + 10_000;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      // A disk without WAL support answers with another mode; that's fine, the database just works slower.
+      db.exec('PRAGMA journal_mode = WAL');
+      return;
+    } catch (err) {
+      if (!/locked|busy/i.test((err as Error).message) || Date.now() > deadline) throw err;
+    }
+    Atomics.wait(pause, 0, 0, Math.min(200, 20 + attempt * 10));
   }
 }
 
-/** Write transaction that also serializes against other processes sharing the database file. */
+export const SCHEMA_VERSION = MIGRATIONS.length;
+
+function schemaVersion(db: Db): number {
+  const hasMeta = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'").get();
+  if (!hasMeta) return 0;
+  const row = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value: string } | undefined;
+  return row ? Number(row.value) : 0;
+}
+
+function newerSchema(version: number): Error {
+  return new Error(`This database was upgraded by a newer Yardmaster (schema ${version}; this version knows ${SCHEMA_VERSION}). Update Yardmaster, or point YARDMASTER_HOME at another folder.`);
+}
+
+/**
+ * Brings the schema up to date. Hubs, workers, the CLI and hooks often open the database at the same moment (first
+ * run, or right after an upgrade), so the version is re-read inside the write lock and only one of them migrates.
+ */
+function migrate(db: Db): void {
+  const seen = schemaVersion(db);
+  if (seen > SCHEMA_VERSION) throw newerSchema(seen);
+  if (seen === SCHEMA_VERSION) return;
+  tx(db, () => {
+    db.exec('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+    let version = schemaVersion(db);
+    if (version > SCHEMA_VERSION) throw newerSchema(version);
+    while (version < SCHEMA_VERSION) {
+      db.exec(MIGRATIONS[version]!);
+      version++;
+    }
+    db.prepare("INSERT INTO meta(key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(String(version));
+  });
+}
+
 export function tx<T>(db: Db, fn: () => T): T {
   if (db.isTransaction) return fn();
   db.exec('BEGIN IMMEDIATE');
