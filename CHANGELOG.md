@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- Codex spend: reasoning tokens were counted twice (Codex's output count already includes them), and default prices were from an older model. Codex now defaults to GPT-6.1 Sol prices, and its cheap tier uses GPT-6 Luna ($0.10 / $0.50 per million tokens).
+- Reviews leave lockfiles out of the size that triggers a review and out of the diff the reviewer reads, so a dependency bump no longer costs a 15k-token review.
+- Background Claude runs no longer load web search and fetch, which unattended coding doesn't need.
 - Hub calls time out (60 s; `task.wait` gets its own wait plus 15 s), and worker bundle transfers stop after 10 minutes, so a hub that stops answering can't hang the CLI, a worker or an MCP call forever.
 - Tests: a test file left with open handles is ended instead of holding the CI job; test jobs stop after 10 minutes.
 

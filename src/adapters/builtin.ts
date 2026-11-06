@@ -21,7 +21,7 @@ function effortFor(ctx: AdapterContext): string | null {
  * subagents and their catalog) is most of the lean saving: measured on Claude Code 2.1, about 61k tokens of starting
  * context per turn becomes about 14k.
  */
-export const CLAUDE_CODING_TOOLS = ['Bash', 'Read', 'Edit', 'Write', 'NotebookEdit', 'LSP', 'WebFetch', 'WebSearch'];
+export const CLAUDE_CODING_TOOLS = ['Bash', 'Read', 'Edit', 'Write', 'NotebookEdit', 'LSP'];
 const CLAUDE_READ_TOOLS = ['Bash', 'Read', 'LSP'];
 
 export const claude: Adapter = {
@@ -143,7 +143,7 @@ export const codex: Adapter = {
       case 'turn.completed': {
         const u = obj(j.usage);
         const cached = num(u.cached_input_tokens);
-        return [{ type: 'usage', tokensIn: Math.max(0, num(u.input_tokens) - cached), cachedIn: cached, tokensOut: num(u.output_tokens) + num(u.reasoning_output_tokens), cumulative: false }];
+        return [{ type: 'usage', tokensIn: Math.max(0, num(u.input_tokens) - cached), cachedIn: cached, tokensOut: num(u.output_tokens), cumulative: false }];
       }
       case 'turn.failed':
         return [{ type: 'error', text: str(obj(j.error).message) || 'turn failed' }];

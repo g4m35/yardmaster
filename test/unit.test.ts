@@ -13,6 +13,11 @@ import { spawn } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { openDb, SCHEMA_VERSION } from '../src/db.ts';
 import { claude, codex, opencode } from '../src/adapters/builtin.ts';
+import { changedLineCount } from '../src/review.ts';
+import { priceFor } from '../src/config.ts';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync as mkdtemp, rmSync as rmrf, writeFileSync as write } from 'node:fs';
+import { tmpdir as tmp } from 'node:os';
 import { taskChecks, verifyCommands } from '../src/runner.ts';
 import { planGoal } from '../src/planner.ts';
 import { createServer } from 'node:http';
@@ -344,5 +349,27 @@ test('agents never get the hub token; method names come only from the API; the h
     if (before === undefined) delete process.env.YARDMASTER_HOME;
     else process.env.YARDMASTER_HOME = before;
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Codex output tokens already include reasoning, so reasoning is not added again', () => {
+  const [ev] = codex.parse(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1000, cached_input_tokens: 800, output_tokens: 300, reasoning_output_tokens: 120 } }));
+  assert.deepEqual(ev, { type: 'usage', tokensIn: 200, cachedIn: 800, tokensOut: 300, cumulative: false });
+  const config = resolveConfig([{}]);
+  assert.equal(priceFor(config, 'codex', 'gpt-6-luna').inPerM, 0.1, 'the cheap Codex model has its own price');
+  assert.equal(priceFor(config, 'codex', null).outPerM, 10);
+});
+
+test('lockfile churn does not make a change "large" for review', () => {
+  const dir = mkdtemp(join(tmp(), 'ym-review-'));
+  try {
+    const sh = (...a: string[]) => execFileSync('git', a, { cwd: dir, stdio: 'pipe' });
+    sh('init', '-q', '-b', 'main'); sh('config', 'user.email', 't@e.com'); sh('config', 'user.name', 'T');
+    write(join(dir, 'a.js'), 'x\n'); sh('add', '-A'); sh('commit', '-qm', 'base');
+    write(join(dir, 'package-lock.json'), Array.from({ length: 5000 }, (_, i) => `"line${i}"`).join('\n'));
+    write(join(dir, 'a.js'), 'x\ny\n'); sh('add', '-A'); sh('commit', '-qm', 'bump');
+    return changedLineCount(dir, 'HEAD~1').then((n) => assert.equal(n, 1));
+  } finally {
+    setTimeout(() => rmrf(dir, { recursive: true, force: true }), 2000).unref();
   }
 });
