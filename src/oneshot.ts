@@ -51,7 +51,7 @@ export async function runOneShot(opts: {
       if (ev.type === 'result') {
         result = ev.text;
         ok = ev.ok;
-      } else if (ev.type === 'text') lastText = ev.text;
+      } else if (ev.type === 'text') lastText = lastText ? `${lastText}\n${ev.text}` : ev.text;
       else if (ev.type === 'usage') meter.add(ev);
     }
   });

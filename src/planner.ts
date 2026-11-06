@@ -32,9 +32,18 @@ export function extractJson(text: string): unknown {
   return JSON.parse(candidate.slice(start, end + 1));
 }
 
+/** Planning failed after spending something: the spend still has to be counted. */
+export class PlanError extends Error {
+  readonly spend: { costUsd: number; tokensIn: number; tokensOut: number; model: string | null };
+  constructor(message: string, spend: PlanError['spend']) {
+    super(message);
+    this.spend = spend;
+  }
+}
+
 /**
- * Uses one read-only agent run to turn a plain-language goal into a task graph. Capped like every other run: at most
- * 10 minutes, 40 turns and the per-task budget (or what's left of today's), so a confused planner can't run up a bill.
+ * Uses one read-only agent run to turn a plain-language goal into a task graph. Always stopped after 10 minutes;
+ * agents whose CLI supports it (Claude Code) are also held to 40 turns and the given dollar budget.
  */
 export async function planGoal(goal: string, opts: { cwd: string; agent: string; config: Config; budgetUsd?: number | null }): Promise<{ tasks: NewTask[]; costUsd: number; tokensIn: number; tokensOut: number; model: string | null }> {
   if (!getAdapter(opts.agent, opts.config)) throw new Error(`Unknown agent ${opts.agent}`);
@@ -44,8 +53,15 @@ export async function planGoal(goal: string, opts: { cwd: string; agent: string;
     agent: opts.agent, config: opts.config, prompt: planningPrompt(goal), cwd: opts.cwd, model, readOnly: true, tier: 'strong',
     timeoutMs: 10 * 60_000, maxTurns: 40, budgetUsd: budget ?? undefined,
   });
-  if (!r.ok && !r.text) throw new Error(`The planner failed: ${r.error || 'no output'}`);
-  const parsed = PlanSchema.safeParse(extractJson(r.text));
-  if (!parsed.success) throw new Error(`The plan was not in the expected shape: ${z.prettifyError(parsed.error)}`);
+  const spend = { costUsd: r.costUsd, tokensIn: r.tokensIn, tokensOut: r.tokensOut, model };
+  if (!r.ok && !r.text) throw new PlanError(`The planner failed: ${r.error || 'it stopped without output (it may have hit the 10-minute limit)'}`, spend);
+  let json: unknown;
+  try {
+    json = extractJson(r.text);
+  } catch (err) {
+    throw new PlanError((err as Error).message, spend);
+  }
+  const parsed = PlanSchema.safeParse(json);
+  if (!parsed.success) throw new PlanError(`The plan was not in the expected shape: ${z.prettifyError(parsed.error)}`, spend);
   return { tasks: parsed.data.tasks, costUsd: r.costUsd, tokensIn: r.tokensIn, tokensOut: r.tokensOut, model };
 }

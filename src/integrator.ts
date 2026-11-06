@@ -231,7 +231,7 @@ export class Integrator {
       return this.onConflict(project, task, config, files);
     }
     // Quick per-task checks mean the full suite hasn't run on this change yet, so run it now.
-    const baseMoved = !task.base_sha || task.base_sha !== before || (!task.verify && config.verifyQuick.length > 0);
+    const baseMoved = !task.base_sha || task.base_sha !== before || config.verifyQuick.length > 0;
     const commands = verifyCommands(task, config);
     if (baseMoved && commands.length) {
       this.coord.event(project.id, task.id, 'info', 'integration.reverify', `Re-checking "${task.title}" combined with work merged since it started`);

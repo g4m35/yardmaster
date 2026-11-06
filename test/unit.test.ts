@@ -9,7 +9,10 @@ import { errorFingerprint, jaccard, wordSet } from '../src/text.ts';
 import { chooseAgent, escalate, inferTier } from '../src/router.ts';
 import { resolveConfig } from '../src/config.ts';
 import { claude, codex, opencode } from '../src/adapters/builtin.ts';
-import { verifyCommands } from '../src/runner.ts';
+import { taskChecks, verifyCommands } from '../src/runner.ts';
+import { planGoal } from '../src/planner.ts';
+import { mkdtempSync, rmSync, writeFileSync as writeFile } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
 import { remoteClient, rpcDeadline, RPC_TIMEOUT_MS } from '../src/rpc.ts';
 
@@ -196,4 +199,24 @@ test("a task's own checks run in addition to the project's, never instead of the
   assert.deepEqual(verifyCommands({ verify: ['true'] }, { verify: ['npm test'] }), ['npm test', 'true']);
   assert.deepEqual(verifyCommands({ verify: ['npm test', 'npm run e2e'] }, { verify: ['npm test'] }), ['npm test', 'npm run e2e']);
   assert.ok(resolveConfig([{}]).hotFiles.includes('yardmaster.json'), 'changes to the checks themselves always get a review');
+});
+
+test('a plan printed over many lines by a plain CLI agent is read whole', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ym-plan-'));
+  try {
+    const script = join(dir, 'plan.sh');
+    writeFile(script, `cat > /dev/null\nprintf '{\\n  "tasks": [\\n    {"key": "a", "title": "Add the CSV export", "prompt": "Add CSV export to reports", "files": ["src/report.ts"]}\\n  ]\\n}\\n'\n`);
+    const config = resolveConfig([{ agents: { planbot: { command: `sh ${script}` } } }]);
+    const plan = await planGoal('add csv export', { cwd: dir, agent: 'planbot', config });
+    assert.equal(plan.tasks.length, 1);
+    assert.equal(plan.tasks[0]!.title, 'Add the CSV export');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('quick checks still run for a task that adds its own checks', () => {
+  const config = resolveConfig([{ verify: ['npm test'], verifyQuick: ['eslint {files}'] }]);
+  const task = { verify: ['npm run e2e'] } as Parameters<typeof taskChecks>[0];
+  assert.deepEqual(taskChecks(task, config, ['a.ts']), ['eslint a.ts', 'npm run e2e']);
 });

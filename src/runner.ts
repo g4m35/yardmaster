@@ -90,9 +90,10 @@ function shellQuote(s: string): string {
 /** The checks a task runs on itself: quick, change-scoped ones when configured, otherwise the full list. */
 export function taskChecks(task: Task, config: Config, files: string[]): string[] {
   // Quick checks are only safe when the full suite runs later, at merge time.
-  if (task.verify || !config.verifyQuick.length || config.integration.mode === 'none') return verifyCommands(task, config);
+  if (!config.verifyQuick.length || config.integration.mode === 'none') return verifyCommands(task, config);
   const list = files.map(shellQuote).join(' ');
-  return config.verifyQuick.filter((c) => !c.includes('{files}') || files.length).map((c) => c.replaceAll('{files}', list));
+  const quick = config.verifyQuick.filter((c) => !c.includes('{files}') || files.length).map((c) => c.replaceAll('{files}', list));
+  return [...quick, ...(task.verify ?? []).filter((c) => !quick.includes(c))];
 }
 
 /**
@@ -105,7 +106,7 @@ export function taskChecks(task: Task, config: Config, files: string[]): string[
  * and floods its context with test output, and Yardmaster runs the checks again anyway.
  */
 function doneMeans(task: Task, config: Config): string {
-  const quick = !task.verify && config.verifyQuick.length && config.integration.mode !== 'none';
+  const quick = config.verifyQuick.length && config.integration.mode !== 'none';
   if (quick) {
     const cmds = config.verifyQuick.map((c) => `\`${c.replaceAll('{files}', '<the files you changed>')}\``).join(', ');
     return `## Done means\nThese pass for your changes: ${cmds}. The full suite runs once at merge time, so you don't need to run all of it.`;
