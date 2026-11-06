@@ -7,7 +7,7 @@ import { inferScope, matches, patternsOverlap, scopesOverlap } from '../src/scop
 import { findCycle } from '../src/graph.ts';
 import { Watchdog } from '../src/watchdog.ts';
 import { errorFingerprint, jaccard, wordSet } from '../src/text.ts';
-import { chooseAgent, escalate, inferTier } from '../src/router.ts';
+import { chooseAgent, escalate, inferTier, isSmallCheckedTask } from '../src/router.ts';
 import { resolveConfig, unknownSettings } from '../src/config.ts';
 import { spawn } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
@@ -329,6 +329,16 @@ test('many processes opening a new database at once all succeed; a newer schema 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('small tasks with checks start cheap; broad, unchecked or long ones do not', () => {
+  assert.equal(isSmallCheckedTask(['src/a.ts'], 'Fix the off-by-one in the pager', true), true);
+  assert.equal(isSmallCheckedTask(['src/a.ts', 'src/b.ts', 'test/a.test.ts'], 'Add a flag', true), true);
+  assert.equal(isSmallCheckedTask(['src/a.ts'], 'Fix it', false), false, 'without checks a cheap model has no safety net');
+  assert.equal(isSmallCheckedTask(['src/**'], 'Fix it', true), false, 'a whole tree is not small');
+  assert.equal(isSmallCheckedTask(['a', 'b', 'c', 'd'], 'Fix it', true), false);
+  assert.equal(isSmallCheckedTask([], 'Fix it', true), false, 'unknown scope is not small');
+  assert.equal(isSmallCheckedTask(['src/a.ts'], 'x'.repeat(601), true), false);
 });
 
 test('agents never get the hub token; method names come only from the API; the home folder is private', async () => {
