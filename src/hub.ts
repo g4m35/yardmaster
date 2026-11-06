@@ -19,6 +19,7 @@ import { loadConfig, verifySlotsFor, worktreeRootOf } from './config.ts';
 import { purgeTrash } from './fastfs.ts';
 import { detectAgents } from './adapters/index.ts';
 import { hubToken, machineId, paths } from './paths.ts';
+import { acquireHubLock } from './hublock.ts';
 import { git, revParse } from './git.ts';
 import { loadPlugins, type LoadedPlugins } from './plugins.ts';
 import { notify } from './notify.ts';
@@ -94,16 +95,26 @@ export class Hub {
     });
   }
 
+  private releaseLock: () => void = () => undefined;
+
   async start(): Promise<string> {
+    // Before anything else: a second hub on this home would treat the first one's agents as orphans.
+    this.releaseLock = await acquireHubLock();
+    try {
+      return await this.startLocked();
+    } catch (err) {
+      await new Promise<void>((r) => (this.server?.listening ? this.server.close(() => r()) : r()));
+      this.releaseLock();
+      throw err;
+    }
+  }
+
+  private async startLocked(): Promise<string> {
     this.plugins = await loadPlugins();
     for (const e of this.plugins.errors) this.coord.event(null, null, 'warn', 'plugin.error', `Plugin in ${e.dir} failed to load: ${e.error}`);
     this.lastNotified = this.coord.lastEventId();
     this.coord.writeManagedRoots();
-    this.coord.onChange = () => this.kick();
-    await recover(this.coord, this.machineId, new Set(), { startup: true });
     const cfg = loadConfig();
-    // Deletes a previous run didn't get to finish (it was killed, or the machine slept).
-    purgeTrash(join(worktreeRootOf(cfg), '.trash'));
     const host = this.opts.host ?? cfg.hub.host;
     const port = this.opts.port ?? cfg.hub.port;
     this.server = createServer((req, res) => void this.handle(req, res));
@@ -111,6 +122,12 @@ export class Hub {
       this.server!.once('error', reject);
       this.server!.listen(port, host, () => resolve());
     });
+    // Only once this hub is sure to run: recovery restarts work a previous hub left behind. Scheduling starts after
+    // it, so a requeued task never gets a new agent while the old one is still exiting.
+    await recover(this.coord, this.machineId, new Set(), { startup: true });
+    // Deletes a previous run didn't get to finish (it was killed, or the machine slept).
+    purgeTrash(join(worktreeRootOf(cfg), '.trash'));
+    this.coord.onChange = () => this.kick();
     const addr = this.server.address();
     const actualPort = typeof addr === 'object' && addr ? addr.port : port;
     this.url = `http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${actualPort}`;
@@ -244,6 +261,7 @@ export class Hub {
     this.worker.stopAll('shutdown', 'Yardmaster is shutting down');
     await this.worker.drain();
     await new Promise<void>((r) => (this.server ? this.server.close(() => r()) : r()));
+    this.releaseLock();
   }
 
   // ---------------- HTTP ----------------

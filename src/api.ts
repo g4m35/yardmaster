@@ -31,7 +31,9 @@ const Id = z.string().min(1);
 /** Ids that end up in file paths must be plain. */
 const TaskId = z.string().regex(/^t-[a-z0-9]+$/, 'not a task id');
 const RunId = z.string().regex(/^r-[a-z0-9]+$/, 'not a run id');
-const Owner = z.object({ attempt: z.number().int(), assignee: z.string() });
+// statuses: which states the owner may still update from (default running/verifying). A remote worker reporting a
+// failed upload does so from "ready".
+const Owner = z.object({ attempt: z.number().int(), assignee: z.string(), statuses: z.array(z.enum(['running', 'verifying', 'ready'])).optional() });
 const StatusList = z.array(z.enum(TASK_STATUSES)).optional();
 
 function method<S extends z.ZodType, R>(schema: S, fn: (p: z.infer<S>) => R | Promise<R>) {
@@ -349,7 +351,8 @@ export type Client = {
 };
 
 export async function dispatch(methods: Methods, name: string, params: unknown): Promise<unknown> {
-  const m = (methods as Record<string, { schema: z.ZodType; fn: (p: unknown) => unknown }>)[name];
+  // Own properties only: names such as "constructor" exist on every object.
+  const m = Object.hasOwn(methods, name) ? (methods as Record<string, { schema: z.ZodType; fn: (p: unknown) => unknown }>)[name] : undefined;
   if (!m) throw new Error(`Unknown method ${name}`);
   const parsed = m.schema.safeParse(params ?? {});
   if (!parsed.success) throw new Error(`Invalid input for ${name}: ${z.prettifyError(parsed.error)}`);
