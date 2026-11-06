@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { Client as McpClient } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
-import { sandbox, sh, tempDir, until } from './helpers.ts';
+import { sandbox, settleTasks, sh, tempDir, until } from './helpers.ts';
 import { Hub } from '../src/hub.ts';
 import { openDb } from '../src/db.ts';
 import { remoteClient } from '../src/api.ts';
@@ -38,7 +38,7 @@ async function startHub(globalConfig: Record<string, unknown> = {}, projectConfi
   const h = hub;
   const add = (tasks: Parameters<Hub['coord']['addTasks']>[1]) => h.coord.addTasks(project.id, tasks, 'test').created;
   const get = (id: string) => h.coord.getTask(id)!;
-  const settle = (ids: string[], ms = 40_000) => until(() => ids.map(get), (ts) => ts.every((t) => ['done', 'needs_human', 'failed', 'canceled'].includes(t.status)), ms, 'settle');
+  const settle = (ids: string[], ms = 40_000) => settleTasks(h.coord, ids, box.root, ms) as Promise<Task[]>;
   const onIntegration = (path: string) => {
     try {
       return sh(box.repo, 'git', ['show', `yardmaster/integration:${path}`]);

@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, mkdirSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -73,5 +74,31 @@ export async function until<T>(fn: () => T | Promise<T>, pred: (v: T) => boolean
     if (pred(last)) return last;
     if (Date.now() > deadline) throw new Error(`Timed out waiting for ${label}. Last value: ${JSON.stringify(last, null, 1).slice(0, 1500)}`);
     await new Promise((r) => setTimeout(r, 150));
+  }
+}
+
+/**
+ * Waits for tasks to finish; if they don't, the error says where each one stopped (status, events, its latest run)
+ * and which processes under the test's folder are still running. Rare stalls on busy CI machines are otherwise
+ * impossible to diagnose from a JSON dump of the first task.
+ */
+export async function settleTasks(
+  coord: { getTask(id: string): { status: string; title: string } | null | undefined; eventsSince(after: number, projectId?: string | null, limit?: number, taskId?: string | null): { kind: string; message: string }[]; latestRun(id: string): unknown },
+  ids: string[],
+  root: string,
+  timeoutMs = 40_000,
+) {
+  const done = ['done', 'needs_human', 'failed', 'canceled'];
+  try {
+    return await until(() => ids.map((id) => coord.getTask(id)!), (ts) => ts.every((t) => done.includes(t.status)), timeoutMs, 'tasks to settle');
+  } catch (err) {
+    const lines = ids.map((id) => {
+      const t = coord.getTask(id);
+      const trail = coord.eventsSince(0, null, 40, id).map((e) => `    ${e.kind}: ${e.message.slice(0, 200)}`).join('\n');
+      return `${id} "${t?.title}" ${t?.status}\n${trail}\n    run: ${JSON.stringify(coord.latestRun(id) ?? null).slice(0, 400)}`;
+    });
+    const ps = spawnSync('ps', ['-A', '-o', 'pid=,ppid=,etime=,command='], { encoding: 'utf8' }).stdout
+      .split('\n').filter((l) => l.includes(root)).join('\n');
+    throw new Error(`${(err as Error).message.split('.')[0]}.\n${lines.join('\n')}\nProcesses under the test folder:\n${ps || '(none)'}`);
   }
 }

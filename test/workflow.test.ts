@@ -2,7 +2,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { sandbox, sh, tempDir, until } from './helpers.ts';
+import { sandbox, settleTasks, sh, tempDir, until } from './helpers.ts';
 import { Hub } from '../src/hub.ts';
 import { openDb } from '../src/db.ts';
 import { planCleanup, runCleanup } from '../src/janitor.ts';
@@ -33,8 +33,7 @@ async function startHub(globalConfig: Record<string, unknown> = {}, projectConfi
   const project = await hub.coord.registerProject(box.repo);
   const add = (tasks: Parameters<Hub['coord']['addTasks']>[1]) => hub.coord.addTasks(project.id, tasks, 'test');
   const get = (id: string) => hub.coord.getTask(id)!;
-  const settle = (ids: string[], timeout = 40_000) =>
-    until(() => ids.map(get), (ts) => ts.every((t) => ['done', 'needs_human', 'failed', 'canceled'].includes(t.status)), timeout, `tasks ${ids.join(',')} to settle`);
+  const settle = (ids: string[], timeout = 40_000) => settleTasks(hub.coord, ids, box.root, timeout) as Promise<Task[]>;
   return { ...box, hub, project, add, get, settle };
 }
 
@@ -275,4 +274,15 @@ test('merging works on a machine where git has no name or email configured', asy
     if (prev.n === undefined) delete process.env.GIT_CONFIG_NOSYSTEM;
     else process.env.GIT_CONFIG_NOSYSTEM = prev.n;
   }
+});
+
+test('a broken project config is reported but never stops the hub from starting', async () => {
+  const s = await startHub();
+  await s.hub.stop();
+  hubs.length = 0;
+  writeFileSync(join(s.repo, 'yardmaster.json'), '{ "verify": [ broken');
+  const again = new Hub({ db: openDb(join(s.home, 'y.db')), token: 'test-token', machineId: `m-hub-${Date.now()}`, port: 0, host: '127.0.0.1', includeMock: true, tickMs: 150, quiet: true });
+  hubs.push(again);
+  await again.start();
+  assert.ok(again.coord.eventsSince(0, null, 500).some((e) => e.kind === 'config.invalid'));
 });
