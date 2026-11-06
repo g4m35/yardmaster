@@ -13,6 +13,8 @@ Every release goes out two ways:
 2. Merge to `main` through a pull request (main only accepts pull requests whose `done` check passed), then tag: `git tag v0.3.0 && git push origin v0.3.0`.
 3. The **release** workflow builds the binaries on macOS and Linux, smoke-tests them, attaches them with `install.sh` to a GitHub release, and publishes to npm if the token is set.
 
+The workflow checks the tag first and stops before building anything if the tag doesn't look like `v1.2.3`, doesn't match `package.json` and `src/version.ts`, or points at a commit that isn't on `main`. Tags are protected, so a wrong tag can't be deleted and would burn its version number. A pre-release tag such as `v1.2.3-rc.1` makes a GitHub pre-release that never becomes "latest" (so `install.sh` keeps serving the stable one) and publishes to npm under the `next` tag. npm publishes only after the GitHub release succeeds. If a run fails after creating a draft release, re-running it finishes that draft; a published release is never changed.
+
 ## Turn on npm publishing (one time)
 
 1. Create a free account at npmjs.com (no organization needed; the package is the unscoped `yardmaster`) and turn on two-factor authentication.

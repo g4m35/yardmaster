@@ -189,3 +189,9 @@ test('hub calls give up when the hub stops answering; task.wait gets its own wai
     server.close();
   }
 });
+
+test('package.json and src/version.ts carry the same version (release tags must match both)', async () => {
+  const { VERSION } = await import('../src/version.ts');
+  const pkg = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8')) as { version: string };
+  assert.equal(VERSION, pkg.version);
+});
