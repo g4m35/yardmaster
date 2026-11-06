@@ -9,6 +9,7 @@ import { errorFingerprint, jaccard, wordSet } from '../src/text.ts';
 import { chooseAgent, escalate, inferTier } from '../src/router.ts';
 import { resolveConfig } from '../src/config.ts';
 import { claude, codex, opencode } from '../src/adapters/builtin.ts';
+import { verifyCommands } from '../src/runner.ts';
 import { createServer } from 'node:http';
 import { remoteClient, rpcDeadline, RPC_TIMEOUT_MS } from '../src/rpc.ts';
 
@@ -188,4 +189,11 @@ test('hub calls give up when the hub stops answering; task.wait gets its own wai
     server.closeAllConnections();
     server.close();
   }
+});
+
+test("a task's own checks run in addition to the project's, never instead of them", () => {
+  assert.deepEqual(verifyCommands({ verify: null }, { verify: ['npm test'] }), ['npm test']);
+  assert.deepEqual(verifyCommands({ verify: ['true'] }, { verify: ['npm test'] }), ['npm test', 'true']);
+  assert.deepEqual(verifyCommands({ verify: ['npm test', 'npm run e2e'] }, { verify: ['npm test'] }), ['npm test', 'npm run e2e']);
+  assert.ok(resolveConfig([{}]).hotFiles.includes('yardmaster.json'), 'changes to the checks themselves always get a review');
 });

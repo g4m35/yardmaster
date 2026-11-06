@@ -250,9 +250,17 @@ async function cmdPlan(a: Args) {
   const root = (await mainRepoRoot(process.cwd())) ?? die('Run inside a git repository.');
   const config = loadConfig(root);
   const agent = flag(a, 'agent') ?? detectAgents(config)[0] ?? die('No coding agent installed to plan with.');
-  console.log(dim(`Asking ${getAdapter(agent, config)?.label ?? agent} to plan (read-only)...`));
-  const { tasks, costUsd } = await planGoal(goal, { cwd: root, agent, config });
-  console.log(bold(`\nPlan (${tasks.length} tasks${costUsd !== null ? `, planning cost ${formatUsd(costUsd)}` : ''}):`));
+  const client = await getClient(a);
+  const daily = config.budget.dailyUsd;
+  const spent = await client['budget.today']({});
+  if (daily !== null && spent >= daily) die(`Today's budget is used up (${formatUsd(spent)} of ${formatUsd(daily)}). Raise budget.dailyUsd or plan tomorrow.`);
+  const budgetUsd = Math.min(config.budget.perTaskUsd ?? Infinity, daily !== null ? daily - spent : Infinity);
+  console.log(dim(`Asking ${getAdapter(agent, config)?.label ?? agent} to plan (read-only, up to ${formatUsd(budgetUsd)})...`));
+  const plan = await planGoal(goal, { cwd: root, agent, config, budgetUsd: Number.isFinite(budgetUsd) ? budgetUsd : null });
+  const { tasks, costUsd } = plan;
+  const project = await currentProject(client, root).catch(() => null);
+  await client['spend.record']({ projectId: project?.id ?? null, agent, model: plan.model, costUsd, tokensIn: plan.tokensIn, tokensOut: plan.tokensOut, role: 'plan' });
+  console.log(bold(`\nPlan (${tasks.length} tasks, planning cost ${formatUsd(costUsd)}):`));
   for (const t of tasks) console.log(`  ${cyan(t.key ?? '-')} ${t.title} ${dim(`[${t.tier ?? 'auto'}${t.files?.length ? `; ${t.files.join(', ')}` : ''}${t.after?.length ? `; after ${t.after.join(', ')}` : ''}]`)}`);
   let go = Boolean(a.flags.yes);
   if (!go && process.stdin.isTTY) {
@@ -261,9 +269,9 @@ async function cmdPlan(a: Args) {
     rl.close();
   }
   if (!go) return console.log(dim('Nothing queued. Re-run with --yes to queue.'));
-  const client = await getClient(a, { needHub: true });
-  const project = await currentProject(client, root);
-  const res = await client['task.add']({ projectId: project.id, tasks, createdBy: `plan:${agent}` });
+  const hubClient = await getClient(a, { needHub: true });
+  const target = await currentProject(hubClient, root);
+  const res = await hubClient['task.add']({ projectId: target.id, tasks, createdBy: `plan:${agent}` });
   console.log(green(`✔ Queued ${res.created.length} task(s).`) + (res.duplicates.length ? yellow(` Skipped ${res.duplicates.length} duplicate(s).`) : ''));
 }
 

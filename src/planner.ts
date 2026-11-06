@@ -1,9 +1,7 @@
-import { spawn } from 'node:child_process';
-import { createInterface } from 'node:readline';
 import * as z from 'zod/v4';
 import { getAdapter } from './adapters/index.ts';
 import { agentSettings, type Config } from './config.ts';
-import { cleanEnv } from './proc.ts';
+import { runOneShot } from './oneshot.ts';
 import { NewTaskSchema, type NewTask } from './types.ts';
 
 const PlanSchema = z.object({ tasks: z.array(NewTaskSchema).min(1).max(30) });
@@ -34,30 +32,20 @@ export function extractJson(text: string): unknown {
   return JSON.parse(candidate.slice(start, end + 1));
 }
 
-/** Uses one read-only agent run to turn a plain-language goal into a task graph. */
-export async function planGoal(goal: string, opts: { cwd: string; agent: string; config: Config }): Promise<{ tasks: NewTask[]; costUsd: number | null }> {
-  const adapter = getAdapter(opts.agent, opts.config);
-  if (!adapter) throw new Error(`Unknown agent ${opts.agent}`);
-  const settings = agentSettings(opts.config, opts.agent);
-  const spec = adapter.build({ prompt: planningPrompt(goal), cwd: opts.cwd, model: settings.models.strong ?? null, settings, readOnly: true });
-  const child = spawn(spec.command, spec.args, { cwd: opts.cwd, env: cleanEnv(spec.env), stdio: [spec.stdin !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
-  if (spec.stdin !== undefined) child.stdin?.end(spec.stdin);
-  let result = '';
-  let lastText = '';
-  let cost: number | null = null;
-  let stderr = '';
-  child.stderr?.on('data', (d) => (stderr += d));
-  const rl = createInterface({ input: child.stdout! });
-  rl.on('line', (line) => {
-    for (const ev of adapter.parse(line)) {
-      if (ev.type === 'result') result = ev.text;
-      if (ev.type === 'text') lastText += ev.text + '\n';
-      if (ev.type === 'usage' && ev.cumulative && ev.costUsd !== undefined) cost = ev.costUsd;
-    }
+/**
+ * Uses one read-only agent run to turn a plain-language goal into a task graph. Capped like every other run: at most
+ * 10 minutes, 40 turns and the per-task budget (or what's left of today's), so a confused planner can't run up a bill.
+ */
+export async function planGoal(goal: string, opts: { cwd: string; agent: string; config: Config; budgetUsd?: number | null }): Promise<{ tasks: NewTask[]; costUsd: number; tokensIn: number; tokensOut: number; model: string | null }> {
+  if (!getAdapter(opts.agent, opts.config)) throw new Error(`Unknown agent ${opts.agent}`);
+  const model = agentSettings(opts.config, opts.agent).models.strong ?? null;
+  const budget = opts.budgetUsd ?? opts.config.budget.perTaskUsd;
+  const r = await runOneShot({
+    agent: opts.agent, config: opts.config, prompt: planningPrompt(goal), cwd: opts.cwd, model, readOnly: true, tier: 'strong',
+    timeoutMs: 10 * 60_000, maxTurns: 40, budgetUsd: budget ?? undefined,
   });
-  const code = await new Promise<number>((r) => child.on('close', (c) => r(c ?? 1)));
-  if (code !== 0 && !result && !lastText) throw new Error(`${adapter.label} failed to plan: ${stderr.trim().slice(-400)}`);
-  const parsed = PlanSchema.safeParse(extractJson(result || lastText));
+  if (!r.ok && !r.text) throw new Error(`The planner failed: ${r.error || 'no output'}`);
+  const parsed = PlanSchema.safeParse(extractJson(r.text));
   if (!parsed.success) throw new Error(`The plan was not in the expected shape: ${z.prettifyError(parsed.error)}`);
-  return { tasks: parsed.data.tasks, costUsd: cost };
+  return { tasks: parsed.data.tasks, costUsd: r.costUsd, tokensIn: r.tokensIn, tokensOut: r.tokensOut, model };
 }
