@@ -26,7 +26,7 @@ are different things, and the costs are well documented:
 
 | Layer | What it does | Cost to the agent |
 |---|---|---|
-| **Hooks** (`ym connect --with-hooks`) | Session-start briefing (board + the repo's most useful lessons, re-sent after compaction). Before each prompt: only what changed on the board, and nothing if nothing did. After each edit: the file is reserved for this session automatically. Before each edit: blocked only if another agent holds the file. | Zero tool calls. A few hundred tokens at session start; usually nothing per prompt. |
+| **Hooks** (`ym connect`; `--no-hooks` to skip) | Session-start briefing (board + the repo's most useful lessons, re-sent after compaction). Before each prompt: only what changed on the board, and nothing if nothing did. After each edit: the file is reserved for this session automatically. Before each edit: blocked only if another agent holds the file. | Zero tool calls. A few hundred tokens at session start; usually nothing per prompt. |
 | **Skill** (`skills/yardmaster/SKILL.md`, installed by `ym connect`) | Teaches when to fan out, how to write good task briefs with file scopes, and when to record lessons. | ~60 tokens until the agent needs it. |
 | **MCP** (`ym mcp`) | Explicit actions: queue tasks with scopes and order, wait (long-poll, not polling), reserve files, steer and learn. 13 coarse tools with short text replies. For clients that load every definition, `YARDMASTER_MCP_PROFILE=minimal` exposes one `yard` tool instead. | One round trip per action; outputs are a few lines. |
 | **CLI** (`ym ... --json`) | For agents that script (code mode, Bash): `ym add`, `ym status --json`, `ym show <id> --json`. | One shell call. |

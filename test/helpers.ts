@@ -34,6 +34,8 @@ export function sandbox(globalConfig: Record<string, unknown> = {}) {
       worktreeRoot: join(root, 'worktrees'),
       routing: { cheap: ['mock'], standard: ['mock'], strong: ['mock'] },
       retry: { backoffSeconds: 0 },
+      // Scenarios pin their own tiers; cheap-first routing has its own test.
+      cheapFirst: false,
       liveOverlapIntervalSeconds: 0.5,
       resources: { maxLoadPerCpu: 1000, minFreeMemMb: 0 },
       // Tests must never start real agents that happen to be installed on the machine.

@@ -1,6 +1,10 @@
 # Changelog
 
 ## Unreleased
+- Small tasks start cheap: with no tier given, a task that touches 1 to 3 specific files with a short ask starts on the cheap tier when the project has checks (Haiku 5.5 costs about a twentieth of Sonnet 5.5). Failures retry, then escalate. `cheapFirst: false` turns it off.
+- `ym connect` installs the zero-token hooks for Claude Code and Codex by default; `--no-hooks` skips them.
+- `ym disk --dedupe` is experimental: applying it needs `--experimental --yes`. Scanning, restoring and purging are unchanged.
+- The MCP server and the CI commands load only when used, so other commands start faster.
 - Background Claude Code agents that edit files run in Claude Code's sandbox by default: writes only inside the task's worktree and temp folders, network only to common package registries and GitHub (other hosts are refused instead of prompting), no unsandboxed escape hatch. Configure or turn off with `agents.claude.sandbox`.
 - Hub calls time out (60 s; `task.wait` gets its own wait plus 15 s), and worker bundle transfers stop after 10 minutes, so a hub that stops answering can't hang the CLI, a worker or an MCP call forever.
 - Tests: a test file left with open handles is ended instead of holding the CI job; test jobs stop after 10 minutes.
