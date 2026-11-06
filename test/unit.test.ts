@@ -7,7 +7,12 @@ import { findCycle } from '../src/graph.ts';
 import { Watchdog } from '../src/watchdog.ts';
 import { errorFingerprint, jaccard, wordSet } from '../src/text.ts';
 import { chooseAgent, escalate, inferTier } from '../src/router.ts';
-import { resolveConfig } from '../src/config.ts';
+import { resolveConfig, unknownSettings } from '../src/config.ts';
+import { spawn } from 'node:child_process';
+import { DatabaseSync } from 'node:sqlite';
+import { openDb, SCHEMA_VERSION } from '../src/db.ts';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { claude, codex, opencode } from '../src/adapters/builtin.ts';
 import { createServer } from 'node:http';
 import { remoteClient, rpcDeadline, RPC_TIMEOUT_MS } from '../src/rpc.ts';
@@ -187,5 +192,40 @@ test('hub calls give up when the hub stops answering; task.wait gets its own wai
   } finally {
     server.closeAllConnections();
     server.close();
+  }
+});
+
+test('config typos are reported with the setting that was probably meant', () => {
+  const problems = unknownSettings({ budget: { daily: 1 }, maxparallel: 9, reveiw: { mode: 'never' }, agents: { claude: { modle: 'x' } }, $schema: 'x', '// note': 'ok', retry: { escalate: true } });
+  assert.deepEqual(problems, [
+    '"budget.daily" is not a Yardmaster setting; did you mean "budget.dailyUsd"?',
+    '"maxparallel" is not a Yardmaster setting; did you mean "maxParallel"?',
+    '"reveiw" is not a Yardmaster setting; did you mean "review"?',
+    '"agents.claude.modle" is not a Yardmaster setting; did you mean "agents.claude.models"?',
+  ]);
+  assert.deepEqual(unknownSettings({ zzzzqqq: 1 }), ['"zzzzqqq" is not a Yardmaster setting']);
+  assert.deepEqual(unknownSettings({ maxParallel: 2, budget: { dailyUsd: 5 } }), []);
+});
+
+test('many processes opening a new database at once all succeed; a newer schema is refused', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ym-db-'));
+  try {
+    const file = join(dir, 'y.db');
+    const src = join(import.meta.dirname, '..', 'src', 'db.ts');
+    const code = `import { openDb } from ${JSON.stringify(src)}; openDb(${JSON.stringify(file)}).close();`;
+    const codes = await Promise.all(Array.from({ length: 6 }, () => new Promise<number>((res) => {
+      const p = spawn(process.execPath, ['--input-type=module', '-e', code], { stdio: 'ignore' });
+      p.on('close', (c) => res(c ?? 1));
+    })));
+    assert.deepEqual(codes, [0, 0, 0, 0, 0, 0]);
+    const db = openDb(file);
+    assert.equal((db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as { value: string }).value, String(SCHEMA_VERSION));
+    db.close();
+    const raw = new DatabaseSync(file);
+    raw.prepare("UPDATE meta SET value = ? WHERE key = 'schema_version'").run(String(SCHEMA_VERSION + 1));
+    raw.close();
+    assert.throws(() => openDb(file), /newer Yardmaster/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

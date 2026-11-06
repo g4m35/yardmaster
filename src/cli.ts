@@ -9,7 +9,7 @@ import { buildMethods, localClient, remoteClient, type Client } from './api.ts';
 import { Coordinator } from './coordinator.ts';
 import { openDb } from './db.ts';
 import { expandHome, hubToken, machineId, paths, yardHome } from './paths.ts';
-import { loadConfig, PRESETS, PROJECT_CONFIG_FILE, writeProjectConfig, type Tier } from './config.ts';
+import { configWarnings, loadConfig, PRESETS, PROJECT_CONFIG_FILE, writeProjectConfig, type Tier } from './config.ts';
 import { detectAgents, getAdapter } from './adapters/index.ts';
 import { clearHubInfo, Hub, readHubInfo, writeHubInfo } from './hub.ts';
 import { planCleanup, runCleanup, type CleanPlan } from './janitor.ts';
@@ -875,4 +875,17 @@ async function main() {
   }
 }
 
-main().catch((err: Error) => die(err.message));
+const QUIET_COMMANDS = new Set(['hook', 'mcp', '__mock-agent', 'version', '--version']);
+
+/** Typos in config files are reported once per command, after its output, so they never go unnoticed. */
+function reportConfigWarnings(): void {
+  if (QUIET_COMMANDS.has(process.argv[2] ?? '') || process.argv.includes('--json')) return;
+  for (const w of configWarnings()) {
+    process.stderr.write(yellow(`! ${w.file}:\n`) + w.problems.map((p) => yellow(`  ${p}\n`)).join(''));
+  }
+}
+
+main().then(reportConfigWarnings, (err: Error) => {
+  reportConfigWarnings();
+  die(err.message);
+});

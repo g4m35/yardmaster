@@ -15,7 +15,7 @@ import { recover, planCleanup, runCleanup } from './janitor.ts';
 import { Supervisor } from './supervisor.ts';
 import { inSea, readAsset } from './assets.ts';
 import { importGraph } from './imports.ts';
-import { loadConfig, verifySlotsFor, worktreeRootOf } from './config.ts';
+import { configWarnings, loadConfig, verifySlotsFor, worktreeRootOf } from './config.ts';
 import { purgeTrash } from './fastfs.ts';
 import { detectAgents } from './adapters/index.ts';
 import { hubToken, machineId, paths } from './paths.ts';
@@ -102,6 +102,8 @@ export class Hub {
     this.coord.onChange = () => this.kick();
     await recover(this.coord, this.machineId, new Set(), { startup: true });
     const cfg = loadConfig();
+    for (const p of this.coord.listProjects()) if (existsSync(p.root)) loadConfig(p.root);
+    for (const w of configWarnings()) for (const problem of w.problems) this.coord.event(null, null, 'warn', 'config.unknown', `${w.file}: ${problem}`);
     // Deletes a previous run didn't get to finish (it was killed, or the machine slept).
     purgeTrash(join(worktreeRootOf(cfg), '.trash'));
     const host = this.opts.host ?? cfg.hub.host;
