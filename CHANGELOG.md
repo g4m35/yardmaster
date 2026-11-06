@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+- Hub calls time out (60 s; `task.wait` gets its own wait plus 15 s), and worker bundle transfers stop after 10 minutes, so a hub that stops answering can't hang the CLI, a worker or an MCP call forever.
+- Tests: a test file left with open handles is ended instead of holding the CI job; test jobs stop after 10 minutes.
+
 ## 0.6.0
 CI guard hardening, plus cheaper and more accurate CI accounting. Upgrade the guard by pinning the new commit SHA that `ym ci init` prints.
 - Security: a recorded pass now counts only when the run it links to backs it up: a run of the same workflow file in the same repo, for the commit the status is on, started before the status was posted, with every job passed by then (only the recording job may finish later). Before, any status from `github-actions[bot]` or anyone with write access counted, so another workflow, a write-scoped token or a run that skipped its own suite could make untested code skip CI. Costs two API reads, only when a candidate is found.

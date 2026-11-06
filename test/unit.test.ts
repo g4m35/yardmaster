@@ -9,6 +9,8 @@ import { errorFingerprint, jaccard, wordSet } from '../src/text.ts';
 import { chooseAgent, escalate, inferTier } from '../src/router.ts';
 import { resolveConfig } from '../src/config.ts';
 import { claude, codex, opencode } from '../src/adapters/builtin.ts';
+import { createServer } from 'node:http';
+import { remoteClient, rpcDeadline, RPC_TIMEOUT_MS } from '../src/rpc.ts';
 
 const wd = { repeatThreshold: 4, oscillationCycles: 3, sameToolErrorLimit: 3, stallMinutes: 1, awaitingInputMinutes: 0.5, maxRuntimeMinutes: 10 };
 
@@ -165,4 +167,23 @@ test('adapters never put prompts through a shell and close stdin for codex', () 
   const c = claude.build({ prompt: 'p', cwd: '/tmp/x', model: 'haiku', settings });
   assert.ok(c.args.includes('acceptEdits'));
   assert.ok(!c.args.includes('--bare'), 'user config, hooks and MCP servers must be preserved');
+});
+
+test('hub calls give up when the hub stops answering; task.wait gets its own wait plus slack', async () => {
+  assert.equal(rpcDeadline('task.get', {}), RPC_TIMEOUT_MS);
+  assert.equal(rpcDeadline('task.wait', { timeoutSec: 600 }), 615_000);
+  assert.equal(rpcDeadline('task.wait', {}), 75_000);
+  assert.equal(rpcDeadline('task.wait', { timeoutSec: 600 }, 1500), 1500, 'an explicit timeout wins (hooks use 1.5 s)');
+  // A hub that accepts the request and never answers.
+  const server = createServer(() => undefined);
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  try {
+    const client = remoteClient(`http://127.0.0.1:${(server.address() as { port: number }).port}`, 't', { timeoutMs: 200 });
+    const t = Date.now();
+    await assert.rejects(client['task.get']({ id: 't-x' } as never), /timeout|aborted/i);
+    assert.ok(Date.now() - t < 3000);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
 });

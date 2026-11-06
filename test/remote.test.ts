@@ -56,7 +56,11 @@ test('a second machine runs the work and ships it back as a git bundle', async (
       { key: 'one', title: 'Add the remote module', prompt: '@mock write remote/one.js export const one = 1', files: ['remote/one.js'], agent: 'mock' },
       { title: 'Build on the remote module', prompt: '@mock write remote/two.js export const two = 2', files: ['remote/two.js'], after: ['one'], agent: 'mock' },
     ], 'test');
-    const done = await until(() => created.map((t) => hub!.coord.getTask(t.id)!), (ts) => ts.every((t) => ['done', 'needs_human', 'failed'].includes(t.status)), 90_000, 'remote tasks');
+    const done = await until(() => created.map((t) => hub!.coord.getTask(t.id)!), (ts) => ts.every((t) => ['done', 'needs_human', 'failed'].includes(t.status)), 90_000, 'remote tasks').catch((err: Error) => {
+      // A rare stall on busy CI machines: show what each task last did, so the next failure is diagnosable.
+      const trail = created.map((t) => hub!.coord.eventsSince(0, null, 50, t.id).map((e) => `${t.id} ${e.kind}: ${e.message}`).join('\n')).join('\n');
+      throw new Error(`${err.message.slice(0, 300)}\nEvents:\n${trail}\nWorker: ${JSON.stringify([...worker.active.keys()])}`);
+    });
     assert.deepEqual(done.map((t) => t.status), ['done', 'done'], JSON.stringify(done.map((t) => t.attention)));
     for (const t of done) assert.equal(hub.coord.latestRun(t.id)!.machine_id, 'm-laptop');
     assert.equal(sh(box.repo, 'git', ['show', 'yardmaster/integration:remote/two.js']), 'export const two = 2');
