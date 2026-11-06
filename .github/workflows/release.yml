@@ -12,7 +12,41 @@ on:
 permissions:
   contents: read
 jobs:
+  # Release tags are permanent (a protected tag can't be deleted or moved), so a wrong one would burn its version
+  # number. Nothing is built or published unless the tag names the version in the code and sits on main.
+  check:
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+      - id: check
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::\"$TAG\" is not a release tag like v1.2.3 or v1.2.3-rc.1"; exit 1
+          fi
+          version="${TAG#v}"
+          pkg=$(sed -n 's/^  "version": "\(.*\)",$/\1/p' package.json | head -n 1)
+          code=$(sed -n "s/^export const VERSION = '\(.*\)';$/\1/p" src/version.ts)
+          if [ "$pkg" != "$version" ] || [ "$code" != "$version" ]; then
+            echo "::error::$TAG doesn't match the code: package.json says $pkg, src/version.ts says $code"; exit 1
+          fi
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::$TAG points at a commit that isn't on main"; exit 1
+          fi
+          case "$version" in *-*) prerelease=true ;; *) prerelease=false ;; esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
   binaries:
+    needs: check
     strategy:
       fail-fast: false
       matrix:
@@ -29,13 +63,13 @@ jobs:
       - run: npm ci
       - run: node scripts/build-binary.mjs
       - name: Smoke test the binary
-        run: sh scripts/smoke-binary.sh "$(ls release/yardmaster-* | grep -v sha256)"
+        run: sh scripts/smoke-binary.sh "$(find release -name 'yardmaster-*' ! -name '*.sha256' | head -n 1)"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: bin-${{ matrix.os }}
           path: release/yardmaster-*
   github-release:
-    needs: binaries
+    needs: [check, binaries]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -47,19 +81,32 @@ jobs:
         with:
           path: dist-bin
           merge-multiple: true
-      - name: Create or update the release
+      - name: Create the release (or finish one a failed run left as a draft)
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag || github.ref_name }}
+          TAG: ${{ needs.check.outputs.tag }}
+          PRERELEASE: ${{ needs.check.outputs.prerelease }}
         run: |
           cp install.sh dist-bin/
-          if gh release view "$TAG" > /dev/null 2>&1; then
-            gh release upload "$TAG" dist-bin/* --clobber
-          else
-            gh release create "$TAG" dist-bin/* --title "Yardmaster $TAG" --generate-notes
-          fi
+          # Releases are immutable once published, so a published one is left exactly as it is.
+          state=$(gh release view "$TAG" --json isDraft --jq 'if .isDraft then "draft" else "published" end' 2>/dev/null || echo none)
+          case "$state" in
+            published)
+              echo "$TAG is already published; releases can't change after that, so nothing to do." ;;
+            draft)
+              gh release upload "$TAG" dist-bin/* --clobber
+              gh release edit "$TAG" --draft=false ;;
+            none)
+              # A pre-release (v1.2.3-rc.1) never becomes "latest", which is what install.sh downloads.
+              if [ "$PRERELEASE" = true ]; then
+                gh release create "$TAG" dist-bin/* --title "Yardmaster $TAG" --generate-notes --prerelease --latest=false
+              else
+                gh release create "$TAG" dist-bin/* --title "Yardmaster $TAG" --generate-notes --latest
+              fi ;;
+          esac
   npm:
-    needs: binaries
+    # Only after the GitHub release exists: npm publishes can't be undone either.
+    needs: [check, github-release]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -80,7 +127,10 @@ jobs:
         if: env.HAS_NPM_TOKEN == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --provenance --access public
+          PRERELEASE: ${{ needs.check.outputs.prerelease }}
+        run: |
+          # A pre-release goes to the "next" tag, so `npm install yardmaster` keeps getting the stable one.
+          if [ "$PRERELEASE" = true ]; then npm publish --provenance --access public --tag next; else npm publish --provenance --access public; fi
       - name: Skip npm (no NPM_TOKEN secret)
         if: env.HAS_NPM_TOKEN != 'true'
         run: echo "No NPM_TOKEN secret set; skipping npm. See docs/PUBLISHING.md."
