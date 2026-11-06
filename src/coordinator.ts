@@ -9,6 +9,7 @@ import { inferScope, normalizePattern, scopesOverlap } from './scope.ts';
 import { clip, jaccard, shortId, taskFingerprint, wordSet } from './text.ts';
 import {
   ACTIVE_STATUSES,
+  TASK_STATUSES,
   TERMINAL_STATUSES,
   type Machine,
   type MachineInfo,
@@ -91,6 +92,9 @@ export interface AddResult {
   created: Task[];
   duplicates: { title: string; existing: string; existingTitle: string }[];
 }
+
+/** Every status a task can still leave. */
+const OPEN_STATUSES: TaskStatus[] = TASK_STATUSES.filter((s: TaskStatus) => !TERMINAL_STATUSES.includes(s));
 
 export class Coordinator {
   readonly db: Db;
@@ -202,7 +206,7 @@ export class Coordinator {
     if (!project) throw new Error(`Unknown project ${projectId}`);
     const cfg = this.configFor(projectId);
     return tx(this.db, () => {
-      const open = this.listTasks(projectId).filter((t) => !TERMINAL_STATUSES.includes(t.status));
+      const open = this.openTasks(projectId);
       const keyToId = new Map<string, string>();
       const created: Task[] = [];
       const duplicates: AddResult['duplicates'] = [];
@@ -301,7 +305,7 @@ export class Coordinator {
 
   /** A dependency on a raced task is satisfied as soon as any member of the race is done. */
   depState(dep: Task): 'done' | 'dead' | 'pending' {
-    const group = dep.race_group ? this.memo(`tasks:${dep.project_id}`, () => this.listTasks(dep.project_id)).filter((t) => t.race_group === dep.race_group) : [dep];
+    const group = dep.race_group ? this.memo(`race:${dep.race_group}`, () => this.raceMembers(dep.race_group!)) : [dep];
     if (group.some((t) => t.status === 'done')) return 'done';
     if (group.every((t) => t.status === 'failed' || t.status === 'canceled')) return 'dead';
     return 'pending';
@@ -309,10 +313,14 @@ export class Coordinator {
 
   /** Length of the longest chain of open tasks waiting on this one: work on the critical path starts first. */
   criticalPath(projectId: string): Map<string, number> {
-    const open = this.listTasks(projectId).filter((t) => !TERMINAL_STATUSES.includes(t.status));
+    const open = this.openTasks(projectId);
     const ids = new Set(open.map((t) => t.id));
     const dependents = new Map<string, string[]>();
-    const rows = this.db.prepare('SELECT d.task_id, d.depends_on FROM deps d JOIN tasks t ON t.id = d.task_id WHERE t.project_id = ?').all(projectId) as { task_id: string; depends_on: string }[];
+    // Only edges between open tasks matter, so only those are read: the cost follows the open work, not the history.
+    const marks = OPEN_STATUSES.map(() => '?').join(',');
+    const rows = this.db
+      .prepare(`SELECT d.task_id, d.depends_on FROM deps d JOIN tasks t ON t.id = d.task_id WHERE t.project_id = ? AND t.status IN (${marks})`)
+      .all(projectId, ...OPEN_STATUSES) as { task_id: string; depends_on: string }[];
     for (const r of rows) if (ids.has(r.task_id) && ids.has(r.depends_on)) dependents.set(r.depends_on, [...(dependents.get(r.depends_on) ?? []), r.task_id]);
     const memo = new Map<string, number>();
     const depth = (id: string, seen: Set<string>): number => {
@@ -337,6 +345,32 @@ export class Coordinator {
   getTask(id: string): Task | null {
     const r = this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as Row | undefined;
     return r ? toTask(r) : null;
+  }
+
+  /** Tasks not finished yet (including ones waiting on a person). */
+  openTasks(projectId?: string | null): Task[] {
+    return this.listTasks(projectId, OPEN_STATUSES);
+  }
+
+  /** Members of a best-of-N race, wherever they are in their life. */
+  raceMembers(group: string): Task[] {
+    return (this.db.prepare('SELECT * FROM tasks WHERE race_group = ? ORDER BY created_at').all(group) as Row[]).map(toTask);
+  }
+
+  /** How many tasks are in each status, and what they cost in total, without loading them. */
+  taskTotals(projectId?: string | null): { counts: Record<string, number>; spent: number } {
+    const rows = (projectId
+      ? this.db.prepare('SELECT status, COUNT(*) AS n, COALESCE(SUM(cost_usd), 0) AS s FROM tasks WHERE project_id = ? GROUP BY status').all(projectId)
+      : this.db.prepare('SELECT status, COUNT(*) AS n, COALESCE(SUM(cost_usd), 0) AS s FROM tasks GROUP BY status').all()) as { status: string; n: number; s: number }[];
+    return { counts: Object.fromEntries(rows.map((r) => [r.status, r.n])), spent: rows.reduce((t, r) => t + r.s, 0) };
+  }
+
+  /** The most recently finished tasks in a status, newest first. */
+  recentlyFinished(projectId: string | null | undefined, status: 'done' | 'failed', limit: number): Task[] {
+    const rows = projectId
+      ? this.db.prepare('SELECT * FROM tasks WHERE project_id = ? AND status = ? ORDER BY finished_at DESC LIMIT ?').all(projectId, status, limit)
+      : this.db.prepare('SELECT * FROM tasks WHERE status = ? ORDER BY finished_at DESC LIMIT ?').all(status, limit);
+    return (rows as Row[]).map(toTask);
   }
 
   listTasks(projectId?: string | null, statuses?: TaskStatus[]): Task[] {

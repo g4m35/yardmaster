@@ -23,6 +23,7 @@ import { httpTransport } from './transport.ts';
 import { runMcp } from './mcp.ts';
 import { applyConnect, connectPlan, hookPlan, installHooks, installSkill, selfCommand } from './connect.ts';
 import { HOOK_EVENTS, runHook } from './hook.ts';
+import { hookClient } from './hookclient.ts';
 import { creatorPrompt, loadPlugins, scaffoldPlugin, testPlugin } from './plugins.ts';
 import { PlanError, planGoal } from './planner.ts';
 import { VERSION } from './version.ts';
@@ -685,12 +686,9 @@ async function cmdHook(a: Args) {
   if (![...HOOK_EVENTS, 'claude-pretool'].includes(event as never)) die(`Unknown hook "${event}". Events: ${HOOK_EVENTS.join(', ')}`);
   let stdin = '';
   for await (const chunk of process.stdin) stdin += chunk;
-  const r = await runHook(event, stdin, async () => {
-    const remote = process.env.YARDMASTER_HUB;
-    if (remote) return remoteClient(remote, process.env.YARDMASTER_TOKEN ?? hubToken());
-    const url = await runningHubUrl();
-    return url ? remoteClient(url, hubToken()) : null;
-  });
+  // The same fast path as the npm build's hook entry (the standalone binary comes through here): no health check
+  // round trip, and a short timeout so a stuck hub never holds up the agent.
+  const r = await runHook(event, stdin, async () => hookClient());
   if (r.stdout) process.stdout.write(r.stdout + '\n');
   if (r.stderr) process.stderr.write(r.stderr + '\n');
   process.exit(r.code);
