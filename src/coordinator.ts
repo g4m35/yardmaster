@@ -411,10 +411,10 @@ export class Coordinator {
    * assignee, still running or verifying), so a canceled task, or one re-claimed after its lease expired, can never
    * be overwritten by the old attempt.
    */
-  updateTaskIfOwner(id: string, owner: { attempt: number; assignee: string }, patch: TaskPatch): Task {
+  updateTaskIfOwner(id: string, owner: { attempt: number; assignee: string; statuses?: string[] }, patch: TaskPatch): Task {
     const t = this.getTask(id);
     if (!t) throw new Error(`Unknown task ${id}`);
-    if (t.attempts !== owner.attempt || t.assignee !== owner.assignee || !['running', 'verifying'].includes(t.status)) {
+    if (t.attempts !== owner.attempt || t.assignee !== owner.assignee || !(owner.statuses ?? ['running', 'verifying']).includes(t.status)) {
       throw new StaleAttemptError(id, t.status);
     }
     return this.updateTask(id, patch);

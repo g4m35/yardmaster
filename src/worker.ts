@@ -214,7 +214,8 @@ export class WorkerLoop {
           await this.transport.uploadBranch(fresh, repoPath, fresh.branch!, fresh.base_sha ?? claim.startPoint);
         }
       } catch (err) {
-        await this.client['task.update']({ id: task.id, patch: { status: 'needs_human', attention: `This machine (${this.name}) hit an error: ${(err as Error).message}`, lease_until: null } }).catch(() => undefined);
+        // Fenced: if the task was taken over elsewhere meanwhile, this stale error must not overwrite it.
+        await this.client['task.update']({ id: task.id, owner: { attempt: task.attempts, assignee: task.assignee ?? '', statuses: ['running', 'verifying', 'ready'] }, patch: { status: 'needs_human', attention: `This machine (${this.name}) hit an error: ${(err as Error).message}`, lease_until: null } }).catch(() => undefined);
         await this.client['task.event']({ projectId: task.project_id, taskId: task.id, level: 'error', kind: 'worker.error', message: `${this.name}: ${(err as Error).message}` }).catch(() => undefined);
       } finally {
         this.active.delete(task.id);
