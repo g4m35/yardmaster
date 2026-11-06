@@ -204,6 +204,9 @@ test('config typos are reported with the setting that was probably meant', () =>
     '"agents.claude.modle" is not a Yardmaster setting; did you mean "agents.claude.models"?',
   ]);
   assert.deepEqual(unknownSettings({ zzzzqqq: 1 }), ['"zzzzqqq" is not a Yardmaster setting']);
+  const inList = unknownSettings({ policies: [{ set: { teir: 'strong' } }] });
+  assert.equal(inList.length, 1);
+  assert.match(inList[0]!, /"policies\[0\]\.set\.teir" is not a Yardmaster setting; did you mean "policies\[0\]\.set\.tier"\?/);
   assert.deepEqual(unknownSettings({ maxParallel: 2, budget: { dailyUsd: 5 } }), []);
 });
 

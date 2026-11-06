@@ -106,15 +106,16 @@ export function openDb(file = paths.db()): Db {
  */
 function enableWal(db: Db): void {
   const pause = new Int32Array(new SharedArrayBuffer(4));
+  const deadline = Date.now() + 10_000;
   for (let attempt = 0; ; attempt++) {
     try {
       // A disk without WAL support answers with another mode; that's fine, the database just works slower.
       db.exec('PRAGMA journal_mode = WAL');
       return;
     } catch (err) {
-      if (!/locked|busy/i.test((err as Error).message) || attempt >= 50) throw err;
+      if (!/locked|busy/i.test((err as Error).message) || Date.now() > deadline) throw err;
     }
-    Atomics.wait(pause, 0, 0, 20 + attempt * 10);
+    Atomics.wait(pause, 0, 0, Math.min(200, 20 + attempt * 10));
   }
 }
 

@@ -276,3 +276,14 @@ test('merging works on a machine where git has no name or email configured', asy
     else process.env.GIT_CONFIG_NOSYSTEM = prev.n;
   }
 });
+
+test('a broken project config is reported but never stops the hub from starting', async () => {
+  const s = await startHub();
+  await s.hub.stop();
+  hubs.length = 0;
+  writeFileSync(join(s.repo, 'yardmaster.json'), '{ "verify": [ broken');
+  const again = new Hub({ db: openDb(join(s.home, 'y.db')), token: 'test-token', machineId: `m-hub-${Date.now()}`, port: 0, host: '127.0.0.1', includeMock: true, tickMs: 150, quiet: true });
+  hubs.push(again);
+  await again.start();
+  assert.ok(again.coord.eventsSince(0, null, 500).some((e) => e.kind === 'config.invalid'));
+});

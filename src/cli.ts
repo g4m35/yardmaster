@@ -879,7 +879,9 @@ const QUIET_COMMANDS = new Set(['hook', 'mcp', '__mock-agent', 'version', '--ver
 
 /** Typos in config files are reported once per command, after its output, so they never go unnoticed. */
 function reportConfigWarnings(): void {
-  if (QUIET_COMMANDS.has(process.argv[2] ?? '') || process.argv.includes('--json')) return;
+  const [cmd, sub] = [process.argv[2] ?? '', process.argv[3] ?? ''];
+  // Machine-facing or long-running: hooks, the MCP server, the git push gate, and the hub (which logs them as events).
+  if (QUIET_COMMANDS.has(cmd) || (cmd === 'ci' && sub === 'gate') || cmd === 'hub' || process.argv.includes('--json')) return;
   for (const w of configWarnings()) {
     process.stderr.write(yellow(`! ${w.file}:\n`) + w.problems.map((p) => yellow(`  ${p}\n`)).join(''));
   }

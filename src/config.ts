@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { availableParallelism } from 'node:os';
 import * as z from 'zod/v4';
@@ -332,7 +332,7 @@ export function resolveConfig(layers: unknown[]): Config {
 
 // ---------------- unknown settings ----------------
 
-type Def = { type: string; shape?: Record<string, z.ZodType>; innerType?: z.ZodType; valueType?: z.ZodType };
+type Def = { type: string; shape?: Record<string, z.ZodType>; innerType?: z.ZodType; valueType?: z.ZodType; element?: z.ZodType };
 const defOf = (s: z.ZodType): Def => (s as unknown as { _zod: { def: Def } })._zod.def;
 
 /** The object (or record) schema under defaults, optionals and nullables. */
@@ -373,6 +373,7 @@ function suggest(key: string, known: string[]): string | null {
  */
 export function unknownSettings(raw: unknown, schema: z.ZodType = ConfigSchema, at = ''): string[] {
   const d = core(schema);
+  if (Array.isArray(raw)) return d.type === 'array' && d.element ? raw.flatMap((v, i) => unknownSettings(v, d.element!, `${at.replace(/\.$/, '')}[${i}].`)) : [];
   if (!isPlainObject(raw)) return [];
   if (d.type === 'record' && d.valueType) return Object.entries(raw).flatMap(([k, v]) => unknownSettings(v, d.valueType!, `${at}${k}.`));
   if (d.type !== 'object' || !d.shape) return [];
@@ -391,16 +392,34 @@ export function unknownSettings(raw: unknown, schema: z.ZodType = ConfigSchema, 
   return out;
 }
 
-const warned = new Map<string, string[]>();
+/** Problems per config file, re-checked whenever the file changes. */
+const warned = new Map<string, { stamp: number; problems: string[] }>();
+const reported = new Set<string>();
 
 /** Unknown settings found in the config files read so far, by file. */
 export function configWarnings(): { file: string; problems: string[] }[] {
-  return [...warned].filter(([, p]) => p.length).map(([file, problems]) => ({ file, problems }));
+  return [...warned].filter(([, w]) => w.problems.length).map(([file, w]) => ({ file, problems: w.problems }));
+}
+
+/** Problems not handed out before: a long-running hub reports each one once, including ones from later edits. */
+export function newConfigWarnings(): string[] {
+  const out: string[] = [];
+  for (const { file, problems } of configWarnings()) {
+    for (const p of problems) {
+      const line = `${file}: ${p}`;
+      if (!reported.has(line)) {
+        reported.add(line);
+        out.push(line);
+      }
+    }
+  }
+  return out;
 }
 
 function readChecked(file: string): unknown {
   const raw = readJson(file);
-  if (!warned.has(file)) warned.set(file, unknownSettings(raw));
+  const stamp = existsSync(file) ? statSync(file).mtimeMs : 0;
+  if (warned.get(file)?.stamp !== stamp) warned.set(file, { stamp, problems: unknownSettings(raw) });
   return raw;
 }
 
