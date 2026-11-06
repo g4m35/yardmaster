@@ -9,10 +9,11 @@ export const RPC_TIMEOUT_MS = 60_000;
 
 /** How long one call may take: task.wait waits by design, everything else answers quickly. */
 export function rpcDeadline(name: string, params: unknown, override?: number): number {
-  if (override) return override;
+  if (override) return Math.ceil(override);
   if (name === 'task.wait') {
     const sec = Number((params as { timeoutSec?: unknown } | null)?.timeoutSec ?? 60);
-    return (Number.isFinite(sec) ? sec : 60) * 1000 + 15_000;
+    // AbortSignal.timeout only takes whole milliseconds; a fractional wait (1.5 s) must not throw.
+    return Math.ceil((Number.isFinite(sec) ? sec : 60) * 1000) + 15_000;
   }
   return RPC_TIMEOUT_MS;
 }

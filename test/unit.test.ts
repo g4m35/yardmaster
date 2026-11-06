@@ -173,6 +173,8 @@ test('hub calls give up when the hub stops answering; task.wait gets its own wai
   assert.equal(rpcDeadline('task.get', {}), RPC_TIMEOUT_MS);
   assert.equal(rpcDeadline('task.wait', { timeoutSec: 600 }), 615_000);
   assert.equal(rpcDeadline('task.wait', {}), 75_000);
+  assert.equal(rpcDeadline('task.wait', { timeoutSec: 1.0005 }), 16_001, 'whole milliseconds only');
+  assert.doesNotThrow(() => AbortSignal.timeout(rpcDeadline('task.wait', { timeoutSec: 1.5 })));
   assert.equal(rpcDeadline('task.wait', { timeoutSec: 600 }, 1500), 1500, 'an explicit timeout wins (hooks use 1.5 s)');
   // A hub that accepts the request and never answers.
   const server = createServer(() => undefined);
