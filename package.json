@@ -24,6 +24,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test --test-concurrency=4 --test-timeout=180000 'test/**/*.test.ts'",
     "dev": "node src/cli.ts",
+    "site:build": "node scripts/build-site.mjs",
+    "site:deploy": "node scripts/build-site.mjs && vercel deploy site/dist --prod --yes --project yardmaster --create-if-missing",
     "prepublishOnly": "npm run typecheck && npm test && npm run build",
     "prepare": "npm run build"
   },
