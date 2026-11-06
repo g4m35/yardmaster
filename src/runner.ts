@@ -335,6 +335,23 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
     return finishNeedsHuman(ctx, `${adapter.label} could not start: ${(err as Error).message}. ${adapter.setupHint ?? ''}`, runId);
   }
   if (spec.stdin !== undefined) child.stdin?.end(spec.stdin);
+  // Listen for the exit before the first await: a fast agent can finish while we look up its start time or tell the
+  // hub its pid (an HTTP call on remote workers), and an exit nobody was listening for is never reported again, which
+  // left the run "running" forever.
+  const exit = new Promise<number>((done) => {
+    child.on('close', (code) => done(code ?? 1));
+    // A background process the agent started (dev server, watcher) can hold stdout open after the agent exits.
+    child.on('exit', (code) => {
+      setTimeout(() => {
+        killGroup(child.pid, 'SIGTERM');
+        done(code ?? 1);
+      }, 3000).unref();
+    });
+    child.on('error', (err) => {
+      stderrTail += `\n${String(err)}`;
+      done(127);
+    });
+  });
 
   const procStarted = child.pid ? await processStartTime(child.pid) : null;
   await api['run.update']({ runId, patch: { pid: child.pid ?? null, proc_started: procStarted } });
@@ -385,21 +402,6 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
     const s = d.toString();
     raw.write(JSON.stringify({ stderr: s }) + '\n');
     stderrTail = tail(stderrTail + s, 40);
-  });
-
-  const exit = new Promise<number>((done) => {
-    child.on('close', (code) => done(code ?? 1));
-    // A background process the agent started (dev server, watcher) can hold stdout open after the agent exits.
-    child.on('exit', (code) => {
-      setTimeout(() => {
-        killGroup(child.pid, 'SIGTERM');
-        done(code ?? 1);
-      }, 3000).unref();
-    });
-    child.on('error', (err) => {
-      stderrTail += `\n${String(err)}`;
-      done(127);
-    });
   });
 
   let lastTouchedCheck = 0;
