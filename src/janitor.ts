@@ -6,7 +6,8 @@ import type { Coordinator } from './coordinator.ts';
 import { paths } from './paths.ts';
 import { git, gitOut, isAncestor, isClean, isLinkedWorktreeOf, listWorktrees, removeWorktree } from './git.ts';
 import { isAlive, processStartTime, terminateRecordedProcess } from './proc.ts';
-import { recoverUtilities, runUtilityKey, taskHasPendingUtilities } from './utility-records.ts';
+import { recoverUtilities, runUtilityKey, taskHasPendingUtilities, utilitiesStopped } from './utility-records.ts';
+import { tx } from './transaction.ts';
 import type { Run } from './types.ts';
 import type { TerminateResult } from './proc.ts';
 import { TERMINAL_STATUSES, type Project, type Task } from './types.ts';
@@ -339,6 +340,11 @@ async function recoverRunChildren(coord: Coordinator, run: Pick<Run, 'id' | 'pid
   return utilityExit ? main : { status: 'unverified', reason: 'An owned Git or copy utility has not been confirmed stopped.' };
 }
 
+function unresolvedClaimRuns(coord: Coordinator, task: Task): Run[] {
+  return coord.runsFor(task.id).filter(run => run.generation === task.generation && run.machine_id === task.machine_id &&
+    (['running', 'lost', 'cleanup_failed'].includes(run.status) || !utilitiesStopped(coord.db, runUtilityKey(run.id))));
+}
+
 export async function recover(coord: Coordinator, machineId: string, activeTaskIds: Set<string>, opts: { startup?: boolean } = {}): Promise<void> {
   const now = Date.now();
   // Plans have no task row: own their detached group using the invocation owner and its bounded lease.
@@ -402,12 +408,11 @@ export async function recover(coord: Coordinator, machineId: string, activeTaskI
     }
     if (t.machine_id === machineId) {
       if (activeTaskIds.has(t.id)) continue;
-      const run = coord.latestRun(t.id);
-      const orphanRun = run && run.status === 'running' && run.machine_id === machineId;
+      const orphanRuns = unresolvedClaimRuns(coord, t);
       // No live runner in this process owns it: either an earlier hub process died, or a claim never started.
-      if (!orphanRun && !(t.lease_until && t.lease_until < now)) continue;
+      if (!orphanRuns.length && !(t.lease_until && t.lease_until < now)) continue;
       let uncertain = '';
-      for (const owned of coord.runsFor(t.id).filter((r) => r.status === 'running' && r.machine_id === machineId && r.generation === t.generation)) {
+      for (const owned of orphanRuns) {
         const result = await recoverRunChildren(coord, owned);
         if (!['exited', 'terminated'].includes(result.status)) {
           uncertain = result.reason ?? 'Could not prove that the old process stopped.';
@@ -426,17 +431,25 @@ export async function recover(coord: Coordinator, machineId: string, activeTaskI
       continue;
     }
     if (t.lease_until && t.lease_until < now) {
-      const run = coord.latestRun(t.id);
-      if (run && ['running', 'lost', 'cleanup_failed'].includes(run.status)) {
-        coord.setMeta(`recovery:${run.id}`, 'remote_lease_expired');
-        coord.updateRun(run.id, { status: 'cleanup_failed', stop_reason: 'Remote worker must confirm owned process-group exit before work can restart.' });
-        coord.updateTask(t.id, { status: 'needs_human', attention: 'Remote recovery is waiting for this worker to reconnect and confirm its process stopped. Work is preserved.', lease_until: null });
-        continue;
-      }
-      coord.abandonUnlaunchedClaim(t.id, t.generation, t.machine_id);
-      coord.updateTask(t.id, { status: 'queued', assignee: null, machine_id: null, lease_until: null, attempts: Math.max(0, t.attempts - 1) });
-      const m = t.machine_id ? coord.getMachine(t.machine_id) : null;
-      coord.event(t.project_id, t.id, 'warn', 'task.lease_expired', `${m?.name ?? 'A machine'} stopped responding while working on "${t.title}"; it is back in the queue.`);
+      tx(coord.db, () => {
+        // Earlier process recovery yielded to I/O; this snapshot may already belong to another claim.
+        const fresh = coord.getTask(t.id);
+        if (!fresh || fresh.generation !== t.generation || fresh.assignee !== t.assignee || fresh.machine_id !== t.machine_id ||
+            !['running', 'verifying'].includes(fresh.status) || !fresh.lease_until || fresh.lease_until >= Date.now()) return;
+        const runs = unresolvedClaimRuns(coord, fresh);
+        if (runs.length) {
+          for (const run of runs) {
+            coord.setMeta(`recovery:${run.id}`, 'remote_lease_expired');
+            coord.updateRun(run.id, { status: 'cleanup_failed', stop_reason: 'Remote worker must confirm owned process-group exit before work can restart.' });
+          }
+          coord.updateTask(fresh.id, { status: 'needs_human', attention: 'Remote recovery is waiting for this worker to reconnect and confirm every owned process stopped. Work is preserved.', lease_until: null });
+          return;
+        }
+        coord.abandonUnlaunchedClaim(fresh.id, fresh.generation, fresh.machine_id);
+        coord.updateTask(fresh.id, { status: 'queued', assignee: null, machine_id: null, lease_until: null, attempts: Math.max(0, fresh.attempts - 1) });
+        const m = fresh.machine_id ? coord.getMachine(fresh.machine_id) : null;
+        coord.event(fresh.project_id, fresh.id, 'warn', 'task.lease_expired', `${m?.name ?? 'A machine'} stopped responding while working on "${fresh.title}"; it is back in the queue.`);
+      });
     }
   }
 
