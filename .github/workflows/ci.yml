@@ -29,7 +29,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         node: [22, 24]
     runs-on: ${{ matrix.os }}
-    # The suite takes under a minute; a stuck job should fail fast, not bill (or hold) 20 minutes.
+    # The suite usually takes 2–3 minutes; a stuck job should not bill (or hold) 20 minutes.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -41,6 +41,25 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: npm test
+  performance:
+    needs: guard
+    if: github.event_name == 'pull_request' && needs.guard.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci
+      - name: Compare scheduler with PR base on an isolated runner
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE"
+          node bench/compare.mjs "$BASE" > performance.json
+          cat performance.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: scheduler-performance, path: performance.json }
   binary:
     needs: guard
     if: needs.guard.outputs.skip != 'true'
