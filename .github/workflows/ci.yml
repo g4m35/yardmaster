@@ -20,6 +20,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - id: guard
         uses: ./
+        with: { allow-skipped: performance }
   test:
     needs: guard
     if: needs.guard.outputs.skip != 'true'
@@ -76,7 +77,7 @@ jobs:
       - run: sh scripts/smoke-binary.sh release/yardmaster-linux-x64
   # One final job: the check to require, and the one that records a real pass.
   done:
-    needs: [guard, test, binary]
+    needs: [guard, test, binary, performance]
     if: always()
     runs-on: ubuntu-slim
     timeout-minutes: 5
@@ -85,6 +86,6 @@ jobs:
       - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
         run: exit 1
       # The released guard, not this checkout's: code under review never runs with statuses: write.
-      - if: needs.guard.outputs.skip != 'true' && !contains(needs.*.result, 'skipped')
+      - if: needs.guard.outputs.skip != 'true' && needs.test.result == 'success' && needs.binary.result == 'success'
         uses: g4m35/yardmaster@c32f498679fe535257356cf1292064b9ce6229df # v0.5.1
         with: { mode: record }
