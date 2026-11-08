@@ -107,7 +107,7 @@ test('pause stops new work; pause --now parks running agents with their work sav
   await s.hub.client['fleet.pause']({ projectId: null, stopRunning: true, by: 'test' });
   const parked = await s.wait(t!.id, (x) => x.status === 'queued', 'parked');
   assert.equal(parked.attempts, 0, 'pausing does not use up an attempt');
-  assert.ok(sh(s.repo, 'git', ['log', '--oneline', `yardmaster/${t!.id}`]).includes('partial work'), 'partial work was committed');
+  assert.ok(sh(s.repo, 'git', ['log', '--oneline', `yardmaster/${t!.id}`]).includes('partial work'), `partial work was committed: ${JSON.stringify(s.hub.coord.eventsSince(0, s.project.id, 100).filter(event => event.task_id === t!.id))}`);
   // Resume with guidance so the mock skips the long sleep this time.
   s.hub.coord.control(t!.id, 'redirect', 'test', 'RESUMEDNOTE: finish up');
   await s.hub.client['fleet.resume']({ projectId: null, by: 'test' });

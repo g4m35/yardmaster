@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type { Client } from './api.ts';
 import { paths } from './paths.ts';
 import { terminateRecordedProcess } from './proc.ts';
+import { applyUtilityOperation, type UtilityRecord } from './utility-records.ts';
 
 type Usage = Parameters<Client['run.usage']>[0];
 type Exit = Parameters<Client['run.exit']>[0];
@@ -11,6 +12,9 @@ type Owner = NonNullable<Parameters<Client['run.start']>[0]['owner']>;
 export interface JournalRun {
   runId: string; taskId: string; owner: Owner; worktree: string | null;
   pid: number | null; startedAt: number | null; phase?: string | null; recoveryError?: string; usage?: Usage; exit?: Exit;
+  reapedProcess?: { pid: number; startedAt: number };
+  idlePhase?: string;
+  utilities?: UtilityRecord[];
 }
 export interface JournalArtifact {
   taskId: string; generation: number; assignee: string; repo: string; branch: string; base: string; head: string;
@@ -51,7 +55,8 @@ export class WorkerJournal {
       if (key === 'run.start') return async (p: Parameters<Client['run.start']>[0]) => {
         const runId = await target[key](p);
         if (!p.owner) throw new Error('Worker journal needs the fenced run owner.');
-        this.runs[runId] = { runId, taskId: p.taskId, owner: p.owner, worktree: null, pid: null, startedAt: null };
+        const phase = p.role === 'review' ? 'review_wait' : 'prepare';
+        this.runs[runId] = { runId, taskId: p.taskId, owner: p.owner, worktree: null, pid: null, startedAt: null, phase, idlePhase: phase };
         this.save();
         return runId;
       };
@@ -60,9 +65,11 @@ export class WorkerJournal {
         if (record && ('pid' in p.patch || 'phase' in p.patch)) {
           if ('phase' in p.patch) record.phase = typeof p.patch.phase === 'string' ? p.patch.phase : null;
           if ('pid' in p.patch) {
+            if (p.patch.pid === null && record.pid !== null && record.startedAt !== null) record.reapedProcess = { pid: record.pid, startedAt: record.startedAt };
             record.pid = typeof p.patch.pid === 'number' ? p.patch.pid : null;
             record.startedAt = typeof p.patch.proc_started === 'number' ? p.patch.proc_started : null;
           }
+          if (record.pid === null && record.phase && !record.phase.endsWith(':spawning')) record.idlePhase = record.phase;
           this.save();
         }
         return target[key](p);
@@ -91,25 +98,47 @@ export class WorkerJournal {
           if (record.usage?.sequence === p.sequence) { delete record.usage; this.save(); }
         } catch { /* Durable absolute snapshot is replayed, including after process exit. */ }
       };
+      if (key === 'run.utility') return async (p: Parameters<Client['run.utility']>[0]) => {
+        const record = this.runs[p.runId];
+        if (!record) throw new Error('Utility has no durable worker run.');
+        record.utilities = applyUtilityOperation(record.utilities ?? [], p.operation);
+        this.save();
+        return target[key](p);
+      };
       if (key === 'run.exit') return async (p: Exit) => {
         const record = this.runs[p.runId];
         if (!record) return target[key](p);
-        record.pid = null; record.startedAt = null; record.phase = null; record.exit = p; this.save();
+        // Retain the identity until the hub acknowledges it. A dropped response or an expired
+        // lease must not turn confirmed reaping into an unrecoverable proof-less exit.
+        record.exit = p; this.save();
         await this.replayRun(target, record);
       };
       return target[key];
     } });
   }
   private async replayRun(client: Client, record: JournalRun): Promise<void> {
+    for (const utility of record.utilities ?? []) {
+      if (utility.state !== 'exited') throw new Error('Worker utility still requires recovery.');
+      await client['run.utility']({ runId: record.runId, taskId: record.taskId, owner: record.owner,
+        operation: { action: 'exit', token: utility.token, pid: utility.pid, startedAt: utility.startedAt, reaped: true } });
+    }
     if (record.usage) {
       const snapshot = record.usage;
       await client['run.usage'](snapshot);
       if (record.usage?.sequence === snapshot.sequence) { delete record.usage; this.save(); }
     }
     if (record.exit) {
+      if (!record.exit.process && !record.exit.noLaunchPhase) {
+        const detail = await client['task.get']({ id: record.taskId });
+        const run = detail.runs.find(r => r.id === record.runId && r.generation === record.owner.generation && r.machine_id === this.machineId);
+        const identity = record.pid !== null && record.startedAt !== null ? { pid: record.pid, startedAt: record.startedAt } : record.reapedProcess;
+        if (identity && run?.pid === identity.pid && run.proc_started === identity.startedAt) record.exit = { ...record.exit, process: identity };
+        else if (record.pid === null && record.idlePhase && run?.pid === null && run.phase === record.idlePhase) record.exit = { ...record.exit, noLaunchPhase: record.idlePhase };
+        this.save();
+      }
       await client['run.exit'](record.exit);
       // No await between checking and deleting: no newer snapshot can be discarded.
-      if (!record.usage && record.pid === null) { delete this.runs[record.runId]; this.save(); }
+      if (!record.usage) { delete this.runs[record.runId]; this.save(); }
     }
   }
   /** Must finish before first claim. Unknown/recycled identities remain held and are never signaled. */
@@ -120,8 +149,21 @@ export class WorkerJournal {
       const detail = await client['task.get']({ id: record.taskId }).catch(() => null);
       const attested = detail?.runs.find(run => run.id === record.runId && run.generation === record.owner.generation && run.machine_id === this.machineId && run.status === 'stopped' && run.pid === null && run.stop_reason?.startsWith('Owner ') && run.stop_reason.includes('attested stopped:'));
       if (attested) {
+        for (const utility of record.utilities ?? []) utility.state = 'exited';
         record.pid = null; record.startedAt = null; record.phase = null;
         record.exit = { runId: record.runId, taskId: record.taskId, owner: record.owner, reaped: true }; this.save();
+      }
+      let utilitiesHeld = false;
+      for (const utility of record.utilities ?? []) {
+        if (utility.state === 'exited') continue;
+        if (utility.pid === null) { utilitiesHeld = true; continue; }
+        const proof = await terminateRecordedProcess({ pid: utility.pid, startedAt: utility.startedAt });
+        if (!['exited', 'terminated'].includes(proof.status)) { utilitiesHeld = true; continue; }
+        utility.state = 'exited'; this.save();
+      }
+      if (record.exit) {
+        try { await this.replayRun(client, record); } catch { held.add(record.taskId); }
+        continue;
       }
       if (record.pid === null && record.phase?.endsWith(':spawning')) { held.add(record.taskId); continue; }
       if (record.pid !== null) {
@@ -136,8 +178,10 @@ export class WorkerJournal {
         record.exit = { runId: record.runId, taskId: record.taskId, owner: record.owner, reaped: true, ...(identity.startedAt !== null ? { process: { pid: identity.pid, startedAt: identity.startedAt } } : {}) };
         record.pid = null; record.startedAt = null; record.phase = null;
       }
-      record.exit ??= { runId: record.runId, taskId: record.taskId, owner: record.owner, reaped: true };
+      record.exit ??= { runId: record.runId, taskId: record.taskId, owner: record.owner, reaped: true,
+        ...(record.phase && !record.phase.endsWith(':spawning') ? { noLaunchPhase: record.phase } : {}) };
       this.save();
+      if (utilitiesHeld) { held.add(record.taskId); continue; }
       try { await this.replayRun(client, record); } catch { held.add(record.taskId); }
     }
     return held;

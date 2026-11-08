@@ -26,7 +26,8 @@ import { writeFileSync } from 'node:fs';
 import { paths } from './paths.ts';
 import type { TerminateResult } from './proc.ts';
 import type { UsageSnapshot } from './usage.ts';
-import { attachRun, describeBudgetHold, enforcementFor, listHeld, observedSpendUsd, readAllowance, recordUsageDelta, release, requireHeld, reserve, type Reservation } from './budgets.ts';
+import { utilitiesStopped, utilities, recordUtility, runUtilityKey, forgetStoppedUtilities, taskHasPendingUtilities } from './utility-records.ts';
+import { attachRun, createAllowanceReader, describeBudgetHold, enforcementFor, listHeld, observedSpendUsd, readAllowance, recordUsageDelta, release, requireHeld, reserve, type AllowanceQuery, type Reservation } from './budgets.ts';
 
 type Row = Record<string, unknown>;
 
@@ -509,7 +510,7 @@ export class Coordinator {
   }
 
   /** User and agent controls. All are safe to repeat. */
-  control(id: string, action: 'retry' | 'cancel' | 'stop' | 'approve' | 'prioritize' | 'redirect' | 'confirm-stopped', by: string, note?: string): Task {
+  control(id: string, action: 'retry' | 'cancel' | 'stop' | 'approve' | 'prioritize' | 'redirect' | 'confirm-stopped', by: string, note?: string, options: { remote?: boolean } = {}): Task {
     const t = this.getTask(id);
     if (!t) throw new Error(`No task ${id}`);
     switch (action) {
@@ -518,10 +519,22 @@ export class Coordinator {
         return tx(this.db, () => {
           const current = this.getTask(id)!;
           if (['running', 'verifying', 'merging'].includes(current.status)) throw new Error('Stop the active task before attesting to a recovered spawning window.');
-          const holds = this.runsFor(id).filter(r => r.status === 'cleanup_failed' && r.pid === null && r.phase?.endsWith(':spawning'));
+          const holds = this.runsFor(id).filter(r => {
+            if (r.status !== 'cleanup_failed') return false;
+            if (options.remote) {
+              if (this.getMeta(`recovery:${r.id}`) !== 'remote_lease_expired') return false;
+              const machine = this.getMachine(r.machine_id);
+              const credential = this.db.prepare('SELECT COUNT(*) AS total, SUM(revoked_at IS NULL AND expires_at > ?) AS live FROM fleet_credentials WHERE machine_id = ?').get(Date.now(), r.machine_id) as { total: number; live: number | null };
+              return !machine || Date.now() - machine.last_seen > LEASE_MS || (credential.total > 0 && !credential.live);
+            }
+            return r.pid === null && (r.phase?.endsWith(':spawning') || utilities(this.db, runUtilityKey(r.id)).some(child => child.state !== 'exited' && child.pid === null));
+          });
           if (!holds.length) throw new Error('No PID-less spawning-window hold exists for this task.');
           for (const run of holds) {
-            this.updateRun(run.id, { status: 'stopped', phase: null, proc_started: null, ended_at: Date.now(), stop_reason: `Owner ${by} attested stopped: ${clip(note, 1000)}` });
+            for (const child of utilities(this.db, runUtilityKey(run.id))) if (child.state !== 'exited') recordUtility(this.db, runUtilityKey(run.id), { action: 'exit', token: child.token, pid: child.pid, startedAt: child.startedAt, reaped: true });
+            forgetStoppedUtilities(this.db, runUtilityKey(run.id));
+            this.setMeta(`recovery:${run.id}`, null);
+            this.updateRun(run.id, { status: 'stopped', phase: null, pid: null, proc_started: null, ended_at: Date.now(), stop_reason: `Owner ${by} attested stopped: ${clip(note, 1000)}` });
             const budget = listHeld(this.db).find(r => r.runId === run.id);
             if (budget) release(this.db, budget.id, { kind: 'exited', runId: run.id });
           }
@@ -665,7 +678,9 @@ export class Coordinator {
   }
 
   spentToday(): number {
-    return this.memo('spent', () => this.spentTodayUncached());
+    return this.passMemo
+      ? this.displayAllowance({ taskId: null, taskCapUsd: null, dailyCapUsd: null }).observedTodayUsd
+      : this.spentTodayUncached();
   }
 
   private spentTodayUncached(): number {
@@ -700,9 +715,15 @@ export class Coordinator {
     return out;
   }
 
+  private displayAllowance(query: AllowanceQuery) {
+    if (!this.passMemo) return readAllowance(this.db, query);
+    return this.memo('budget-display', () => createAllowanceReader(this.db))(query);
+  }
+
   /** Why a queued task is not running yet, in plain language. Null means it can start now. */
   blocker(task: Task, now = Date.now(), reservationHolder?: string): string | null {
     if (this.db.prepare("SELECT 1 FROM runs WHERE task_id = ? AND status = 'cleanup_failed' LIMIT 1").get(task.id)) return 'An earlier owned process has not been confirmed stopped. Worktree is held for recovery.';
+    if (taskHasPendingUtilities(this.db, task.id)) return 'An earlier Git or copy utility has not confirmed exit. Work is held for recovery.';
     const pause = this.pausedState(task.project_id);
     if (pause.paused) return `Paused by ${pause.by ?? 'you'}. Resume to start new work.`;
     if (task.not_before && task.not_before > now) return `Retrying in ${Math.ceil((task.not_before - now) / 1000)}s`;
@@ -733,7 +754,7 @@ export class Coordinator {
         if (hits.length) return `Waiting: ${lock.holder} has reserved ${lock.pattern}${lock.reason ? ` (${clip(lock.reason, 40)})` : ''}`;
       }
     }
-    const allowance = readAllowance(this.db, { taskId: task.id, taskCapUsd: task.budget_usd,
+    const allowance = this.displayAllowance({ taskId: task.id, taskCapUsd: task.budget_usd,
       dailyCapUsd: this.configFor(task.project_id).budget.dailyUsd });
     if (allowance.availableUsd !== null && allowance.availableUsd < .01) return describeBudgetHold(allowance);
     return null;
@@ -888,15 +909,21 @@ export class Coordinator {
       const run = this.getRun(runId);
       if (!run || run.task_id !== taskId || !owner.generation || run.generation !== owner.generation || owner.assignee !== `machine:${run.machine_id}`) throw new Error('Exit acknowledgment does not belong to this run.');
       const held = listHeld(this.db).find(r => r.runId === runId);
-      if (!held && !['running', 'lost', 'cleanup_failed'].includes(run.status)) return; // An acknowledged exit is replay-safe.
+      if (!utilitiesStopped(this.db, runUtilityKey(runId))) throw new Error('Owned utilities have not all confirmed exit.');
+      if (!held && !['running', 'lost', 'cleanup_failed'].includes(run.status)) {
+        forgetStoppedUtilities(this.db, runUtilityKey(runId));
+        return; // An acknowledged exit is replay-safe.
+      }
       const matchedNoLaunch = noLaunchPhase !== undefined && run.pid === null && run.phase === noLaunchPhase && !noLaunchPhase.endsWith(':spawning');
       if (noLaunchPhase !== undefined && !matchedNoLaunch) throw new Error('No-launch phase does not match this recorded run.');
       const matchedProcess = process !== undefined && run.pid === process.pid && run.proc_started !== null && run.proc_started === process.startedAt;
       if (process && !matchedProcess) throw new Error('Exit process identity does not match this recorded run.');
       if (run.status === 'cleanup_failed' && !matchedProcess && !matchedNoLaunch) throw new Error('Process cleanup failed; identity-proven recovery must confirm exit before releasing its budget.');
-      const remoteRecovery = run.status === 'cleanup_failed' && run.stop_reason === 'Remote worker must confirm owned process-group exit before work can restart.';
+      const remoteRecovery = run.status === 'cleanup_failed' && this.getMeta(`recovery:${run.id}`) === 'remote_lease_expired';
       if (['running', 'lost', 'cleanup_failed'].includes(run.status)) this.updateRun(run.id, { status: 'stopped', ended_at: Date.now(), phase: null, pid: null, proc_started: null });
       if (held) release(this.db, held.id, { kind: 'exited', runId });
+      forgetStoppedUtilities(this.db, runUtilityKey(runId));
+      this.setMeta(`recovery:${runId}`, null);
       if (remoteRecovery) {
         const task = this.getTask(taskId);
         const otherLive = this.runsFor(taskId).some(r => r.id !== runId && r.generation === run.generation && ['running', 'lost', 'cleanup_failed'].includes(r.status));
@@ -917,9 +944,11 @@ export class Coordinator {
     tx(this.db, () => {
       const run = this.getRun(runId);
       if (!run) throw new Error(`Unknown run ${runId}`);
+      if (!utilitiesStopped(this.db, runUtilityKey(runId))) throw new Error('Owned utilities still require recovery.');
       this.updateRun(runId, { status: 'stopped', pid: null, proc_started: null, phase: null, ended_at: Date.now(), stop_reason: 'process recovery confirmed group exit' });
       const held = listHeld(this.db).find(r => r.runId === runId);
       if (held) release(this.db, held.id, { kind: 'exited', runId });
+      forgetStoppedUtilities(this.db, runUtilityKey(runId));
       this.invalidate();
       this.changed();
     });
@@ -928,13 +957,17 @@ export class Coordinator {
   confirmPlanStopped(runId: string, by: string, note: string): void {
     tx(this.db, () => {
       const run = this.getRun(runId);
-      if (!run || String(run.role) !== 'plan' || run.status !== 'cleanup_failed' || run.pid !== null || !run.phase?.endsWith(':spawning')) throw new Error('No PID-less planning spawn-window hold exists.');
+      if (!run || String(run.role) !== 'plan' || run.status !== 'cleanup_failed') throw new Error('No planning process recovery hold exists.');
+      const invocation = this.getPlanInvocation(runId);
+      if (invocation && invocation.leaseUntil > Date.now()) throw new Error('Planning invocation still has an active lease.');
+      if (run.pid === null && !run.phase?.endsWith(':spawning')) throw new Error('No planning spawn-window or recorded-process hold exists.');
       if (note.trim().length < 12) throw new Error('Describe how you verified all planning processes stopped (at least 12 characters).');
       const held = listHeld(this.db).find(r => r.runId === runId);
-      this.updateRun(runId, { status: 'stopped', phase: null, proc_started: null, ended_at: Date.now(), stop_reason: `Owner ${by} attested stopped: ${clip(note, 1000)}` });
+      this.updateRun(runId, { status: 'stopped', phase: null, pid: null, proc_started: null, ended_at: Date.now(), stop_reason: `Owner ${by} attested stopped: ${clip(note, 1000)}` });
+      this.setMeta(`plan_invocation:${runId}`, null);
       if (held) release(this.db, held.id, { kind: 'exited', runId });
       this.event(held?.projectId ?? null, null, 'warn', 'process.owner_confirmed_stopped', `${by} attested the planning process stopped: ${clip(note, 1000)}`,
-        { runId, generation: run.generation, machineId: run.machine_id, phase: run.phase });
+        { runId, generation: run.generation, machineId: run.machine_id, phase: run.phase, pid: run.pid, startedAt: run.proc_started });
       this.invalidate();
       this.changed();
     });
@@ -954,7 +987,7 @@ export class Coordinator {
     });
   }
 
-  startPlan(projectId: string, machineId: string, agent: string, model: string | null): { runId: string; budget: Reservation } {
+  startPlan(projectId: string, machineId: string, agent: string, model: string | null, owner?: { pid: number; startedAt: number }): { runId: string; budget: Reservation; leaseMs: number; heartbeatMs: number } {
     return tx(this.db, () => {
       if (!this.getProject(projectId)) throw new Error(`Unknown project ${projectId}`);
       const cfg = this.configFor(projectId);
@@ -965,8 +998,56 @@ export class Coordinator {
       this.db.prepare(`INSERT INTO runs (id, task_id, generation, attempt, machine_id, agent, model, status, started_at, role, phase)
         VALUES (?, ?, 1, 0, ?, ?, ?, 'running', ?, 'plan', 'plan')`).run(runId, `plan:${projectId}`, machineId, agent, model, Date.now());
       attachRun(this.db, admission.reservation.id, runId);
+      const leaseMs = 30_000;
+      this.setMeta(`plan_invocation:${runId}`, JSON.stringify({ owner: owner ?? null, leaseUntil: Date.now() + leaseMs, leaseMs }));
       this.invalidate();
-      return { runId, budget: requireHeld(this.db, runId) };
+      return { runId, budget: requireHeld(this.db, runId), leaseMs, heartbeatMs: 5_000 };
+    });
+  }
+
+  /** A CLI invocation lease is independent of the machine heartbeat (MCP owners may stay alive forever). */
+  getPlanInvocation(runId: string): { owner: { pid: number; startedAt: number } | null; leaseUntil: number; leaseMs: number } | null {
+    const raw = this.getMeta(`plan_invocation:${runId}`);
+    return raw ? JSON.parse(raw) : null;
+  }
+
+  heartbeatPlan(runId: string, owner: { pid: number; startedAt: number }): { leaseUntil: number } {
+    return tx(this.db, () => {
+      const run = this.getRun(runId);
+      const invocation = this.getPlanInvocation(runId);
+      if (!run || String(run.role) !== 'plan' || run.status !== 'running' || !invocation || invocation.leaseUntil <= Date.now()) throw new Error('Planning invocation lease is no longer active.');
+      if (invocation.owner?.pid !== owner.pid || invocation.owner.startedAt !== owner.startedAt) throw new Error('Planning invocation owner identity does not match.');
+      invocation.leaseUntil = Date.now() + invocation.leaseMs;
+      this.setMeta(`plan_invocation:${runId}`, JSON.stringify(invocation));
+      return { leaseUntil: invocation.leaseUntil };
+    });
+  }
+
+  finishPlan(runId: string, result: { reaped: boolean; succeeded: boolean; reason?: string; process?: { pid: number; startedAt: number }; noLaunchPhase?: string; spawnFailure?: { status: 'spawn_failed'; pid: null } }): void {
+    tx(this.db, () => {
+      const run = this.getRun(runId);
+      if (!run || String(run.role) !== 'plan') throw new Error('No planning run.');
+      if (!listHeld(this.db).some(r => r.runId === runId) && !['running', 'lost', 'cleanup_failed'].includes(run.status)) return;
+      if (result.reaped) {
+        const matchedProcess = result.process && run.pid === result.process.pid && run.proc_started === result.process.startedAt;
+        const matchedNoLaunch = result.noLaunchPhase !== undefined && run.pid === null && run.phase === result.noLaunchPhase && !result.noLaunchPhase.endsWith(':spawning');
+        if (result.process && !matchedProcess) throw new Error('Planning process identity does not match this recorded run.');
+        if (result.noLaunchPhase !== undefined && !matchedNoLaunch) throw new Error('Planning no-launch phase does not match this recorded run.');
+        const failedSpawn = result.spawnFailure?.status === 'spawn_failed' && result.spawnFailure.pid === null && run.pid === null && run.phase === 'plan:spawning';
+        if (!matchedProcess && !matchedNoLaunch && !failedSpawn) throw new Error('Planning exit requires matching recorded process identity, no-launch phase, or spawn-failure proof.');
+      }
+      this.updateRun(run.id, { status: result.reaped ? result.succeeded ? 'succeeded' : 'failed' : 'cleanup_failed', ended_at: Date.now(), stop_reason: result.reason ?? null,
+        ...(result.reaped ? { pid: null, proc_started: null, phase: null } : {}) });
+      if (!result.reaped) {
+        const invocation = this.getPlanInvocation(runId);
+        if (invocation) this.setMeta(`plan_invocation:${runId}`, JSON.stringify({ ...invocation, leaseUntil: Date.now() }));
+      }
+      if (result.reaped) {
+        const held = listHeld(this.db).find(r => r.runId === runId);
+        if (held) release(this.db, held.id, { kind: 'exited', runId });
+        this.setMeta(`plan_invocation:${runId}`, null);
+      }
+      this.invalidate(); this.changed();
     });
   }
 

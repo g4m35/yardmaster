@@ -155,6 +155,28 @@ test('interrupted integration rolls back only its recorded result and keeps late
   }
 });
 
+test('owner can adopt an inspected interrupted commit only after exact-head checks pass', async () => {
+  for (const passing of [true, false]) {
+    const s = await candidate({ verify: passing ? ['node check.mjs'] : ['node -e "process.exit(1)"'] });
+    try {
+      const path = s.hub.integrator.integrationPath(s.project, s.hub.coord.configFor(s.project.id));
+      const before = sh(path, 'git', ['rev-parse', 'HEAD']);
+      writeFileSync(join(path, 'manual.txt'), 'keep the inspected owner commit');
+      sh(path, 'git', ['add', '-A']); sh(path, 'git', ['commit', '-qm', 'manual recovery']);
+      const head = sh(path, 'git', ['rev-parse', 'HEAD']);
+      s.hub.coord.setMeta(`integrating:${s.project.id}`, before);
+      s.hub.coord.updateTask(s.task.id, { status: 'merging' });
+      await assert.rejects(s.hub.client['integration.adopt']({ projectId: s.project.id, head: before, note: 'Inspected all preserved changes.' }), /exact current HEAD/);
+      const adoption = s.hub.client['integration.adopt']({ projectId: s.project.id, head, note: 'Inspected all preserved changes.' });
+      if (passing) await adoption; else await assert.rejects(adoption, /did not pass checks/);
+      assert.equal(sh(path, 'git', ['rev-parse', 'HEAD']), head);
+      assert.equal(sh(path, 'git', ['show', 'HEAD:manual.txt']), 'keep the inspected owner commit');
+      assert.equal(s.hub.coord.getTask(s.task.id)!.status, passing ? 'ready' : 'merging');
+      assert.equal(s.hub.coord.getMeta(`integrating:${s.project.id}`), passing ? null : before);
+    } finally { s.db.close(); }
+  }
+});
+
 test('checks cannot validate different tracked contents, staged files or HEAD', async () => {
   for (const action of ['edit', 'stage', 'commit', 'move-head'] as const) {
     const s = sandbox();

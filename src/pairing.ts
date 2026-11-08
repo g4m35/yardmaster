@@ -293,6 +293,8 @@ export function authorizeWorkerRpc(coord: Coordinator, who: WorkerIdentity, meth
     case 'run.exit':
       if (p.reaped !== true) fail();
       ownRun(coord, who, p.runId, p.owner, p.taskId, true); return;
+    case 'run.utility':
+      ownRun(coord, who, p.runId, p.owner, p.taskId, record(p.operation).action !== 'intent'); return;
     case 'run.usage':
       // Reserved for an optional ledger endpoint. Dispatch still rejects it unless installed.
       // Historical accounting grants no right to update/log/renew an old claim or its lifecycle.

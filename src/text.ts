@@ -1,12 +1,11 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 
 export function sha1(s: string): string {
   return createHash('sha1').update(s).digest('hex');
 }
 
 export function shortId(prefix: string): string {
-  const n = Date.now().toString(36).slice(-4) + Math.random().toString(36).slice(2, 5);
-  return `${prefix}-${n}`;
+  return `${prefix}-${randomBytes(8).toString('hex')}`;
 }
 
 const STOP_WORDS = new Set([

@@ -81,6 +81,7 @@ export class Hub {
         for (const a of this.worker.active.values()) if (!projectId || a.task.project_id === projectId) a.stop?.('shutdown', 'Paused by you');
       },
       integrationHead: (projectId) => this.integrator.head(projectId),
+      adoptIntegration: (projectId, head, by, note) => this.integrator.adopt(projectId, head, by, note),
       cleanPlan: (projectId) => planCleanup(this.coord, projectId),
       cleanRun: async (projectId) => runCleanup(this.coord, await planCleanup(this.coord, projectId)),
     });
@@ -445,6 +446,7 @@ export class Hub {
       // Into a private namespace: never clobbers a branch that is checked out on the hub.
       // Isolate generations and concurrent requests; a stale stream cannot overwrite another delivery.
       const ref = `refs/yardmaster/receiving/${taskId}/${generation}/${shortId('u')}`;
+      return await this.integrator.withLock(project.id, async () => {
       try {
       const r = await git(project.root, ['fetch', '--no-tags', file, `+refs/heads/${branch}:${ref}`], { allowFail: true });
       guard();
@@ -458,6 +460,7 @@ export class Hub {
       this.coord.event(task.project_id, taskId, 'info', 'task.branch_received', `Received the verified work for "${task.title}" from ${this.coord.getMachine(machine)?.name ?? machine}`);
       return json(res, 200, { ok: true, result: { head, generation } });
       } finally { await git(project.root, ['update-ref', '-d', ref], { allowFail: true }); }
+      });
     } catch (err) {
       return json(res, 409, { ok: false, error: (err as Error).message });
     } finally {

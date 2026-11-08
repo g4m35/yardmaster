@@ -13,6 +13,8 @@ import { Semaphore } from '../src/runner.ts';
 import { Integrator } from '../src/integrator.ts';
 import { loadConfig } from '../src/config.ts';
 import { groupAlive, processStartTime, terminateOwnedGroup } from '../src/proc.ts';
+import { recover } from '../src/janitor.ts';
+import { listHeld } from '../src/budgets.ts';
 import { sandbox, sh, until } from './helpers.ts';
 
 async function fixture() {
@@ -27,6 +29,61 @@ async function fixture() {
   return { ...box, coord, project, client, task: claimed, owner, worker };
 }
 const noopTransport: BranchTransport = { async fetchBase() {}, async uploadBranch(task) { return { head: task.head_sha! }; } };
+
+test('expired remote leases recover idle phases with durable no-launch proof', async () => {
+  for (const phase of ['prepare', 'route', 'collect', 'verify', 'review_wait']) {
+    const s = await fixture();
+    try {
+      const journal = new WorkerJournal('m-worker');
+      const api = journal.wrap(s.client);
+      const runId = await api['run.start']({ taskId: s.task.id, machineId: 'm-worker', agent: 'mock', logPath: '', owner: s.owner });
+      await api['run.update']({ runId, owner: s.owner, patch: { phase, pid: null } });
+      s.coord.updateTask(s.task.id, { lease_until: Date.now() - 1 });
+      await recover(s.coord, 'm-hub', new Set());
+      assert.equal(s.coord.getRun(runId)!.status, 'cleanup_failed');
+      assert.equal((await new WorkerJournal('m-worker').recover(s.client)).size, 0, phase);
+      assert.equal(s.coord.getTask(s.task.id)!.status, 'queued', phase);
+      assert.equal(s.coord.getTask(s.task.id)!.generation, s.task.generation, phase);
+      assert.equal(listHeld(s.coord.db).length, 0, phase);
+    } finally { s.coord.db.close(); }
+  }
+});
+
+test('a waking runner keeps reaped identity when its lease expires before final acknowledgment', async () => {
+  const s = await fixture(); const child = await sleeper();
+  try {
+    const journal = new WorkerJournal('m-worker'); const api = journal.wrap(s.client);
+    const runId = await api['run.start']({ taskId: s.task.id, machineId: 'm-worker', agent: 'mock', logPath: '', owner: s.owner });
+    await api['run.update']({ runId, owner: s.owner, patch: { phase: 'agent', pid: child.pid, proc_started: await processStartTime(child.pid!) } });
+    s.coord.updateTask(s.task.id, { lease_until: Date.now() - 1 });
+    assert.equal((await terminateOwnedGroup(child.pid!, { graceMs: 20 })).status, 'terminated');
+    // The local journal sees the supervised exit even though the hub refuses this expired write.
+    await assert.rejects(api['run.update']({ runId, owner: s.owner, patch: { phase: 'collect', pid: null, proc_started: null } }));
+    await recover(s.coord, 'm-hub', new Set());
+    await api['run.exit']({ runId, taskId: s.task.id, owner: s.owner, reaped: true });
+    assert.equal(s.coord.getTask(s.task.id)!.status, 'queued');
+    assert.equal(listHeld(s.coord.db).length, 0);
+    assert.equal(Object.keys(journal.runs).length, 0);
+  } finally { await terminateOwnedGroup(child.pid!, { graceMs: 20 }); s.coord.db.close(); }
+});
+
+test('lost-machine attestation is owner-only, requires stale connection and never retries work', async () => {
+  const s = await fixture();
+  try {
+    const run = s.coord.startRun(s.task, 'm-worker', 'mock', null, '');
+    s.coord.updateRun(run.id, { phase: 'agent', pid: 424242, proc_started: 100 });
+    s.coord.updateTask(s.task.id, { lease_until: Date.now() - 1 });
+    s.coord.heartbeatMachine('m-worker', 'worker', { agents: ['mock'], repos: { [s.project.id]: s.repo } } as never, false);
+    await recover(s.coord, 'm-hub', new Set());
+    await assert.rejects(s.client['task.control']({ id: s.task.id, action: 'confirm-stopped', remote: true, note: 'All remote groups were verified stopped.' }), /No PID-less/);
+    s.coord.db.prepare('UPDATE machines SET last_seen = ? WHERE id = ?').run(Date.now() - 100_000, 'm-worker');
+    await s.client['task.control']({ id: s.task.id, action: 'confirm-stopped', remote: true, note: 'All remote groups were verified stopped.' });
+    assert.equal(s.coord.getTask(s.task.id)!.status, 'needs_human');
+    assert.equal(s.coord.getRun(run.id)!.status, 'stopped');
+    assert.equal(listHeld(s.coord.db).length, 0);
+    assert.ok(s.coord.eventsSince(0, s.project.id, 100).some(event => event.kind === 'process.owner_confirmed_stopped'));
+  } finally { s.coord.db.close(); }
+});
 
 async function sleeper() {
   const child = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); console.log('ready'); setInterval(() => {}, 1000)"], { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
@@ -132,6 +189,9 @@ async function readyArtifact(s: Awaited<ReturnType<typeof fixture>>) {
   const head = sh(path, 'git', ['rev-parse', 'HEAD']);
   const journal = new WorkerJournal('m-worker');
   const api = journal.wrap(s.client, { repo: s.repo, branch: s.task.branch!, base });
+  const runId = await api['run.start']({ taskId: s.task.id, machineId: 'm-worker', agent: 'mock', logPath: '', owner: s.owner });
+  await api['run.update']({ runId, owner: s.owner, patch: { status: 'done', pid: null, phase: 'prepare' } });
+  await api['run.exit']({ runId, taskId: s.task.id, owner: s.owner, reaped: true, noLaunchPhase: 'prepare' });
   await api['task.update']({ id: s.task.id, owner: s.owner, patch: { status: 'ready', head_sha: head, base_sha: base, worktree: path, ready_at: Date.now(), lease_until: null } });
   return { path, head, base };
 }
@@ -150,7 +210,7 @@ test('ready artifact is durable before ready RPC; transient upload retries acros
     await s.worker(transport).recoverLocal();
     assert.equal(calls, 2);
     assert.equal(new WorkerJournal('m-worker').artifacts[s.task.id]!.uploaded, true);
-    assert.equal(s.coord.runsFor(s.task.id).length, 0);
+    assert.equal(s.coord.runsFor(s.task.id).length, 1, 'upload must not launch another model attempt');
   } finally { s.coord.db.close(); }
 });
 
@@ -204,7 +264,7 @@ test('upload retry budget is bounded and never invokes a new agent', async () =>
     }
     assert.equal(calls, 6);
     assert.equal(s.coord.getTask(s.task.id)!.status, 'needs_human');
-    assert.equal(s.coord.runsFor(s.task.id).length, 0);
+    assert.equal(s.coord.runsFor(s.task.id).length, 1, 'upload must not launch another model attempt');
   } finally { s.coord.db.close(); }
 });
 

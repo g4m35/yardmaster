@@ -71,7 +71,7 @@ function parseArgs(argv: string[]): Args {
 }
 
 const SHORT: Record<string, string> = { f: 'follow', n: 'lines', y: 'yes', j: 'json', h: 'help' };
-const BOOLEAN_FLAGS = new Set(['confirm-stopped', 'scan', 'dedupe', 'restore', 'purge', 'with-hooks', 'no-hooks', 'experimental', 'no-skill', 'now', 'version', 'follow', 'yes', 'json', 'help', 'all', 'dry-run', 'foreground', 'force', 'no-changes-ok', 'watch', 'with-hook', 'no-hub', 'open', 'draft', 'quiet', 'hooks-path']);
+const BOOLEAN_FLAGS = new Set(['confirm-stopped', 'remote', 'scan', 'dedupe', 'restore', 'purge', 'with-hooks', 'no-hooks', 'experimental', 'no-skill', 'now', 'version', 'follow', 'yes', 'json', 'help', 'all', 'dry-run', 'foreground', 'force', 'no-changes-ok', 'watch', 'with-hook', 'no-hub', 'open', 'draft', 'quiet', 'hooks-path']);
 
 const flag = (a: Args, k: string) => (typeof a.flags[k] === 'string' ? (a.flags[k] as string) : undefined);
 const list = (a: Args, k: string) => flag(a, k)?.split(',').map((s) => s.trim()).filter(Boolean);
@@ -172,6 +172,8 @@ ${bold('Manage work')}
   ym show <id>   ym logs <id> [-f]   ym retry|cancel|stop|approve <id>
   ym tell <id> "do X instead"  redirect a running agent (it keeps its work so far)
   ym recover --confirm-stopped <id> --note "exit verified"  attest a PID-less spawn hold stopped
+  ym recover --confirm-stopped <task> --remote --note "exit verified"  attest a lost worker stopped
+  ym integration adopt <project> --head <SHA> --note "inspected"  check and keep interrupted merge work
   ym pause [--now] [--all]     stop new work from starting (--now also parks running agents)
   ym resume                    start queued work again
   ym disk                      what uses disk space and what can be freed (--scan: duplicate dependencies anywhere)
@@ -374,8 +376,18 @@ async function cmdRecover(a: Args) {
   const client = await getClient(a);
   if (id.startsWith('r-')) await client['plan.confirmStopped']({ runId: id, by: 'you', note });
   else if (id.startsWith('p-')) await client['integration.confirmStopped']({ projectId: id, by: 'you', note });
-  else await client['task.control']({ id, action: 'confirm-stopped', by: 'you', note });
+  else await client['task.control']({ id, action: 'confirm-stopped', by: 'you', note, remote: a.flags.remote === true });
   console.log(green(`✔ ${id}: owner exit attestation recorded. Work is preserved.${id.startsWith('t-') ? ` Retry with ym retry ${id}.` : ''}`));
+}
+
+async function cmdIntegration(a: Args) {
+  if (a._[1] !== 'adopt') die('Use ym integration adopt <project> --head <inspected SHA> --note "what you verified".');
+  const projectId = a._[2] ?? die('Pass the project id shown by the integration warning.');
+  const head = flag(a, 'head'); const note = flag(a, 'note');
+  if (!head || !/^[a-f0-9]{40,64}$/.test(head) || !note || note.trim().length < 12) die('Pass --head with the exact inspected SHA and --note with at least 12 characters.');
+  const client = await getClient(a);
+  await client['integration.adopt']({ projectId, head, by: 'you', note });
+  console.log(green('✔ Inspected integration commit checked and preserved. Pending artifacts return to verification and integration.'));
 }
 
 async function cmdControl(a: Args, action: 'retry' | 'cancel' | 'stop' | 'approve') {
@@ -998,6 +1010,7 @@ async function main() {
     case 'add': return cmdAdd(a);
     case 'plan': return cmdPlan(a);
     case 'recover': return cmdRecover(a);
+    case 'integration': return cmdIntegration(a);
     case 'status': case 'ls': return cmdStatus(a);
     case 'show': return cmdShow(a);
     case 'logs': return cmdLogs(a);

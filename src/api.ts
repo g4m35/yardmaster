@@ -15,7 +15,8 @@ import { coupling, filesIn } from './imports.ts';
 import { PairingStore } from './pairing.ts';
 import { buildRegistry } from './registry.ts';
 import { tx } from './transaction.ts';
-import { WORKER_FINALIZE_STATUSES } from './worker-policy.ts';
+import { WORKER_ACTIVE_STATUSES, WORKER_FINALIZE_STATUSES } from './worker-policy.ts';
+import { recordUtility, runUtilityKey, utilitiesStopped, utilities } from './utility-records.ts';
 
 /**
  * The single API surface. The hub serves it over HTTP, the CLI and MCP server call it locally or
@@ -27,6 +28,7 @@ export interface HubHooks {
   supervisor?: Supervisor;
   stopRunning?: (projectId?: string | null) => void;
   integrationHead?: (projectId: string) => Promise<string | null>;
+  adoptIntegration?: (projectId: string, head: string, by: string, note: string) => Promise<void>;
   cleanPlan?: (projectId?: string) => Promise<unknown>;
   cleanRun?: (projectId?: string) => Promise<unknown>;
 }
@@ -135,6 +137,25 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
   };
 
   return {
+    'run.utility': method(z.object({ runId: RunId, taskId: TaskId, owner: Owner,
+      operation: z.discriminatedUnion('action', [
+        z.object({ action: z.literal('intent'), token: Id, command: z.string().min(1).max(2000), preserving: z.boolean().optional(), preservationId: Id.optional() }),
+        z.object({ action: z.literal('spawn'), token: Id, pid: z.number().int().positive(), startedAt: z.number().nullable() }),
+        z.object({ action: z.literal('exit'), token: Id, pid: z.number().int().positive().nullable(), startedAt: z.number().nullable(), reaped: z.boolean() }),
+      ]) }), p => tx(coord.db, () => {
+      const run = coord.getRun(p.runId);
+      if (!run || run.task_id !== p.taskId || run.generation !== p.owner.generation || p.owner.assignee !== `machine:${run.machine_id}`) throw new Error('Utility does not belong to this recorded run.');
+      if (p.operation.action === 'exit' && !['running', 'lost', 'cleanup_failed'].includes(run.status) &&
+          !coord.db.prepare("SELECT 1 FROM budget_reservations WHERE run_id = ? AND state = 'held'").get(run.id) && coord.getMeta(runUtilityKey(run.id)) === null) return;
+      if (p.operation.action === 'intent') {
+        const task = coord.assertTaskOwner(p.taskId, { ...p.owner, statuses: WORKER_ACTIVE_STATUSES });
+        const preservationId = p.operation.preservationId;
+        const preserving = p.operation.preserving && !!preservationId && run.status === 'stopped' && run.pid === null &&
+          utilities(coord.db, runUtilityKey(run.id)).every(child => child.state === 'exited' || child.preservationId === preservationId);
+        if (run.status === 'cleanup_failed' || (task.control && !preserving)) throw new Error(`Run cannot launch another utility: status=${run.status}, pid=${run.pid ?? 'none'}, control=${task.control ?? 'none'}, preservation=${p.operation.preserving === true}, priorExit=${utilitiesStopped(coord.db, runUtilityKey(run.id))}.`);
+      }
+      recordUtility(coord.db, runUtilityKey(p.runId), p.operation);
+    })),
     'run.usage': method(z.object({ runId: RunId, taskId: TaskId, owner: Owner, sequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
       usage: z.object({ costUsd: z.number().finite().nonnegative(), tokensIn: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), tokensOut: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
         provenance: z.enum(['actual', 'estimated', 'mixed', 'unknown']), cacheReadTokens: z.number().int().nonnegative(), cacheWriteTokens: z.number().int().nonnegative().nullable() }) }),
@@ -145,6 +166,10 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
     'fleet.identity': method(z.object({}), () => ({ kind: 'owner' } as { kind: 'owner' | 'worker'; machineId?: string; projectId?: string; expiresAt?: number })),
     'integration.confirmStopped': method(z.object({ projectId: Id, by: z.string().default('you'), note: z.string().min(12).max(4000) }),
       (p) => coord.confirmIntegrationStopped(p.projectId, p.by, p.note)),
+    'integration.adopt': method(z.object({ projectId: Id, head: z.string().regex(/^[a-f0-9]{40,64}$/), by: z.string().default('you'), note: z.string().min(12).max(4000) }), p => {
+      if (!hooks.adoptIntegration) throw new Error('Start the hub before adopting interrupted integration work.');
+      return hooks.adoptIntegration(p.projectId, p.head, p.by, p.note);
+    }),
     'registry.list': method(z.object({ projectId: Id.optional(), historyLimit: z.number().int().min(0).max(500).default(100) }), (p) => buildRegistry(coord.db, p)),
     'fleet.invite': method(z.object({ projectId: Id, ttlMs: z.number().int().optional(), credentialTtlMs: z.number().int().optional() }), (p) => pairing.createInvitation(owner, p)),
     'fleet.devices': method(z.object({}), () => ({ credentials: pairing.listCredentials(owner), invitations: pairing.listInvitations(owner) })),
@@ -175,7 +200,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       const t = coord.getTask(p.id);
       return { status: t?.status ?? 'missing', control: t?.control ?? null, assignee: t?.assignee ?? null, attempts: t?.attempts ?? 0, generation: t?.generation ?? 0, head_sha: t?.head_sha ?? null, branch: t?.branch ?? null, lease_until: t?.lease_until ?? null };
     }),
-    'task.control': method(z.object({ id: Id, action: z.enum(['retry', 'cancel', 'stop', 'approve', 'prioritize', 'redirect', 'confirm-stopped']), by: z.string().default('you'), note: z.string().max(4000).optional() }), (p) => coord.control(p.id, p.action, p.by, p.note)),
+    'task.control': method(z.object({ id: Id, action: z.enum(['retry', 'cancel', 'stop', 'approve', 'prioritize', 'redirect', 'confirm-stopped']), by: z.string().default('you'), note: z.string().max(4000).optional(), remote: z.boolean().optional() }), (p) => coord.control(p.id, p.action, p.by, p.note, { remote: p.remote })),
     'task.logs': method(z.object({ id: Id, lines: z.number().int().min(1).max(2000).default(80) }), (p) => {
       const run = coord.latestRun(p.id);
       if (!run) return '';
@@ -390,16 +415,23 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
     // Owner-only: scoped worker RPC authorization denies all plan.* methods.
     'plan.confirmStopped': method(z.object({ runId: RunId, by: z.string().default('you'), note: z.string().min(12).max(4000) }),
       (p) => coord.confirmPlanStopped(p.runId, p.by, p.note)),
-    'plan.start': method(z.object({ projectId: Id, machineId: Id, agent: Id, model: z.string().nullable() }),
-      (p) => coord.startPlan(p.projectId, p.machineId, p.agent, p.model)),
+    'plan.start': method(z.object({ projectId: Id, machineId: Id, agent: Id, model: z.string().nullable(), owner: z.object({ pid: z.number().int().positive(), startedAt: z.number().finite().positive() }).optional() }),
+      (p) => coord.startPlan(p.projectId, p.machineId, p.agent, p.model, p.owner)),
+    'plan.heartbeat': method(z.object({ runId: RunId, owner: z.object({ pid: z.number().int().positive(), startedAt: z.number().finite().positive() }) }),
+      (p) => coord.heartbeatPlan(p.runId, p.owner)),
     'plan.spawning': method(z.object({ runId: RunId }), (p) => {
       const run = coord.getRun(p.runId);
       if (!run || String(run.role) !== 'plan' || run.status !== 'running') throw new Error('No live planning run.');
+      if (run.pid !== null || run.phase !== 'plan') throw new Error('Planning child launch is already in progress.');
+      const invocation = coord.getPlanInvocation(run.id);
+      if (!invocation || invocation.leaseUntil <= Date.now()) throw new Error('Planning invocation lease expired before launch.');
       coord.updateRun(run.id, { phase: 'plan:spawning' });
     }),
     'plan.spawn': method(z.object({ runId: RunId, pid: z.number().int().positive(), startedAt: z.number().finite().positive() }), (p) => {
       const run = coord.getRun(p.runId);
       if (!run || String(run.role) !== 'plan' || run.status !== 'running') throw new Error('No live planning run.');
+      if (run.pid === p.pid && run.proc_started === p.startedAt) return;
+      if (run.pid !== null || run.phase !== 'plan:spawning') throw new Error('Planning child requires a recorded spawn intent.');
       coord.updateRun(run.id, { phase: 'plan', pid: p.pid, proc_started: p.startedAt });
     }),
     'plan.usage': method(z.object({ runId: RunId, sequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
@@ -409,14 +441,9 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       if (!run || String(run.role) !== 'plan') throw new Error('No planning run.');
       coord.recordRunUsage(run.id, run.task_id, { generation: run.generation, assignee: `machine:${run.machine_id}` }, p.sequence, p.usage);
     }),
-    'plan.finish': method(z.object({ runId: RunId, reaped: z.boolean(), succeeded: z.boolean(), reason: z.string().optional() }), (p) => tx(coord.db, () => {
-      const run = coord.getRun(p.runId);
-      if (!run || String(run.role) !== 'plan') throw new Error('No planning run.');
-      if (run.status === 'cleanup_failed') throw new Error('Planning cleanup requires process recovery.');
-      coord.updateRun(run.id, { status: p.reaped ? p.succeeded ? 'succeeded' : 'failed' : 'cleanup_failed', ended_at: Date.now(), stop_reason: p.reason ?? null,
-        ...(p.reaped ? { pid: null, proc_started: null, phase: null } : {}) });
-      if (p.reaped) coord.confirmRunExit(run.id, run.task_id, { generation: run.generation, assignee: `machine:${run.machine_id}` });
-    })),
+    'plan.finish': method(z.object({ runId: RunId, reaped: z.boolean(), succeeded: z.boolean(), reason: z.string().optional(),
+      process: z.object({ pid: z.number().int().positive(), startedAt: z.number().finite().positive() }).optional(), noLaunchPhase: z.string().optional(),
+      spawnFailure: z.object({ status: z.literal('spawn_failed'), pid: z.null() }).optional() }), (p) => coord.finishPlan(p.runId, p)),
     'budget.today': method(z.object({}), () => coord.spentToday()),
     'spend.record': method(z.object({ projectId: z.string().nullable(), agent: Id, model: z.string().nullable(), costUsd: z.number().min(0), tokensIn: z.number().int().min(0), tokensOut: z.number().int().min(0), role: z.enum(['plan']) }), (p) =>
       coord.recordSpend({ ...p, machineId: hooks.machineId }),

@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import type { Config } from './config.ts';
 import { dirBytes, findArtifacts, gb } from './disk.ts';
 import { cloneTree, removeFast } from './fastfs.ts';
-import { run } from './proc.ts';
+import { run, UtilityProcessError } from './proc.ts';
 
 /**
  * Gives a fresh worktree the installed dependencies (node_modules, vendor, target, ...) it needs, so the agent
@@ -26,7 +26,7 @@ async function supportsCow(dir: string): Promise<boolean> {
   const probe = mkdtempSync(join(dir, '.cow-probe-'));
   writeFileSync(join(probe, 'a'), 'x');
   const args = process.platform === 'darwin' ? ['-c', join(probe, 'a'), join(probe, 'b')] : ['--reflink=always', join(probe, 'a'), join(probe, 'b')];
-  const ok = (await run('cp', args, { timeoutMs: 10_000 }).catch(() => ({ code: 1 }))).code === 0;
+  const ok = (await run('cp', args, { timeoutMs: 10_000 }).catch((err) => { if (err instanceof UtilityProcessError) throw err; return { code: 1 }; })).code === 0;
   rmSync(probe, { recursive: true, force: true });
   cowCache.set(dir, ok);
   return ok;
@@ -153,5 +153,5 @@ export async function refreshDeps(repoRoot: string, worktree: string, config: Co
 
 /** Whether folders cloned into worktrees under `dir` share disk blocks with the originals (so don't count them). */
 export async function clonesAreFree(dir: string): Promise<boolean> {
-  return supportsCow(dir).catch(() => false);
+  return supportsCow(dir).catch((err) => { if (err instanceof UtilityProcessError) throw err; return false; });
 }

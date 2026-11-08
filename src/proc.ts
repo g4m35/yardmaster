@@ -2,6 +2,8 @@ import { spawn, execFile, type ChildProcess, type SpawnOptions } from 'node:chil
 import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { randomUUID } from 'node:crypto';
 
 const execFileP = promisify(execFile);
 
@@ -32,7 +34,21 @@ export interface RunResult {
   stderr: string;
 }
 
-export async function run(cmd: string, args: string[], opts: { cwd?: string; timeoutMs?: number; env?: NodeJS.ProcessEnv; input?: string } = {}): Promise<RunResult> {
+export interface RunOptions {
+  cwd?: string;
+  timeoutMs?: number;
+  env?: NodeJS.ProcessEnv;
+  input?: string;
+  signal?: AbortSignal;
+}
+
+export async function run(cmd: string, args: string[], opts: RunOptions = {}): Promise<RunResult> {
+  const scope = utilityScope.getStore();
+  if (scope) return scopedUtility(scope, cmd, args, opts);
+  return runUnscoped(cmd, args, opts);
+}
+
+async function runUnscoped(cmd: string, args: string[], opts: RunOptions = {}): Promise<RunResult> {
   if (opts.input !== undefined) return runWithInput(cmd, args, opts);
   try {
     const { stdout, stderr } = await execFileP(cmd, args, {
@@ -187,7 +203,7 @@ interface PsRow {
 }
 
 async function listProcesses(): Promise<PsRow[] | null> {
-  const r = await run('ps', ['-A', '-o', 'pid=,pgid=,lstart='], { timeoutMs: 10_000 }).catch(() => null);
+  const r = await runUnscoped('ps', ['-A', '-o', 'pid=,pgid=,lstart='], { timeoutMs: 10_000 }).catch(() => null);
   if (!r || r.code !== 0) return null;
   const rows: PsRow[] = [];
   for (const line of r.stdout.split('\n')) {
@@ -455,6 +471,153 @@ export function runOwnedProcess(command: string, args: readonly string[], opts: 
   return startOwnedProcess(command, args, opts).done;
 }
 
+/** Durable utility intent. Tokens distinguish concurrent Git/config/copy children in one attempt. */
+export interface UtilityProcessIntent {
+  token: string;
+  command: string;
+  args: readonly string[];
+  cwd: string;
+}
+
+export interface ProcessScopeOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  termGraceMs?: number;
+  killWaitMs?: number;
+  exitGraceMs?: number;
+  hookTimeoutMs?: number;
+  /** Persist an intent before the OS can create a child. Failure prevents the spawn. */
+  beforeSpawn?: (child: UtilityProcessIntent) => void | Promise<void>;
+  /** Replace only this token's intent with its process identity. */
+  onSpawn?: (token: string, child: OwnedProcessInfo) => void | Promise<void>;
+  /** Called after cleanup, including failed spawns. Keep the intent when reaped is false. */
+  onExit?: (token: string, result: OwnedRunResult) => void | Promise<void>;
+}
+
+interface UtilityScope {
+  options: ProcessScopeOptions;
+  stop: AbortController;
+  pending: Set<Promise<RunResult>>;
+  failure: Error | null;
+  closed: boolean;
+}
+const utilityScope = new AsyncLocalStorage<UtilityScope>();
+
+/** Direct coding/check/review children share the utility scope's failure stop. */
+export function currentProcessScopeSignal(): AbortSignal | undefined {
+  const scope = utilityScope.getStore();
+  return scope ? scope.options.signal ? AbortSignal.any([scope.options.signal, scope.stop.signal]) : scope.stop.signal : undefined;
+}
+
+/** A utility failed its lifetime/registration contract; callers must not retry in its checkout. */
+export class UtilityProcessError extends Error {
+  readonly token: string;
+  readonly result: OwnedRunResult;
+  constructor(token: string, result: OwnedRunResult, detail?: string) {
+    super(detail ?? `Owned utility ${token} ${result.end}: ${result.error || result.reap.reason || 'process group was not reaped'}`);
+    this.name = 'UtilityProcessError';
+    this.token = token;
+    this.result = result;
+  }
+}
+
+/**
+ * Own all run() utilities in an attempt/integration operation without threading hooks through every Git helper.
+ * A failed registration, abort or incomplete reap poisons this scope, even if a best-effort helper catches it.
+ * Return only after all started utilities have been reaped and their exit records acknowledged.
+ */
+export async function withProcessScope<T>(options: ProcessScopeOptions, fn: () => Promise<T>): Promise<T> {
+  const scope: UtilityScope = { options, stop: new AbortController(), pending: new Set(), failure: null, closed: false };
+  return utilityScope.run(scope, async () => {
+    let value: T | undefined;
+    let thrown: unknown;
+    let failed = false;
+    try {
+      value = await fn();
+    } catch (err) {
+      thrown = err;
+      failed = true;
+    } finally {
+      scope.closed = true;
+      // An unawaited utility may not outlive its caller, including when Promise.all rejects early.
+      if (scope.pending.size) scope.stop.abort('utility scope ended');
+      await Promise.allSettled([...scope.pending]);
+    }
+    if (scope.failure) throw scope.failure;
+    if (failed) throw thrown;
+    return value as T;
+  });
+}
+
+function failScope(scope: UtilityScope, error: Error): never {
+  scope.failure ??= error;
+  scope.stop.abort(error.message);
+  throw error;
+}
+
+async function utilityHook(scope: UtilityScope, fn: () => void | Promise<void>): Promise<void> {
+  const timeout = scope.options.hookTimeoutMs ?? DEFAULT_HOOK_TIMEOUT_MS;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      Promise.resolve().then(fn),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`utility hook did not finish within ${timeout} ms`)), timeout); }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function scopedUtility(scope: UtilityScope, command: string, args: string[], opts: RunOptions): Promise<RunResult> {
+  if (scope.closed || scope.failure) return Promise.reject(scope.failure ?? new Error('Utility scope is closed'));
+  const token = randomUUID();
+  const cwd = opts.cwd ?? process.cwd();
+  const signals = [scope.stop.signal, scope.options.signal, opts.signal].filter((s): s is AbortSignal => s !== undefined);
+  const signal = AbortSignal.any(signals);
+  const launchedAt = Date.now();
+  const promise = (async (): Promise<RunResult> => {
+    let stdout = '';
+    let stderr = '';
+    const append = (stream: 'stdout' | 'stderr', d: Buffer) => {
+      // execFile's existing 64 MiB output limit, enforced without retaining unbounded output.
+      const part = d.toString();
+      if ((stream === 'stdout' ? stdout.length : stderr.length) + part.length > 64 * 1024 * 1024) throw new Error('utility output exceeded 64 MiB');
+      if (stream === 'stdout') stdout += part;
+      else stderr += part;
+    };
+    let result: OwnedRunResult;
+    let launchAttempted = false;
+    try {
+      if (signal.aborted) throw new Error(abortText(signal));
+      if (scope.options.beforeSpawn) await utilityHook(scope, () => scope.options.beforeSpawn!({ token, command, args, cwd }));
+      launchAttempted = true;
+      result = await runOwnedProcess(command, args, {
+        cwd, env: opts.env ?? cleanEnv(), stdin: opts.input, signal,
+        timeoutMs: Math.min(opts.timeoutMs ?? 120_000, scope.options.timeoutMs ?? Infinity),
+        termGraceMs: scope.options.termGraceMs, killWaitMs: scope.options.killWaitMs, exitGraceMs: scope.options.exitGraceMs,
+        hookTimeoutMs: scope.options.hookTimeoutMs,
+        onSpawn: scope.options.onSpawn ? (child) => scope.options.onSpawn!(token, child) : undefined,
+        onStdout: (d) => append('stdout', d), onStderr: (d) => append('stderr', d),
+      });
+    } catch (err) {
+      result = { end: signal.aborted ? 'aborted' : 'hook_failed', code: null, signal: null, pid: null, startedAt: null,
+        launchedAt, endedAt: Date.now(), pipeHeld: false, reap: launchAttempted ? { status: 'unverified', reason: 'utility supervisor threw after launch was attempted' } : { status: 'exited' }, reaped: !launchAttempted, error: errText(err) };
+    }
+    try {
+      if (scope.options.onExit) await utilityHook(scope, () => scope.options.onExit!(token, result));
+    } catch (err) {
+      return failScope(scope, new UtilityProcessError(token, result, `Utility exit registration failed: ${errText(err)}`));
+    }
+    if (!result.reaped || (result.end !== 'exit' && result.end !== 'spawn_failed')) return failScope(scope, new UtilityProcessError(token, result));
+    if (result.end === 'spawn_failed') throw new Error(`Command not found or could not start: ${command}: ${result.error}`);
+    return { code: result.code ?? 1, stdout, stderr };
+  })();
+  scope.pending.add(promise);
+  // Observe rejection here as well as at the caller, so abandoned sibling promises never reject unhandled.
+  void promise.then(() => scope.pending.delete(promise), () => scope.pending.delete(promise));
+  return promise;
+}
+
 export interface ShellResult extends RunResult {
   timedOut: boolean;
   /** Ended by `signal` (code 130). */
@@ -538,7 +701,7 @@ export function isAlive(pid: number | null | undefined): boolean {
  */
 export async function processStartTime(pid: number): Promise<number | null> {
   if (process.platform === 'win32') return null;
-  const r = await run('ps', ['-o', 'lstart=', '-p', String(pid)], { timeoutMs: 5000 });
+  const r = await runUnscoped('ps', ['-o', 'lstart=', '-p', String(pid)], { timeoutMs: 5000 });
   const s = r.stdout.trim();
   if (!s) return null;
   const t = Date.parse(s);

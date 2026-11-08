@@ -244,8 +244,60 @@ function getRow(db: Db, reservationId: string): ReservationRow {
 }
 
 interface Computed { allowance: Allowance; availableMicros: number | null }
+interface TodayTotals { spent: number; actual: number; estimated: number; mixed: number }
+interface HeldTotal { task_id: string | null; amount_micros: number | null; consumed: number; measured: number }
+interface TaskTotals { spent: number; held: number; unbounded: number }
+interface ReadTotals {
+  today: TodayTotals;
+  heldUnspent: number;
+  unbounded: number;
+  awaiting: number;
+  tasks: Map<string, TaskTotals>;
+}
 
-function compute(db: Db, q: AllowanceQuery): Computed {
+const TODAY_SQL = `SELECT COALESCE(SUM(day_cost_micros), 0) AS spent,
+    COALESCE(SUM(provenance = 'actual'), 0) AS actual, COALESCE(SUM(provenance = 'estimated'), 0) AS estimated,
+    COALESCE(SUM(provenance = 'mixed'), 0) AS mixed
+  FROM usage_ledger WHERE day = ?`;
+const HELD_SQL = `SELECT r.task_id, r.amount_micros,
+    COALESCE((SELECT SUM(u.cost_delta_micros) FROM usage_ledger u WHERE u.run_id = r.run_id), 0) AS consumed,
+    EXISTS (SELECT 1 FROM usage_ledger u WHERE u.run_id = r.run_id AND u.provenance <> 'unknown') AS measured
+  FROM budget_reservations r WHERE r.state = 'held'`;
+
+/** One ephemeral display snapshot, using the same ledger and hold arithmetic as fresh admission reads. */
+function readTotals(db: Db, day: string, taskId?: string | null): ReadTotals {
+  const today = db.prepare(TODAY_SQL).get(day) as unknown as TodayTotals;
+  const held = db.prepare(HELD_SQL).all() as unknown as HeldTotal[];
+  const tasks = new Map<string, TaskTotals>();
+  const task = (id: string) => {
+    let totals = tasks.get(id);
+    if (!totals) tasks.set(id, totals = { spent: 0, held: 0, unbounded: 0 });
+    return totals;
+  };
+  if (taskId === undefined) {
+    const spent = db.prepare(`SELECT task_id, SUM(cost_delta_micros) AS spent FROM usage_ledger
+      WHERE task_id IS NOT NULL GROUP BY task_id`).all() as { task_id: string; spent: number }[];
+    for (const row of spent) task(row.task_id).spent = Math.max(0, Number(row.spent));
+  } else if (taskId !== null) {
+    task(taskId).spent = Math.max(0, Number((db.prepare('SELECT COALESCE(SUM(cost_delta_micros), 0) AS s FROM usage_ledger WHERE task_id = ?').get(taskId) as { s: number }).s));
+  }
+  let heldUnspent = 0, unbounded = 0, awaiting = 0;
+  for (const h of held) {
+    if (!h.measured) awaiting++;
+    const mine = h.task_id !== null && (taskId === undefined || h.task_id === taskId) ? task(h.task_id) : null;
+    if (h.amount_micros === null) {
+      unbounded++;
+      if (mine) mine.unbounded++;
+      continue;
+    }
+    const unspent = Math.max(0, Number(h.amount_micros) - Number(h.consumed));
+    heldUnspent += unspent;
+    if (mine) mine.held += unspent;
+  }
+  return { today, heldUnspent, unbounded, awaiting, tasks };
+}
+
+function compute(db: Db, q: AllowanceQuery, display?: ReadTotals): Computed {
   const now = clock(q.now);
   const taskId = optId('taskId', q.taskId);
   const daily = cap('dailyCapUsd', q.dailyCapUsd);
@@ -254,30 +306,10 @@ function compute(db: Db, q: AllowanceQuery): Computed {
   if (taskId === null && taskCap !== null) throw new BudgetError('A task cap needs a taskId.');
   const day = dayKey(now);
 
-  const today = db.prepare(`SELECT COALESCE(SUM(day_cost_micros), 0) AS spent,
-      COALESCE(SUM(provenance = 'actual'), 0) AS actual, COALESCE(SUM(provenance = 'estimated'), 0) AS estimated,
-      COALESCE(SUM(provenance = 'mixed'), 0) AS mixed
-    FROM usage_ledger WHERE day = ?`).get(day) as { spent: number; actual: number; estimated: number; mixed: number };
-  const held = db.prepare(`SELECT r.task_id, r.amount_micros,
-      COALESCE((SELECT SUM(u.cost_delta_micros) FROM usage_ledger u WHERE u.run_id = r.run_id), 0) AS consumed,
-      EXISTS (SELECT 1 FROM usage_ledger u WHERE u.run_id = r.run_id AND u.provenance <> 'unknown') AS measured
-    FROM budget_reservations r WHERE r.state = 'held'`).all() as { task_id: string | null; amount_micros: number | null; consumed: number; measured: number }[];
-
-  let heldUnspent = 0, taskHeld = 0, unbounded = 0, taskUnbounded = 0, awaiting = 0;
-  for (const h of held) {
-    if (!h.measured) awaiting++;
-    const mine = taskId !== null && h.task_id === taskId;
-    if (h.amount_micros === null) {
-      unbounded++;
-      if (mine) taskUnbounded++;
-      continue;
-    }
-    const unspent = Math.max(0, Number(h.amount_micros) - Number(h.consumed));
-    heldUnspent += unspent;
-    if (mine) taskHeld += unspent;
-  }
+  const { today, heldUnspent, unbounded, awaiting, tasks } = display ?? readTotals(db, day, taskId);
   const observed = Number(today.spent);
-  const taskSpent = taskId === null ? 0 : Math.max(0, Number((db.prepare('SELECT COALESCE(SUM(cost_delta_micros), 0) AS s FROM usage_ledger WHERE task_id = ?').get(taskId) as { s: number }).s));
+  const mine = taskId === null ? undefined : tasks.get(taskId);
+  const taskSpent = mine?.spent ?? 0, taskHeld = mine?.held ?? 0, taskUnbounded = mine?.unbounded ?? 0;
 
   // A held reservation with no finite amount may still spend anything, so a finite cap cannot promise more until it exits.
   const dailyRemaining = daily === null ? null : unbounded > 0 ? 0 : Math.max(0, daily - observed - heldUnspent);
@@ -306,6 +338,27 @@ function compute(db: Db, q: AllowanceQuery): Computed {
 /** Read-only view of what a phase could reserve right now. Reserve, not this, is the admission decision. */
 export function readAllowance(db: Db, q: AllowanceQuery): Allowance {
   return compute(db, q).allowance;
+}
+
+/**
+ * Display-only reader for one synchronous coordinator pass. Aggregates all task spend once, then does O(1)
+ * task lookups. Own-connection writes, external commits, observed transaction-state changes and local midnight
+ * discard the snapshot. Keep it out of admission: reserve() always calls compute() fresh under its write lock.
+ */
+export function createAllowanceReader(db: Db): (q: AllowanceQuery) => Allowance {
+  const changes = db.prepare('SELECT total_changes() AS n');
+  const version = db.prepare('PRAGMA data_version');
+  let snapshot: { day: string; changes: number; version: number; transaction: boolean; totals: ReadTotals } | undefined;
+  return (q) => {
+    const now = clock(q.now), day = dayKey(now);
+    const ownChanges = Number((changes.get() as { n: number }).n);
+    const dataVersion = Number((version.get() as { data_version: number }).data_version);
+    if (!snapshot || snapshot.day !== day || snapshot.changes !== ownChanges || snapshot.version !== dataVersion || snapshot.transaction !== db.isTransaction) {
+      // Save the stamps from before the read: a concurrent commit during aggregation forces another read next time.
+      snapshot = { day, changes: ownChanges, version: dataVersion, transaction: db.isTransaction, totals: readTotals(db, day) };
+    }
+    return compute(db, { ...q, now }, snapshot.totals).allowance;
+  };
 }
 
 function holdReason(a: Allowance, minMicros: number): string {

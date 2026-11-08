@@ -20,6 +20,7 @@ import { changedLineCount, formatIssues, runReview, shouldReview } from './revie
 import { siblingWorktrees, warmStart } from './warmstart.ts';
 import { emptyUsage, UsageMeter, type UsageSnapshot } from './usage.ts';
 import { routeEffort, routedEffortOf } from './jev.ts';
+import { withProcessScope, UtilityProcessError, currentProcessScopeSignal } from './proc.ts';
 import { EffortPolicyError, launchEffort, launchIdentity } from './effort.ts';
 import { verifyArtifact as runVerify } from './verification.ts';
 
@@ -77,6 +78,9 @@ export interface RunContext {
   stopReason?: () => StopReason | null;
   cleanup?: (fn: () => void | Promise<void>) => void;
   reserveAgent?: (agent: string, signal?: AbortSignal) => Promise<() => void>;
+  /** Remote base materialization runs inside this attempt's durable utility scope. */
+  prepareBase?: (signal?: AbortSignal) => Promise<void>;
+  runId?: string;
 }
 
 export type StopReason = Verdict['kind'] | 'budget' | 'canceled' | 'stopped' | 'preempted' | 'shutdown' | 'redirected' | 'lost';
@@ -270,7 +274,7 @@ export async function runAttempt(ctx: RunContext): Promise<RunOutcome> {
   }, 250);
   try {
     const owner = claimOwner(ctx.task);
-    const fenced = new Set(['task.update', 'task.usage', 'task.touched', 'task.event', 'run.start', 'run.update', 'run.log', 'run.usage', 'lesson.outcome']);
+    const fenced = new Set(['task.update', 'task.usage', 'task.touched', 'task.event', 'run.start', 'run.update', 'run.log', 'run.usage', 'run.utility', 'lesson.outcome']);
     const api = new Proxy(ctx.api, { get: (target, key: string) => {
       const call = target[key as keyof Client];
       return fenced.has(key) ? (params: Record<string, unknown>) => {
@@ -337,6 +341,14 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   let attemptReaped = true;
   let finalUsageRecorded = true;
   ctx.cleanup?.(() => attemptReaped && finalUsageRecorded ? api['run.exit']({ runId, taskId: task.id, owner: claimOwner(task), reaped: true }) : undefined);
+  try {
+    return await withProcessScope({ signal: ctx.signal,
+      beforeSpawn: child => api['run.utility']({ runId, taskId: task.id, owner: claimOwner(task), operation: { action: 'intent', token: child.token, command: child.command } }),
+      onSpawn: (token, child) => api['run.utility']({ runId, taskId: task.id, owner: claimOwner(task), operation: { action: 'spawn', token, pid: child.pid, startedAt: child.startedAt } }),
+      onExit: (token, result) => api['run.utility']({ runId, taskId: task.id, owner: claimOwner(task), operation: { action: 'exit', token, pid: result.pid, startedAt: result.startedAt, reaped: result.reaped } }),
+    }, async () => {
+  ctx = { ...ctx, runId, signal: currentProcessScopeSignal() ?? ctx.signal };
+  await ctx.prepareBase?.(ctx.signal);
   const log = new LogBuffer(api, runId);
   ctx.cleanup?.(() => log.close());
   await api['run.update']({ runId, patch: { phase: 'prepare' } });
@@ -593,7 +605,8 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
 
   let lastTouchedCheck = 0;
   const tickMs = Math.min(2000, Math.max(200, config.liveOverlapIntervalSeconds * 500));
-  const ticker = setInterval(async () => {
+  let ticking: Promise<void> | null = null;
+  const tick = async () => {
     const v = watchdog.tick();
     if (v) requestStop(v.kind, v.message);
     await recordUsage(meter.snapshot()).catch(() => undefined);
@@ -618,10 +631,15 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
     } catch {
       // Hub briefly unreachable: keep working, the lease gives us time.
     }
+  };
+  const ticker = setInterval(() => {
+    if (ticking) return;
+    ticking = tick().finally(() => { ticking = null; });
   }, tickMs);
 
-  const result = await coding.done.finally(() => {
+  const result = await coding.done.finally(async () => {
     clearInterval(ticker);
+    await ticking;
     releaseAgent?.();
     consume(decoder.end() + (buffered ? '\n' : ''));
     raw.end();
@@ -892,6 +910,18 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   });
   await event(ctx, 'success', 'task.ready', `"${task.title}" passed checks (${files.length} file${files.length === 1 ? '' : 's'} changed, ${formatUsd(task.cost_usd + cost)})${needsApproval ? '. Waiting for your approval to merge.' : ''}`);
   return { status: 'ready', message: summary };
+    });
+  } catch (error) {
+    if (!(error instanceof UtilityProcessError)) throw error;
+    if (ctx.stopReason?.() && error.result.reaped && attemptReaped) {
+      // Expected cancellation is safe only after every child exit is durably acknowledged.
+      await api['run.exit']({ runId, taskId: task.id, owner: claimOwner(task), reaped: true });
+      throw error;
+    }
+    attemptReaped = false;
+    await api['run.update']({ runId, patch: { status: 'cleanup_failed', stop_reason: 'Utility process ownership requires recovery.' } }).catch(() => undefined);
+    return finishNeedsHuman(ctx, 'A Git or copy process could not finish its ownership checks. Work is preserved and held for recovery.');
+  }
 }
 
 export { runVerify };
@@ -921,7 +951,14 @@ async function finishNeedsHuman(ctx: RunContext, message: string, runId?: string
 async function savePartialWork(ctx: RunContext, wt: string): Promise<void> {
   const { task } = ctx;
   try {
-    await commitAll(wt, `yardmaster: partial work on ${task.title} (${task.id})`);
+    if (!ctx.runId) throw new Error('Partial-work preservation has no recorded attempt.');
+    const runId = ctx.runId;
+    const preservationId = randomUUID();
+    await withProcessScope({ timeoutMs: 10_000,
+      beforeSpawn: child => ctx.api['run.utility']({ runId, taskId: task.id, owner: claimOwner(task), operation: { action: 'intent', token: child.token, command: child.command, preserving: true, preservationId } }),
+      onSpawn: (token, child) => ctx.api['run.utility']({ runId, taskId: task.id, owner: claimOwner(task), operation: { action: 'spawn', token, pid: child.pid, startedAt: child.startedAt } }),
+      onExit: (token, result) => ctx.api['run.utility']({ runId, taskId: task.id, owner: claimOwner(task), operation: { action: 'exit', token, pid: result.pid, startedAt: result.startedAt, reaped: result.reaped } }),
+    }, () => commitAll(wt, `yardmaster: partial work on ${task.title} (${task.id})`));
   } catch (err) {
     await event(ctx, 'warn', 'task.partial_uncommitted', `Couldn't commit the interrupted work on "${task.title}" (${clip((err as Error).message, 200)}). It stays uncommitted in ${wt}, and the next attempt starts from there.`);
   }

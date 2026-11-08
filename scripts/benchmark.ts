@@ -12,8 +12,19 @@ const db = openDb(join(box.home, 'benchmark.db'));
 try {
   const coord = new Coordinator(db);
   const project = await coord.registerProject(box.repo);
-  for (let batch = 0; batch < 20; batch++) coord.addTasks(project.id,
-    Array.from({ length: 50 }, (_, index) => ({ title: `Benchmark work ${batch * 50 + index}`, agent: 'mock', files: [`component-${batch * 50 + index}/**`] })), 'benchmark', { force: true });
+  let seedRetries = 0;
+  for (let batch = 0; batch < 20; batch++) {
+    const tasks = Array.from({ length: 50 }, (_, index) => ({ title: `Benchmark work ${batch * 50 + index}`, agent: 'mock', files: [`component-${batch * 50 + index}/**`] }));
+    // shortId can collide during tight seeding loops. addTasks rolls back the entire batch; retry only this
+    // specific fixture failure, before warming or timing any operation. Do not mask other constraints/errors.
+    for (let attempt = 0; ; attempt++) {
+      try { coord.addTasks(project.id, tasks, 'benchmark', { force: true }); break; }
+      catch (error) {
+        if (attempt >= 4 || !(error instanceof Error) || error.message !== 'UNIQUE constraint failed: tasks.id') throw error;
+        seedRetries++;
+      }
+    }
+  }
   tx(db, () => {
     const insert = db.prepare('INSERT INTO events (ts,project_id,task_id,level,kind,message,data) VALUES (?,?,NULL,?,?,?,NULL)');
     for (let index = 0; index < 10_000; index++) insert.run(Date.now(), project.id, 'info', 'benchmark', `Observed event ${index}`);
@@ -40,5 +51,5 @@ try {
   };
   console.log(JSON.stringify({ node: process.version, platform: process.platform, arch: process.arch,
     taskCount: 1000, seededEventCount: 10_000, transport: 'in-process API dispatch; excludes HTTP and browser',
-    inference: 'none', results, memory: process.memoryUsage(), measuredAt: new Date().toISOString() }, null, 2));
+    inference: 'none', seedRetries, results, memory: process.memoryUsage(), measuredAt: new Date().toISOString() }, null, 2));
 } finally { db.close(); }

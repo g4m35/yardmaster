@@ -1,8 +1,9 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { rm } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
-import { cleanEnv, run, spawnDetached } from './proc.ts';
+import { cleanEnv, run, UtilityProcessError } from './proc.ts';
 
 /**
  * File work that scales with folder size, done the fast way:
@@ -30,22 +31,22 @@ export async function cloneTree(src: string, dst: string, opts: { allowPlainCopy
   const started = Date.now();
   mkdirSync(dirname(dst), { recursive: true });
   if (process.platform === 'darwin') {
-    const r = await run('osascript', ['-l', 'JavaScript', '-e', JXA_CLONE, src, dst], { timeoutMs: 5 * 60_000 }).catch(() => null);
+    const r = await run('osascript', ['-l', 'JavaScript', '-e', JXA_CLONE, src, dst], { timeoutMs: 5 * 60_000 }).catch((err) => { if (err instanceof UtilityProcessError) throw err; return null; });
     if (r && r.code === 0 && r.stdout.trim() === '0') return { ok: true, method: 'clonefile', ms: Date.now() - started };
     // clonefile refuses across volumes and on non-APFS disks; a partial result is never left behind by it, but be sure.
     rmSync(dst, { recursive: true, force: true });
-    const cp = await run('cp', ['-cR', src, dst], { timeoutMs: 10 * 60_000 }).catch((err: Error) => ({ code: 1, stdout: '', stderr: err.message }));
+    const cp = await run('cp', ['-cR', src, dst], { timeoutMs: 10 * 60_000 }).catch((err: Error) => { if (err instanceof UtilityProcessError) throw err; return { code: 1, stdout: '', stderr: err.message }; });
     if (cp.code === 0) return { ok: true, method: 'cp-clone', ms: Date.now() - started };
     rmSync(dst, { recursive: true, force: true });
     if (!opts.allowPlainCopy) return { ok: false, method: 'cp-clone', ms: Date.now() - started, error: cp.stderr.trim().slice(0, 200) };
   } else {
     const args = opts.allowPlainCopy ? ['-R', '--reflink=auto', src, dst] : ['-R', '--reflink=always', src, dst];
-    const cp = await run('cp', args, { timeoutMs: 10 * 60_000 }).catch((err: Error) => ({ code: 1, stdout: '', stderr: err.message }));
+    const cp = await run('cp', args, { timeoutMs: 10 * 60_000 }).catch((err: Error) => { if (err instanceof UtilityProcessError) throw err; return { code: 1, stdout: '', stderr: err.message }; });
     if (cp.code === 0) return { ok: true, method: opts.allowPlainCopy ? 'cp' : 'cp-reflink', ms: Date.now() - started };
     rmSync(dst, { recursive: true, force: true });
     return { ok: false, method: 'cp-reflink', ms: Date.now() - started, error: cp.stderr.trim().slice(0, 200) };
   }
-  const cp = await run('cp', ['-R', src, dst], { timeoutMs: 10 * 60_000 }).catch((err: Error) => ({ code: 1, stdout: '', stderr: err.message }));
+  const cp = await run('cp', ['-R', src, dst], { timeoutMs: 10 * 60_000 }).catch((err: Error) => { if (err instanceof UtilityProcessError) throw err; return { code: 1, stdout: '', stderr: err.message }; });
   if (cp.code === 0) return { ok: true, method: 'cp', ms: Date.now() - started };
   rmSync(dst, { recursive: true, force: true });
   return { ok: false, method: 'cp', ms: Date.now() - started, error: cp.stderr.trim().slice(0, 200) };
@@ -82,15 +83,9 @@ function purgeLater(target: string): void {
     rmSync(target, { recursive: true, force: true });
     return;
   }
-  // A detached, low-priority `rm` keeps going even if Yardmaster exits, and never blocks its event loop.
-  const nice = process.platform === 'win32' ? null : 'nice';
-  try {
-    const child = nice ? spawnDetached(nice, ['-n', '10', 'rm', '-rf', target], { stdio: 'ignore' }) : spawnDetached('cmd', ['/c', 'rmdir', '/s', '/q', target], { stdio: 'ignore' });
-    child.on('error', () => rmSync(target, { recursive: true, force: true }));
-    child.unref();
-  } catch {
-    rmSync(target, { recursive: true, force: true });
-  }
+  // Native filesystem work owns no child process. The uniquely renamed trash path cannot overlap a replacement
+  // worktree, and an interrupted deletion remains in trash for the next purge; never detach an untracked `rm`.
+  void rm(target, { recursive: true, force: true }).catch(() => undefined);
 }
 
 /** Delete whatever a previous run left in the trash (it was killed, or the machine slept mid-delete). */
@@ -124,7 +119,7 @@ export function removeWorktreeFast(repoRoot: string, worktree: string, trash: st
     throw new Error('Worktree is locked or a Git operation is in progress; kept');
   }
   // These checks and the rename run without yielding: an orchestration claim cannot slip between them.
-  // Use Git's index/ignore semantics rather than guessing cleanliness from file metadata.
+  // The read-only synchronous probes are intentionally outside async scopes to keep that final atomic guard.
   const inspect = (args: string[]) => execFileSync('git', args, { cwd: worktree, env: cleanEnv(), encoding: 'utf8', timeout: 10_000, maxBuffer: 4 * 1024 * 1024 }).trim();
   if (inspect(['status', '--porcelain', '--untracked-files=all'])) throw new Error('Worktree changed before removal; kept');
   if (opts.expectedHead && inspect(['rev-parse', 'HEAD']) !== opts.expectedHead) throw new Error('Worktree commit changed before removal; kept');

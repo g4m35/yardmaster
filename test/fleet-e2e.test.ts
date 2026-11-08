@@ -65,6 +65,7 @@ async function fleet() {
     };
     return { ...box, hub, url, project, owner, machines, pump,
       async close() {
+        if (process.env.YM_FLEET_DIAGNOSTICS) console.error(JSON.stringify({ tasks: hub.coord.listTasks(project.id).map(task => ({ id: task.id, status: task.status, attention: task.attention, error: task.last_error })), events: hub.coord.eventsSince(0, project.id, 200).slice(-15) }));
         for (const timer of timers) clearInterval(timer);
         for (const worker of workers) worker.stopAll('shutdown', 'fleet fixture finished');
         await Promise.all(workers.map(worker => worker.drain()));

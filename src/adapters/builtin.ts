@@ -59,15 +59,17 @@ export const claude: Adapter = {
       env.DISABLE_AUTOUPDATER = '1';
     }
     if (effort.emitted) args.push('--effort', effort.emitted);
+    let extraArgs = ctx.settings.extraArgs;
     if (ctx.budgetUsd !== undefined && ctx.budgetUsd !== null && ctx.budgetUsd > 0) {
       const configuredCaps = ctx.settings.extraArgs.flatMap((arg, index, all) => arg === '--max-budget-usd' ? [all[index + 1]] : arg.startsWith('--max-budget-usd=') ? [arg.slice('--max-budget-usd='.length)] : []);
-      if (configuredCaps.length > 1 || configuredCaps.some(cap => !cap || !Number.isFinite(Number(cap)) || Number(cap) <= 0 || Number(cap) > ctx.budgetUsd!)) {
-        throw new Error('Claude max-budget-usd must be positive and no greater than this run’s reserved allowance.');
+      if (configuredCaps.length > 1 || configuredCaps.some(cap => !cap || !Number.isFinite(Number(cap)) || Number(cap) <= 0)) {
+        throw new Error('Claude max-budget-usd must be one positive finite amount.');
       }
-      if (!configuredCaps.length) args.push('--max-budget-usd', String(ctx.budgetUsd));
+      args.push('--max-budget-usd', String(Math.min(ctx.budgetUsd, configuredCaps.length ? Number(configuredCaps[0]) : ctx.budgetUsd)));
+      extraArgs = extraArgs.filter((arg, index, all) => arg !== '--max-budget-usd' && !arg.startsWith('--max-budget-usd=') && all[index - 1] !== '--max-budget-usd');
     }
     if (ctx.maxTurns) args.push('--max-turns', String(ctx.maxTurns));
-    args.push(...ctx.settings.extraArgs);
+    args.push(...extraArgs);
     return withEffort({ command: ctx.settings.command ?? 'claude', args, stdin: ctx.prompt, env }, effort);
   },
   parse(line) {

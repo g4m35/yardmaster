@@ -131,3 +131,34 @@ The hub reacts to every state change immediately (debounced 15 ms) instead of wa
   worth it. The token cost, measured since, is the real saving; see the lean launch above.)
 
 The existing `bench/scheduler.bench.ts` was also rerun with `N=1000` on this checkpoint: no-match claim pass 189.0 ms, board read 136.6 ms, and calling blockers individually outside a pass 1605.1 ms. The earlier same-harness historical figures above were lower. Concurrent machine load and different dates limit attribution, but repeated budget reads are a concrete optimization target; no claim of no performance regression is made.
+
+## Budget display cache (2026-11-07)
+
+Budget displays now share one ephemeral read snapshot per synchronous coordinator pass: today's ledger totals, every held reservation's unspent amount, and aggregated lifetime spend per task. Task-specific allowances use those integer-micro-dollar totals. Local midnight, same-connection writes (`total_changes()`), external commits (`PRAGMA data_version`), observed transaction-state changes and existing coordinator invalidation discard the snapshot. The reader and its maps are discarded when the pass ends. Reads outside a pass remain fresh. `reserve()` never accepts a snapshot or displayed allowance: it recomputes under the existing write transaction, including reservations made by independent processes. No process-lifetime or ownership gate changed, and the cleanup-failed lookup remains fresh on each blocker call.
+
+A paired rerun against immutable checkpoint `cfc5d31` on the same macOS arm64 / Node 24.22.2 host measured:
+
+| Existing scheduler harness, `N=1000` | Checkpoint | Display cache |
+| --- | ---: | ---: |
+| No-match claim pass | 115.2 ms | 84.2 ms |
+| Board read | 119.6 ms | 88.0 ms |
+| Individual blocker calls, outside a pass | 666.3 ms | 645.5 ms |
+
+| API harness, 1,000 tasks / 10,000 events | Checkpoint median / p95 | Display cache median / p95 |
+| --- | ---: | ---: |
+| Board API | 134.2 / 220.4 ms | 78.7 / 115.0 ms |
+| Registry API | 0.235 / 0.767 ms | 0.100 / 0.135 ms |
+| Last 100 events | 0.318 / 0.519 ms | 0.127 / 0.160 ms |
+| Queue admission | 26.6 / 40.7 ms | 22.4 / 36.9 ms |
+
+The scheduler harness uses one warmup and five timed repetitions; the API harness uses five warmups and 100 samples. These runs were sequential with no tests launched by this task during the paired measurements; other host activity was not controlled. Baseline budget/coordinator sources were loaded from `git show cfc5d31` in memory, without a copied checkout. A loader hook was removed before execution, and deterministic `Math.random` suffixes were used only while creating fixtures, then restored before warmup/timing. This avoids an observed pre-existing `shortId` collision during rapid task seeding; measured operation bodies and sample counts were unchanged. `scripts/benchmark.ts` now separately retries only that specific rolled-back fixture collision, at most four times, and reports the retry count. Both paired API runs reported zero retries.
+
+Board API median fell 41.4% and p95 fell 47.8% in this pair; no provider calls were made and no provider-cost savings were measured. End-of-run RSS increased from 165.6 to 199.8 MiB, so these numbers do not establish a memory improvement. Registry/event paths and individual blocker calls do not use the new pass snapshot; their changes illustrate measurement/load variability and should not be attributed to it. The historical 47/50 ms scheduler/board numbers remain faster than these reruns; this is not a claim of recovering historical performance or a general no-regression guarantee. The harnesses seed no usage ledger history or attached budget holds, so they do not characterize large-ledger or many-held-run scaling.
+
+Every benchmark ran under a wrapper-owned `mkdtemp` TMPDIR removed in `finally`; the scheduler's otherwise-unremoved fixture root was contained within it. New tests verify a single aggregation for 100 repeated display reads, cache/fresh equivalence, same-connection and external-process reserve/usage/release refreshes, two independently warmed process displays racing for one $5 budget, coordinator board updates within a pass, rollback exit, and midnight with lifetime task spend and cross-day holds retained. Detailed commands, raw results, checks and limitations are in `outputs/hillclimb-2026-11-07/gpt-budget-performance.md` and its adjacent `budget-*.log` evidence.
+
+Validation for this bounded change: typecheck, build and all 299 tests passed; the full test process exited naturally in 98.8 seconds without force-exit.
+
+The production test command now logs its executable, Node/platform, arguments and completion code and exits naturally; `npm test` no longer uses `--test-force-exit`. Package smoke verification (`node scripts/package-smoke.mjs`, after building) creates a temporary tarball install and checks version, help, packaged dashboard and doctor without a personal hub. `YM_SMOKE_NODE=/path/to/node` selects the installed runtime to test. Both Node22.23.4 and24.22.2 passed this check. Test directories are removed in finally cleanup.
+
+A separate stress-fixture failure exposed collisions in millisecond/three-character IDs. New short IDs use 64 bits of cryptographic randomness, retaining existing prefixes; a fixed-clock/fixed-weak-RNG regression exercises tight creation without duplicate IDs.

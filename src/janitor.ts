@@ -5,7 +5,10 @@ import { removeFast } from './fastfs.ts';
 import type { Coordinator } from './coordinator.ts';
 import { paths } from './paths.ts';
 import { git, gitOut, isAncestor, isClean, isLinkedWorktreeOf, listWorktrees, removeWorktree } from './git.ts';
-import { terminateRecordedProcess } from './proc.ts';
+import { isAlive, processStartTime, terminateRecordedProcess } from './proc.ts';
+import { recoverUtilities, runUtilityKey, taskHasPendingUtilities } from './utility-records.ts';
+import type { Run } from './types.ts';
+import type { TerminateResult } from './proc.ts';
 import { TERMINAL_STATUSES, type Project } from './types.ts';
 import { clip } from './text.ts';
 import { dirBytes, dirOfLogs, findArtifacts, freeGb, gb } from './disk.ts';
@@ -49,15 +52,15 @@ export async function planCleanup(coord: Coordinator, projectId?: string, opts: 
   for (const project of projects) await planProject(coord, project, plan, opts.sizes !== false);
 
   // Bound each pass and retain events for unfinished/held tasks, regardless of their age.
-  for (const project of projects) {
-    const days = coord.configFor(project.id).cleanup.eventRetentionDays;
+  for (const project of projectId ? projects : [...projects, null]) {
+    const days = coord.configFor(project?.id ?? '').cleanup.eventRetentionDays;
     if (days === null) continue;
     const cutoff = Date.now() - days * DAY;
     const rows = coord.db.prepare(`SELECT e.id FROM events e LEFT JOIN tasks t ON t.id = e.task_id
-      WHERE e.project_id = ? AND e.ts < ? AND (e.task_id IS NULL OR t.status IN ('done','failed','canceled'))
+      WHERE e.project_id IS ? AND e.ts < ? AND (e.task_id IS NULL OR t.status IN ('done','failed','canceled'))
       AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.task_id = e.task_id AND r.status IN ('running','lost','cleanup_failed'))
-      ORDER BY e.id LIMIT 1000`).all(project.id, cutoff);
-    if (rows.length) plan.remove.push({ kind: 'events', target: String(cutoff), projectId: project.id, project: project.name,
+      ORDER BY e.id LIMIT 1000`).all(project?.id ?? null, cutoff);
+    if (rows.length) plan.remove.push({ kind: 'events', target: String(cutoff), projectId: project?.id, project: project?.name,
       reason: `Up to ${rows.length} completed-work events older than ${days} days (unfinished and process-held work retained)` });
   }
 
@@ -140,7 +143,7 @@ async function planProject(coord: Coordinator, project: Project, plan: CleanPlan
       plan.keep.push({ ...item, reason: 'not linked to any Yardmaster task; left alone' });
       continue;
     }
-    if (coord.db.prepare("SELECT 1 FROM runs WHERE task_id = ? AND status IN ('running','lost','cleanup_failed') LIMIT 1").get(task.id)) {
+    if (coord.db.prepare("SELECT 1 FROM runs WHERE task_id = ? AND status IN ('running','lost','cleanup_failed') LIMIT 1").get(task.id) || taskHasPendingUtilities(coord.db, task.id)) {
       plan.keep.push({ ...item, reason: 'An owned process has not been confirmed stopped; work and artifacts are held' });
       continue;
     }
@@ -224,6 +227,7 @@ export async function runCleanup(coord: Coordinator, plan: CleanPlan): Promise<{
             const fresh = item.taskId ? coord.getTask(item.taskId) : null;
             if (!fresh || fresh.project_id !== item.projectId || fresh.generation !== item.generation || !TERMINAL_STATUSES.includes(fresh.status)) throw new Error('Task ownership/status changed since planning; kept');
             if (coord.db.prepare("SELECT 1 FROM runs WHERE task_id = ? AND status IN ('running','lost','cleanup_failed') LIMIT 1").get(fresh.id)) throw new Error('An owned process has not been confirmed stopped; kept');
+            if (taskHasPendingUtilities(coord.db, fresh.id)) throw new Error('Owned utilities have not confirmed exit; kept');
           };
           guard();
           if (!t || !item.sha || !current || current.locked || current.head !== item.sha || current.branch !== item.branch ||
@@ -245,6 +249,7 @@ export async function runCleanup(coord: Coordinator, plan: CleanPlan): Promise<{
           const t = coord.getTask(id);
           if (t && ['running', 'verifying', 'merging'].includes(t.status)) throw new Error('its task started running again; kept');
           if (t && coord.db.prepare("SELECT 1 FROM runs WHERE task_id = ? AND status IN ('running','lost','cleanup_failed') LIMIT 1").get(t.id)) throw new Error('Process exit is unconfirmed; artifacts kept');
+          if (t && taskHasPendingUtilities(coord.db, t.id)) throw new Error('Utility exit is unconfirmed; artifacts kept');
           const still = (await findArtifacts(wt, coord.configFor(t?.project_id ?? '').disk.artifactDirs)).find((a) => a.path === item.target);
           if (!still) throw new Error('no longer looks like ignored build output; kept');
           removeFast(item.target, join(dirname(dirname(wt)), '.trash'));
@@ -256,20 +261,21 @@ export async function runCleanup(coord: Coordinator, plan: CleanPlan): Promise<{
           const task = item.taskId ? coord.getTask(item.taskId) : null;
           if (!task || task.generation !== item.generation || !TERMINAL_STATUSES.includes(task.status)) throw new Error('Task changed since planning; branch kept');
           if (coord.db.prepare("SELECT 1 FROM runs WHERE task_id = ? AND status IN ('running','lost','cleanup_failed') LIMIT 1").get(task.id)) throw new Error('Process exit is unconfirmed; branch kept');
+          if (taskHasPendingUtilities(coord.db, task.id)) throw new Error('Utility exit is unconfirmed; branch kept');
           if ((await listWorktrees(root)).some((w) => w.branch === item.target)) throw new Error('Branch is checked out; kept');
           await git(root, ['update-ref', '-d', `refs/heads/${item.target}`, item.sha]);
           break;
         }
         case 'events': {
-          const project = coord.getProject(item.projectId!);
-          if (!project) throw new Error('Unknown event project');
-          const days = coord.configFor(project.id).cleanup.eventRetentionDays;
+          const project = item.projectId ? coord.getProject(item.projectId) : null;
+          if (item.projectId && !project) throw new Error('Unknown event project');
+          const days = coord.configFor(project?.id ?? '').cleanup.eventRetentionDays;
           const cutoff = Number(item.target);
           if (days === null || !Number.isFinite(cutoff) || cutoff > Date.now() - days * DAY) throw new Error('Event retention changed; kept');
           coord.db.prepare(`DELETE FROM events WHERE id IN (SELECT e.id FROM events e LEFT JOIN tasks t ON t.id = e.task_id
-            WHERE e.project_id = ? AND e.ts < ? AND (e.task_id IS NULL OR t.status IN ('done','failed','canceled'))
+            WHERE e.project_id IS ? AND e.ts < ? AND (e.task_id IS NULL OR t.status IN ('done','failed','canceled'))
             AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.task_id = e.task_id AND r.status IN ('running','lost','cleanup_failed'))
-            ORDER BY e.id LIMIT 1000)`).run(project.id, cutoff);
+            ORDER BY e.id LIMIT 1000)`).run(project?.id ?? null, cutoff);
           break;
         }
         case 'lock':
@@ -305,14 +311,53 @@ function summarize(items: CleanItem[]): string {
  * Self-healing pass, run every few seconds on the hub: requeues work from machines that vanished,
  * kills agent processes orphaned by a previous hub crash, and flags work that can never start.
  */
+async function recoverRunChildren(coord: Coordinator, run: Pick<Run, 'id' | 'pid' | 'proc_started' | 'phase'>): Promise<TerminateResult> {
+  const main: TerminateResult = run.pid ? await terminateRecordedProcess({ pid: run.pid, startedAt: run.proc_started }) :
+    run.phase && !run.phase.endsWith(':spawning') ? { status: 'exited' } : { status: 'unverified', reason: 'A child may have spawned without recorded identity.' };
+  if (run.pid && ['exited', 'terminated'].includes(main.status)) coord.updateRun(run.id, { pid: null, proc_started: null });
+  const utilityExit = await recoverUtilities(coord.db, runUtilityKey(run.id));
+  return utilityExit ? main : { status: 'unverified', reason: 'An owned Git or copy utility has not been confirmed stopped.' };
+}
+
 export async function recover(coord: Coordinator, machineId: string, activeTaskIds: Set<string>, opts: { startup?: boolean } = {}): Promise<void> {
   const now = Date.now();
+  // Plans have no task row: own their detached group using the invocation owner and its bounded lease.
+  const plans = coord.db.prepare("SELECT id FROM runs WHERE role = 'plan' AND status IN ('running','lost','cleanup_failed')").all() as { id: string }[];
+  for (const candidate of plans) {
+    const run = coord.getRun(candidate.id)!;
+    const invocation = coord.getPlanInvocation(run.id);
+    // A remote PID has meaning only on its own machine; an expired invocation remains an explicit hold.
+    if (run.machine_id !== machineId) {
+      if (!invocation || invocation.leaseUntil <= Date.now()) coord.updateRun(run.id, { status: 'cleanup_failed', stop_reason: 'Remote planning invocation expired; its recorded process must be confirmed stopped on that machine.' });
+      continue;
+    }
+    let ownerDead = false;
+    if (invocation?.owner) {
+      const owner = invocation.owner;
+      ownerDead = !isAlive(owner.pid);
+      if (!ownerDead) {
+        const actual = await processStartTime(owner.pid);
+        ownerDead = actual !== null && actual !== owner.startedAt;
+      }
+    }
+    // Re-read after the OS lookup: a heartbeat may have renewed while recovery was awaiting ps.
+    const fresh = coord.getRun(run.id);
+    const current = coord.getPlanInvocation(run.id);
+    if (!fresh || !['running', 'lost', 'cleanup_failed'].includes(fresh.status)) continue;
+    if (!ownerDead && current && current.leaseUntil > Date.now()) continue;
+    if (ownerDead && current) coord.setMeta(`plan_invocation:${fresh.id}`, JSON.stringify({ ...current, leaseUntil: Date.now() }));
+    const result = fresh.pid !== null ? await terminateRecordedProcess({ pid: fresh.pid, startedAt: fresh.proc_started }) :
+      fresh.phase && !fresh.phase.endsWith(':spawning') ? { status: 'exited' as const } : { status: 'unverified' as const, reason: 'Planning child may have spawned without a recorded identity.' };
+    if (result.status === 'exited' || result.status === 'terminated') {
+      coord.confirmRecoveredRunExit(fresh.id, result);
+      coord.setMeta(`plan_invocation:${fresh.id}`, null);
+    } else coord.updateRun(fresh.id, { status: 'cleanup_failed', stop_reason: result.reason ?? 'Planning process exit could not be verified.' });
+  }
   // A prior cleanup failure is a hold, not a permanent dead end. Only identity-proven local recovery clears it.
-  const held = coord.db.prepare("SELECT id, task_id, pid, proc_started, phase FROM runs WHERE machine_id = ? AND status = 'cleanup_failed'").all(machineId) as { id: string; task_id: string; pid: number | null; proc_started: number | null; phase: string | null }[];
+  const held = coord.db.prepare("SELECT id, task_id, pid, proc_started, phase FROM runs WHERE machine_id = ? AND status = 'cleanup_failed' AND role <> 'plan'").all(machineId) as { id: string; task_id: string; pid: number | null; proc_started: number | null; phase: string | null }[];
   for (const run of held) {
     if (activeTaskIds.has(run.task_id)) continue;
-    const result = run.pid ? await terminateRecordedProcess({ pid: run.pid, startedAt: run.proc_started }) :
-      run.phase && !run.phase.endsWith(':spawning') ? { status: 'exited' } : { status: 'unverified' };
+    const result = await recoverRunChildren(coord, run);
     if (result.status === 'exited' || result.status === 'terminated') {
       coord.confirmRecoveredRunExit(run.id, { ...result, reason: 'process recovery confirmed group exit' } as import('./proc.ts').TerminateResult);
       const task = coord.getTask(run.task_id);
@@ -339,8 +384,7 @@ export async function recover(coord: Coordinator, machineId: string, activeTaskI
       if (!orphanRun && !(t.lease_until && t.lease_until < now)) continue;
       let uncertain = '';
       for (const owned of coord.runsFor(t.id).filter((r) => r.status === 'running' && r.machine_id === machineId && r.generation === t.generation)) {
-        const result = owned.pid ? await terminateRecordedProcess({ pid: owned.pid, startedAt: owned.proc_started }) :
-          owned.phase && !owned.phase.endsWith(':spawning') ? { status: 'exited' } : { status: 'unverified', reason: 'Child spawn may have started without a recorded process identity.' };
+        const result = await recoverRunChildren(coord, owned);
         if (!['exited', 'terminated'].includes(result.status)) {
           uncertain = result.reason ?? 'Could not prove that the old process stopped.';
           coord.updateRun(owned.id, { status: 'cleanup_failed', stop_reason: uncertain });
@@ -360,6 +404,7 @@ export async function recover(coord: Coordinator, machineId: string, activeTaskI
     if (t.lease_until && t.lease_until < now) {
       const run = coord.latestRun(t.id);
       if (run && ['running', 'lost', 'cleanup_failed'].includes(run.status)) {
+        coord.setMeta(`recovery:${run.id}`, 'remote_lease_expired');
         coord.updateRun(run.id, { status: 'cleanup_failed', stop_reason: 'Remote worker must confirm owned process-group exit before work can restart.' });
         coord.updateTask(t.id, { status: 'needs_human', attention: 'Remote recovery is waiting for this worker to reconnect and confirm its process stopped. Work is preserved.', lease_until: null });
         continue;

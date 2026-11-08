@@ -2,7 +2,7 @@ import { cpus, freemem, hostname, loadavg, platform } from 'node:os';
 import type { Client } from './api.ts';
 import { agentSettings, deepMerge, resolveConfig, type Config, worktreeRootOf } from './config.ts';
 import { runAttempt, Semaphore, type StopReason } from './runner.ts';
-import { run } from './proc.ts';
+import { currentProcessScopeSignal, run, withProcessScope } from './proc.ts';
 import { WorkerJournal, type JournalArtifact } from './worker-journal.ts';
 import { git, isClean, isLinkedWorktreeOf, listWorktrees, revParse } from './git.ts';
 import { dirBytes, freeGb, gb } from './disk.ts';
@@ -14,7 +14,7 @@ import { VERSION } from './version.ts';
 
 export interface BranchTransport {
   /** Make sure `sha` (the integration head on the hub) exists in the local clone. */
-  fetchBase(project: Project, repoPath: string, sha: string): Promise<void>;
+  fetchBase(project: Project, repoPath: string, sha: string, signal?: AbortSignal): Promise<void>;
   /** Send the finished task branch to the hub so it can be merged there. */
   uploadBranch(task: Task, repoPath: string, branch: string, base: string, signal?: AbortSignal): Promise<{ head: string }>;
 }
@@ -249,15 +249,37 @@ export class WorkerLoop {
     const abort = new AbortController();
     this.uploading.set(artifact.taskId, abort);
     try {
-      const fresh = (await this.client['task.get']({ id: artifact.taskId })).task;
+      const detail = await this.client['task.get']({ id: artifact.taskId });
+      const fresh = detail.task;
       // Never adopt a replacement claim or upload a later local commit.
       if (fresh.generation !== artifact.generation || fresh.assignee !== artifact.assignee || !['running', 'verifying', 'ready'].includes(fresh.status) || fresh.control) {
         artifact.retired = true; this.journal.save(); return;
       }
       if (fresh.status !== 'ready' || fresh.head_sha !== artifact.head || fresh.branch !== artifact.branch) return;
-      if (this.repos()[fresh.project_id] !== artifact.repo || await revParse(artifact.repo, `refs/heads/${artifact.branch}`) !== artifact.head) throw new Error('Local accepted branch moved; upload held.');
-      const accepted = await this.transport.uploadBranch(fresh, artifact.repo, artifact.branch, artifact.base, abort.signal);
-      if (accepted.head !== artifact.head) throw new Error('Hub did not acknowledge the accepted commit.');
+      const recorded = detail.runs.filter(run => run.role === 'implement' && run.generation === artifact.generation && run.machine_id === this.machineId).at(-1);
+      if (!recorded || ['running', 'lost', 'cleanup_failed'].includes(recorded.status) || recorded.pid !== null || recorded.phase?.endsWith(':spawning')) throw new Error('Upload held: no stopped implementation process belongs to this claim.');
+      const owner = { generation: artifact.generation, assignee: artifact.assignee };
+      // Coding has already acknowledged run.exit. Reopen only its durable utility journal,
+      // never a model attempt or budget reservation, before doing any local bundle work.
+      if (this.journal.runs[recorded.id]) throw new Error('Upload held: the implementation run still requires recovery.');
+      this.journal.runs[recorded.id] = { runId: recorded.id, taskId: artifact.taskId, owner, worktree: fresh.worktree, pid: null, startedAt: null, phase: 'upload', idlePhase: 'upload' };
+      this.journal.save();
+      const api = this.journal.wrap(this.client);
+      try {
+        await api['run.update']({ runId: recorded.id, owner, patch: { phase: 'upload' } });
+        const accepted = await withProcessScope({ signal: abort.signal,
+          beforeSpawn: child => api['run.utility']({ runId: recorded.id, taskId: artifact.taskId, owner, operation: { action: 'intent', token: child.token, command: child.command } }),
+          onSpawn: (token, child) => api['run.utility']({ runId: recorded.id, taskId: artifact.taskId, owner, operation: { action: 'spawn', token, pid: child.pid, startedAt: child.startedAt } }),
+          onExit: (token, result) => api['run.utility']({ runId: recorded.id, taskId: artifact.taskId, owner, operation: { action: 'exit', token, pid: result.pid, startedAt: result.startedAt, reaped: result.reaped } }),
+        }, async () => {
+          if (this.repos()[fresh.project_id] !== artifact.repo || await revParse(artifact.repo, `refs/heads/${artifact.branch}`) !== artifact.head) throw new Error('Local accepted branch moved; upload held.');
+          return this.transport!.uploadBranch(fresh, artifact.repo, artifact.branch, artifact.base, currentProcessScopeSignal());
+        });
+        if (accepted.head !== artifact.head) throw new Error('Hub did not acknowledge the accepted commit.');
+      } finally {
+        // The wrapper replays every token before acknowledging and deleting the local row.
+        await api['run.exit']({ runId: recorded.id, taskId: artifact.taskId, owner, reaped: true, noLaunchPhase: 'upload' });
+      }
       artifact.uploaded = true; delete artifact.error; this.journal.save();
     } catch (err) {
       if (abort.signal.aborted || this.stopped) return;
@@ -304,9 +326,11 @@ export class WorkerLoop {
     void (async () => {
       try {
         if (!claim.startPoint) throw new Error('The hub could not provide a starting commit.');
-        if (this.transport && !(await revParse(repoPath, claim.startPoint))) await this.transport.fetchBase(project, repoPath, claim.startPoint);
         const outcome = await runAttempt({
           api: this.journal?.wrap(this.client, { repo: repoPath, branch: task.branch ?? `yardmaster/${task.id}`, base: claim.startPoint }) ?? this.client, machineId: this.machineId, task, project, repoPath, agent: route.agent, model: route.model, config,
+          prepareBase: this.transport ? async (signal) => {
+            if (!(await revParse(repoPath, claim.startPoint!))) await this.transport!.fetchBase(project, repoPath, claim.startPoint!, signal);
+          } : undefined,
           startPoint: claim.startPoint, verifySlots: this.verifySlots, onSpawn: (stop) => {
             entry.stop = stop;
             if (pendingStop) stop(pendingStop.reason, pendingStop.message);

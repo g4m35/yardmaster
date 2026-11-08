@@ -114,7 +114,7 @@ export interface Run {
   touched: string[];
   started_at: number;
   ended_at: number | null;
-  role: 'implement' | 'review';
+  role: 'implement' | 'review' | 'plan';
   tier: string | null;
   lessons: string[];
   verdict: string | null;

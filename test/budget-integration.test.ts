@@ -291,7 +291,8 @@ test('identity-proven journal exit clears historical cleanup hold, safely requeu
   try {
     const run = s.coord.startRun(claim.task, 'm1', 'mock', null, '');
     s.coord.updateRun(run.id, { status: 'cleanup_failed', phase: 'agent', pid: 123456, proc_started: 987654,
-      stop_reason: 'Remote worker must confirm owned process-group exit before work can restart.' });
+      stop_reason: 'Localized explanation may change without changing recovery behavior.' });
+    s.coord.setMeta(`recovery:${run.id}`, 'remote_lease_expired');
     s.coord.updateTask(claim.task.id, { status: 'needs_human', lease_until: null, attention: 'Remote recovery is waiting for this worker to reconnect and confirm its process stopped.' });
     const acknowledge = (pid: number) => s.client['run.exit']({ runId: run.id, taskId: claim.task.id, owner, reaped: true, process: { pid, startedAt: 987654 } });
     await assert.rejects(acknowledge(123455), /identity/);
