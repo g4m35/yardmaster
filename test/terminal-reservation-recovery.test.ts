@@ -139,7 +139,9 @@ test('an old terminal record without exit evidence stays held until the existing
 for (const taskStatus of ['verifying', 'done'] as const) test(`offline remote terminal hold remains explicit for ${taskStatus} work`, async () => {
   const f = await fixture('m-remote');
   try {
-    f.coord.updateRun(f.run.id, { status: 'succeeded', phase: 'collect', pid: null, proc_started: null });
+    f.coord.db.prepare('UPDATE runs SET started_at = ? WHERE id = ?').run(Date.now() - 120_000, f.run.id);
+    f.coord.updateRun(f.run.id, { status: 'succeeded', phase: 'collect', pid: null, proc_started: null,
+      ended_at: Date.now() - 120_000 });
     f.coord.updateTask(f.task.id, { status: taskStatus, lease_until: Date.now() - 1 });
     await recover(f.coord, 'm-hub', new Set());
     assert.equal(listHeld(f.coord.db).length, 1, 'a remote idle phase is not local exit proof');
@@ -148,6 +150,20 @@ for (const taskStatus of ['verifying', 'done'] as const) test(`offline remote te
     if (taskStatus === 'verifying') assert.equal(f.coord.getTask(f.task.id)!.status, 'needs_human');
     else assert.equal(f.coord.getTask(f.task.id)!.status, 'done');
     f.coord.control(f.task.id, 'confirm-stopped', 'fixture', 'Verified all processes on the offline worker have exited.', { remote: true });
+    assert.equal(listHeld(f.coord.db).length, 0);
+    assert.equal(f.coord.spentToday(), .25);
+  } finally { f.coord.db.close(); }
+});
+
+test('a recently finished remote run can acknowledge exit before its first machine heartbeat', async () => {
+  const f = await fixture('m-remote');
+  try {
+    f.coord.updateRun(f.run.id, { status: 'succeeded', phase: 'collect', pid: null, proc_started: null, ended_at: Date.now() });
+    f.coord.updateTask(f.task.id, { status: 'canceled' });
+    await recover(f.coord, 'm-hub', new Set());
+    assert.equal(f.coord.getRun(f.run.id)!.status, 'succeeded');
+    assert.equal(listHeld(f.coord.db).length, 1);
+    f.coord.confirmRunExit(f.run.id, f.task.id, { generation: f.task.generation, assignee: f.task.assignee! });
     assert.equal(listHeld(f.coord.db).length, 0);
     assert.equal(f.coord.spentToday(), .25);
   } finally { f.coord.db.close(); }

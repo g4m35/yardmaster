@@ -411,7 +411,8 @@ export async function recover(coord: Coordinator, machineId: string, activeTaskI
     if (task?.generation === run.generation && task.machine_id === run.machine_id && ['running', 'verifying'].includes(task.status)) continue;
     if (run.machine_id !== machineId) {
       const machine = coord.getMachine(run.machine_id);
-      if (machine && now - machine.last_seen <= LEASE_MS) continue;
+      const lastActivity = Math.max(machine?.last_seen ?? 0, run.started_at, run.ended_at ?? 0);
+      if (now - lastActivity <= LEASE_MS) continue;
       tx(coord.db, () => {
         const fresh = coord.getRun(run.id);
         if (!fresh || fresh.machine_id !== run.machine_id || fresh.generation !== run.generation ||
