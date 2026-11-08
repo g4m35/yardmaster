@@ -14,6 +14,7 @@ import { groupAlive } from '../src/proc.ts';
 import { Semaphore } from '../src/runner.ts';
 import { httpTransport } from '../src/transport.ts';
 import { WorkerLoop } from '../src/worker.ts';
+import { utilities, runUtilityKey } from '../src/utility-records.ts';
 import { sandbox, until } from './helpers.ts';
 
 function latch() {
@@ -22,12 +23,13 @@ function latch() {
   return { promise, release };
 }
 
-for (const stage of ['agent', 'terminal'] as const) test(`a same-ID paired HTTP controller keeps its fresh ${stage} claim through hub recovery`, { timeout: 25_000 }, async () => {
-  const box = sandbox({ maxParallel: 1, review: { mode: 'never' }, cleanup: { auto: false },
+for (const stage of ['agent', 'terminal', 'post-review', 'post-review-cancel'] as const) test(`a same-ID paired HTTP controller keeps its fresh ${stage} claim through hub recovery`, { timeout: 25_000 }, async () => {
+  const postReview = stage.startsWith('post-review');
+  const box = sandbox({ maxParallel: 1, review: { mode: postReview ? 'always' : 'never', reviewers: ['mock'], crossFamily: false }, cleanup: { auto: false },
     worktree: { warmStart: 'off' }, disk: { minFreeGb: 0, maxWorktreesGb: null } });
   const hub = new Hub({ db: openDb(join(box.home, 'same-id.db')), token: 'fixture-owner', machineId: 'm-hub',
     host: '127.0.0.1', port: 0, tickMs: 60_000, includeMock: false, quiet: true });
-  const continueTerminal = latch(); let terminalReached = false;
+  const continueTerminal = latch(); let terminalReached = false, reviewExited = false;
   let worker: WorkerLoop | undefined;
   try {
     const url = await hub.start(), project = await hub.coord.registerProject(box.repo);
@@ -39,6 +41,18 @@ for (const stage of ['agent', 'terminal'] as const) test(`a same-ID paired HTTP 
     const channel = fleetClient(url, paired.token);
     const client = new Proxy(channel, { get(target, key: keyof Client) {
       if (key === 'then' as keyof Client) return undefined;
+      if (key === 'run.exit') return async (params: Parameters<Client['run.exit']>[0]) => {
+        const result = await target['run.exit'](params);
+        if (hub.coord.getRun(params.runId)?.role === 'review') reviewExited = true;
+        return result;
+      };
+      if (key === 'run.utility') return async (params: Parameters<Client['run.utility']>[0]) => {
+        const result = await target['run.utility'](params);
+        if (postReview && reviewExited && !terminalReached && params.operation.action === 'intent' && hub.coord.getRun(params.runId)?.role === 'implement') {
+          terminalReached = true; await continueTerminal.promise;
+        }
+        return result;
+      };
       if (key !== 'run.update') return target[key];
       return async (params: Parameters<Client['run.update']>[0]) => {
         const result = await target['run.update'](params);
@@ -52,7 +66,7 @@ for (const stage of ['agent', 'terminal'] as const) test(`a same-ID paired HTTP 
     const task = hub.coord.addTasks(project.id, [{ title: `Same-ID ${stage}`, agent: 'mock',
       prompt: stage === 'agent' ? '@mock sleep 20000' : '@mock write saved.txt preserved artifact' }], 'fixture').created[0]!;
     await worker.heartbeat(); await worker.tick();
-    if (stage === 'terminal') await until(() => terminalReached, value => value, 5000, 'terminal result before acknowledgment');
+    if (stage === 'terminal' || postReview) await until(() => terminalReached, value => value, 5000, 'terminal or post-review boundary');
     else await until(() => hub.coord.latestRun(task.id), run => !!run?.pid && run.phase === 'agent', 5000, 'external mock PID');
     await worker.heartbeat();
     const before = hub.coord.getTask(task.id)!, run = hub.coord.latestRun(task.id)!;
@@ -64,7 +78,14 @@ for (const stage of ['agent', 'terminal'] as const) test(`a same-ID paired HTTP 
     const after = hub.coord.getTask(task.id)!;
     assert.equal(after.status, before.status); assert.equal(after.generation, before.generation); assert.equal(after.assignee, before.assignee);
     assert.equal(hub.coord.getMeta(`http_run:${run.id}`), '1');
-    assert.equal(listHeld(hub.coord.db).length, 1);
+    assert.equal(listHeld(hub.coord.db).length, postReview ? 0 : 1);
+    if (postReview) {
+      const implementation = hub.coord.runsFor(task.id).find(run => run.role === 'implement')!;
+      assert.equal(reviewExited, true);
+      assert.equal(implementation.status, 'stopped', 'review admission already acknowledged implementation exit');
+      assert.ok(utilities(hub.coord.db, runUtilityKey(implementation.id)).some(child => child.state !== 'exited'));
+      assert.equal(hub.coord.getMeta(`http_run:${implementation.id}`), '1', 'phase allowance release retains controller origin');
+    }
     if (stage === 'agent') {
       assert.equal(groupAlive(run.pid!), true, 'hub recovery never signals another live controller');
       hub.coord.updateTask(task.id, { lease_until: Date.now() - 1 });
@@ -74,12 +95,14 @@ for (const stage of ['agent', 'terminal'] as const) test(`a same-ID paired HTTP 
       worker.stopAll('shutdown', 'fixture stopped external controller'); await worker.drain();
       assert.equal(groupAlive(run.pid!), false);
     } else {
+      if (stage === 'post-review-cancel') hub.coord.control(task.id, 'cancel', 'fixture');
       continueTerminal.release();
       await until(() => worker!.active.size, size => size === 0, 10_000, 'external controller acknowledgment');
-      assert.ok(['ready', 'merging', 'done'].includes(hub.coord.getTask(task.id)!.status), hub.coord.getTask(task.id)!.attention ?? 'original artifact must be accepted');
-      assert.equal(hub.coord.runsFor(task.id).length, 1, 'no duplicate coding attempt');
+      if (stage === 'post-review-cancel') assert.equal(hub.coord.getTask(task.id)!.status, 'canceled');
+      else assert.ok(['ready', 'merging', 'done'].includes(hub.coord.getTask(task.id)!.status), hub.coord.getTask(task.id)!.attention ?? 'original artifact must be accepted');
+      assert.equal(hub.coord.runsFor(task.id).length, postReview ? 2 : 1, 'no duplicate coding attempt');
     }
-    assert.equal(hub.coord.getMeta(`http_run:${run.id}`), null, 'exit proof retires controller metadata');
+    assert.equal(hub.coord.getMeta(`http_run:${run.id}`), '1', 'controller origin remains factual after exit');
     assert.equal(listHeld(hub.coord.db).length, 0);
   } finally {
     continueTerminal.release(); worker?.stopAll('shutdown', 'same-ID fixture finished'); await worker?.drain();
@@ -105,6 +128,6 @@ test('an offline same-ID HTTP terminal hold survives hub heartbeats and accepts 
     assert.ok(hub.coord.getMachine(hub.machineId)!.last_seen > Date.now() - 90_000);
     hub.coord.control(claim.task.id, 'confirm-stopped', 'fixture', 'Inspected the separate worker and confirmed all its processes stopped.', { remote: true });
     assert.equal(hub.coord.getTask(claim.task.id)!.status, 'done'); assert.equal(listHeld(hub.coord.db).length, 0);
-    assert.equal(hub.coord.getMeta(`http_run:${id}`), null);
+    assert.equal(hub.coord.getMeta(`http_run:${id}`), '1');
   } finally { await hub.stop(); hub.coord.db.close(); rmSync(box.root, { recursive: true, force: true }); }
 });

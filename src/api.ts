@@ -386,6 +386,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       if (p.owner!.assignee !== `machine:${p.machineId}`) throw new Error('Run machine does not match the claim owner.');
       const lessons = scopedLessons(task.project_id, p.lessons);
       const run = coord.startRun({ ...task, generation: p.owner!.generation! }, p.machineId, p.agent, p.model ?? null, p.logPath, p.role, p.implementationExited);
+      // Immutable run provenance: review and upload can reuse this run's utilities after a phase exit.
       // Persist before the response permits launch; a same-host worker is not this hub's controller.
       if (hooks.externalWorker && p.machineId === hooks.machineId) coord.setMeta(`http_run:${run.id}`, '1');
       if (lessons.length) {

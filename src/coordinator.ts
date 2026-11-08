@@ -544,7 +544,6 @@ export class Coordinator {
             for (const child of utilities(this.db, runUtilityKey(run.id))) if (child.state !== 'exited') recordUtility(this.db, runUtilityKey(run.id), { action: 'exit', token: child.token, pid: child.pid, startedAt: child.startedAt, reaped: true });
             forgetStoppedUtilities(this.db, runUtilityKey(run.id));
             this.setMeta(`recovery:${run.id}`, null);
-            this.setMeta(`http_run:${run.id}`, null);
             this.updateRun(run.id, { status: 'stopped', phase: null, pid: null, proc_started: null, ended_at: Date.now(), stop_reason: `Owner ${by} attested stopped: ${clip(note, 1000)}` });
             const budget = listHeld(this.db).find(r => r.runId === run.id);
             if (budget) release(this.db, budget.id, { kind: 'exited', runId: run.id });
@@ -941,7 +940,6 @@ export class Coordinator {
       if (!utilitiesStopped(this.db, runUtilityKey(runId))) throw new Error('Owned utilities have not all confirmed exit.');
       if (!held && !['running', 'lost', 'cleanup_failed'].includes(run.status)) {
         forgetStoppedUtilities(this.db, runUtilityKey(runId));
-        this.setMeta(`http_run:${runId}`, null);
         return; // An acknowledged exit is replay-safe.
       }
       const matchedNoLaunch = noLaunchPhase !== undefined && run.pid === null && run.phase === noLaunchPhase && !noLaunchPhase.endsWith(':spawning');
@@ -954,7 +952,6 @@ export class Coordinator {
       if (held) release(this.db, held.id, { kind: 'exited', runId });
       forgetStoppedUtilities(this.db, runUtilityKey(runId));
       this.setMeta(`recovery:${runId}`, null);
-      this.setMeta(`http_run:${runId}`, null);
       if (remoteRecovery) {
         const task = this.getTask(taskId);
         const otherLive = this.runsFor(taskId).some(r => r.id !== runId && r.generation === run.generation && ['running', 'lost', 'cleanup_failed'].includes(r.status));
@@ -982,7 +979,6 @@ export class Coordinator {
       const held = listHeld(this.db).find(r => r.runId === runId);
       if (held) release(this.db, held.id, { kind: 'exited', runId });
       this.setMeta(`recovery:${runId}`, null);
-      this.setMeta(`http_run:${runId}`, null);
       forgetStoppedUtilities(this.db, runUtilityKey(runId));
       this.invalidate();
       this.changed();
