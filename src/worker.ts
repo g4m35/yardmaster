@@ -3,6 +3,7 @@ import type { Client } from './api.ts';
 import { agentSettings, deepMerge, resolveConfig, type Config, worktreeRootOf } from './config.ts';
 import { runAttempt, Semaphore, type StopReason } from './runner.ts';
 import { run } from './proc.ts';
+import { WorkerJournal, type JournalArtifact } from './worker-journal.ts';
 import { git, isClean, isLinkedWorktreeOf, listWorktrees, revParse } from './git.ts';
 import { dirBytes, freeGb, gb } from './disk.ts';
 import { clonesAreFree } from './warmstart.ts';
@@ -15,7 +16,7 @@ export interface BranchTransport {
   /** Make sure `sha` (the integration head on the hub) exists in the local clone. */
   fetchBase(project: Project, repoPath: string, sha: string): Promise<void>;
   /** Send the finished task branch to the hub so it can be merged there. */
-  uploadBranch(task: Task, repoPath: string, branch: string, base: string): Promise<{ head: string }>;
+  uploadBranch(task: Task, repoPath: string, branch: string, base: string, signal?: AbortSignal): Promise<{ head: string }>;
 }
 
 interface Active {
@@ -55,6 +56,10 @@ export class WorkerLoop {
   private readonly local: () => Config;
   private readonly transport: BranchTransport | null;
   private readonly verifySlots: Semaphore;
+  private readonly journal: WorkerJournal | null;
+  private held = new Set<string>();
+  private recovering: Promise<void> | null = null;
+  private readonly uploading = new Map<string, AbortController>();
   private claiming = false;
   private stopped = false;
   private lastResourceWarn = 0;
@@ -81,6 +86,7 @@ export class WorkerLoop {
     this.agents = opts.agents;
     this.local = opts.localConfig;
     this.transport = opts.transport ?? null;
+    this.journal = this.transport ? new WorkerJournal(this.machineId) : null;
     this.verifySlots = opts.verifySlots;
   }
 
@@ -109,12 +115,20 @@ export class WorkerLoop {
   }
 
   async heartbeat(): Promise<void> {
-    await this.client['machine.heartbeat']({
+    const running = new Map([...this.active.values()].map(({ task }) => [task.id, { taskId: task.id, generation: task.generation }]));
+    for (const artifact of Object.values(this.journal?.artifacts ?? {})) if (!artifact.uploaded && !artifact.retired && artifact.failures < 6) running.set(artifact.taskId, { taskId: artifact.taskId, generation: artifact.generation });
+    const result = await this.client['machine.heartbeat']({
       id: this.machineId,
       name: this.name,
       info: (await this.info()) as unknown as Record<string, unknown>,
-      running: [...this.active.values()].map(({ task }) => ({ taskId: task.id, generation: task.generation })),
+      running: [...running.values()],
     });
+    for (const control of result.controls) this.applyControl(control.taskId, control);
+    // Uploads outlive runAttempt's control poll; inspect their current owner every heartbeat.
+    for (const taskId of this.uploading.keys()) {
+      const current = await this.client['task.peek']({ id: taskId }).catch(() => null);
+      if (current) this.applyControl(taskId, current);
+    }
   }
 
   private async hasCapacity(): Promise<boolean> {
@@ -163,40 +177,105 @@ export class WorkerLoop {
       for (const group of readdirSync(root)) {
         if (!group.endsWith(projectId.slice(2, 8))) continue;
         for (const taskId of readdirSync(join(root, group))) {
-          if (!taskId.startsWith('t-') || this.active.has(taskId)) continue;
+          if (!taskId.startsWith('t-') || this.active.has(taskId) || this.held.has(taskId) || Object.values(this.journal?.runs ?? {}).some(run => run.taskId === taskId)) continue;
           const path = join(root, group, taskId);
           if (!isLinkedWorktreeOf(path, repo)) continue;
           const t = await this.client['task.peek']({ id: taskId }).catch(() => null);
           // Only the exact commit acknowledged by the hub can be discarded. Detached work, locks,
           // new commits and nonterminal tasks are preserved, including their build/setup artifacts.
           if (!t || t.status !== 'done' || !t.head_sha || t.branch !== `yardmaster/${taskId}`) continue;
+          const artifact = this.journal?.accepted(taskId, t.generation);
+          const accepted = artifact?.head ?? t.head_sha;
+          if (artifact && (artifact.branch !== t.branch || artifact.assignee !== t.assignee)) continue;
+          // A merge commit differs from the verified branch tip. Fetch it before proving ancestry.
+          if (!(await revParse(repo, t.head_sha))) {
+            const project = (await this.client['project.list']({})).find(p => p.id === projectId);
+            if (!project) continue;
+            await this.transport.fetchBase(project, repo, t.head_sha).catch(() => undefined);
+          }
+          if ((await git(repo, ['merge-base', '--is-ancestor', accepted, t.head_sha], { allowFail: true })).code !== 0) continue;
           const entry = (await listWorktrees(repo)).find((w) => w.path === path);
-          if (!entry || entry.locked || entry.prunable || entry.branch !== t.branch || entry.head !== t.head_sha) continue;
+          if (!entry || entry.locked || entry.prunable || entry.branch !== t.branch || entry.head !== accepted) continue;
           if (!(await isClean(path))) continue;
           const current = await this.client['task.peek']({ id: taskId }).catch(() => null);
-          if (!current || current.status !== 'done' || current.generation !== t.generation || current.head_sha !== t.head_sha ||
+          if (!current || current.status !== 'done' || current.generation !== t.generation || current.assignee !== t.assignee || current.head_sha !== t.head_sha ||
               current.branch !== t.branch || this.active.has(taskId)) continue;
           const latest = (await listWorktrees(repo)).find((w) => w.path === path);
-          if (!latest || latest.locked || latest.prunable || latest.branch !== t.branch || latest.head !== t.head_sha ||
+          if (!latest || latest.locked || latest.prunable || latest.branch !== t.branch || latest.head !== accepted ||
               !isLinkedWorktreeOf(path, repo) || !(await isClean(path)) || this.active.has(taskId)) continue;
           // Git's own worktree removal honors locks; bypassing it via the fast path would lose that guard.
           const removed = await git(repo, ['worktree', 'remove', path], { allowFail: true });
           if (removed.code !== 0) continue;
           // Compare-and-delete: a branch advanced during removal must survive.
-          await git(repo, ['update-ref', '-d', `refs/heads/${t.branch}`, t.head_sha], { allowFail: true });
+          await git(repo, ['update-ref', '-d', `refs/heads/${t.branch}`, accepted], { allowFail: true });
+          if (this.journal && artifact) { delete this.journal.artifacts[taskId]; this.journal.save(); }
         }
       }
     }
+  }
+
+  private applyControl(taskId: string, control: { generation: number; assignee: string | null; status: string; control: string | null }): void {
+    const task = this.active.get(taskId)?.task;
+    const artifact = this.journal?.artifacts[taskId];
+    const generation = task?.generation ?? artifact?.generation;
+    const assignee = task?.assignee ?? artifact?.assignee;
+    let reason: StopReason | null = null;
+    if (control.generation !== generation || control.assignee !== assignee) reason = 'lost';
+    else if (control.status === 'canceled') reason = 'canceled';
+    else if (control.control === 'stop-pause') reason = 'shutdown';
+    else if (control.control === 'redirect') reason = 'redirected';
+    else if (control.control || !['running', 'verifying', 'ready'].includes(control.status)) reason = 'stopped';
+    if (reason) {
+      this.active.get(taskId)?.stop?.(reason, 'Hub stopped this claim.');
+      this.uploading.get(taskId)?.abort('Hub stopped this claim.');
+    }
+  }
+
+  /** Recovery precedes admission and is shared by overlapping timer calls. */
+  async recoverLocal(): Promise<void> {
+    if (!this.journal) return;
+    if (this.recovering) return this.recovering;
+    this.recovering = (async () => {
+      this.held = await this.journal!.recover(this.client, new Set(this.active.keys()));
+      for (const artifact of Object.values(this.journal!.artifacts)) {
+        if (!this.stopped && !artifact.uploaded && !artifact.retired && artifact.failures < 6 && artifact.retryAt <= Date.now() && !this.held.has(artifact.taskId) && !this.active.has(artifact.taskId)) await this.retryUpload(artifact);
+      }
+    })();
+    try { await this.recovering; } finally { this.recovering = null; }
+  }
+
+  private async retryUpload(artifact: JournalArtifact): Promise<void> {
+    if (!this.transport || !this.journal || this.stopped || this.uploading.has(artifact.taskId)) return;
+    const abort = new AbortController();
+    this.uploading.set(artifact.taskId, abort);
+    try {
+      const fresh = (await this.client['task.get']({ id: artifact.taskId })).task;
+      // Never adopt a replacement claim or upload a later local commit.
+      if (fresh.generation !== artifact.generation || fresh.assignee !== artifact.assignee || !['running', 'verifying', 'ready'].includes(fresh.status) || fresh.control) {
+        artifact.retired = true; this.journal.save(); return;
+      }
+      if (fresh.status !== 'ready' || fresh.head_sha !== artifact.head || fresh.branch !== artifact.branch) return;
+      if (this.repos()[fresh.project_id] !== artifact.repo || await revParse(artifact.repo, `refs/heads/${artifact.branch}`) !== artifact.head) throw new Error('Local accepted branch moved; upload held.');
+      const accepted = await this.transport.uploadBranch(fresh, artifact.repo, artifact.branch, artifact.base, abort.signal);
+      if (accepted.head !== artifact.head) throw new Error('Hub did not acknowledge the accepted commit.');
+      artifact.uploaded = true; delete artifact.error; this.journal.save();
+    } catch (err) {
+      if (abort.signal.aborted || this.stopped) return;
+      artifact.failures++; artifact.retryAt = Date.now() + Math.min(60_000, 1000 * 2 ** (artifact.failures - 1)); artifact.error = (err as Error).message;
+      this.journal.save();
+      if (artifact.failures >= 6) await this.client['task.update']({ id: artifact.taskId, owner: { generation: artifact.generation, assignee: artifact.assignee, statuses: ['ready'] }, patch: { status: 'needs_human', attention: `Branch upload failed after 6 tries: ${artifact.error}. The accepted local branch is preserved.`, lease_until: null } }).catch(() => undefined);
+    } finally { this.uploading.delete(artifact.taskId); }
   }
 
   async tick(): Promise<void> {
     if (this.claiming || this.stopped) return;
     this.claiming = true;
     try {
+      await this.recoverLocal();
       while (!this.stopped && (await this.hasCapacity())) {
         const runningByAgent: Record<string, number> = {};
         for (const a of this.active.values()) runningByAgent[a.agent] = (runningByAgent[a.agent] ?? 0) + 1;
-        const claim = await this.client['worker.claim']({ machineId: this.machineId, agents: this.agents(), repos: this.repos(), runningByAgent, activeTaskIds: [...this.active.keys()] });
+        const claim = await this.client['worker.claim']({ machineId: this.machineId, agents: this.agents(), repos: this.repos(), runningByAgent, activeTaskIds: [...new Set([...this.active.keys(), ...this.held, ...Object.values(this.journal?.artifacts ?? {}).filter(a => !a.uploaded && !a.retired && a.failures < 6).map(a => a.taskId)])] });
         if (!claim) break;
         if (this.stopped) {
           // A shutdown may have happened while the hub was handing us this claim, before an active entry existed.
@@ -227,7 +306,7 @@ export class WorkerLoop {
         if (!claim.startPoint) throw new Error('The hub could not provide a starting commit.');
         if (this.transport && !(await revParse(repoPath, claim.startPoint))) await this.transport.fetchBase(project, repoPath, claim.startPoint);
         const outcome = await runAttempt({
-          api: this.client, machineId: this.machineId, task, project, repoPath, agent: route.agent, model: route.model, config,
+          api: this.journal?.wrap(this.client, { repo: repoPath, branch: task.branch ?? `yardmaster/${task.id}`, base: claim.startPoint }) ?? this.client, machineId: this.machineId, task, project, repoPath, agent: route.agent, model: route.model, config,
           startPoint: claim.startPoint, verifySlots: this.verifySlots, onSpawn: (stop) => {
             entry.stop = stop;
             if (pendingStop) stop(pendingStop.reason, pendingStop.message);
@@ -238,16 +317,13 @@ export class WorkerLoop {
           },
         });
         if (outcome.status === 'ready' && this.transport) {
-          const fresh = (await this.client['task.get']({ id: task.id })).task;
-          if (fresh.generation !== task.generation || fresh.assignee !== task.assignee || fresh.status !== 'ready') throw new Error('This attempt no longer owns the task before upload.');
-          // Retain the original claim identity; never lend a stale worker the new owner's generation.
-          const accepted = await this.transport.uploadBranch({ ...fresh, generation: task.generation }, repoPath, fresh.branch!, fresh.base_sha ?? claim.startPoint);
-          if (accepted.head !== fresh.head_sha) throw new Error('Hub did not acknowledge the accepted commit.');
+          if (!this.journal!.accepted(task.id, task.generation)) throw new Error('Ready artifact missing from recovery journal.');
+          await this.retryUpload(this.journal!.artifacts[task.id]!);
         }
       } catch (err) {
         // Fenced: if the task was taken over elsewhere meanwhile, this stale error must not overwrite it.
         await this.client['task.update']({ id: task.id, owner: { generation: task.generation, attempt: task.attempts, assignee: task.assignee ?? '', statuses: ['running', 'verifying', 'ready'] }, patch: { status: 'needs_human', attention: `This machine (${this.name}) hit an error: ${(err as Error).message}`, lease_until: null } }).catch(() => undefined);
-        await this.client['task.event']({ projectId: task.project_id, taskId: task.id, level: 'error', kind: 'worker.error', message: `${this.name}: ${(err as Error).message}` }).catch(() => undefined);
+        await this.client['task.event']({ projectId: task.project_id, taskId: task.id, owner: { generation: task.generation, assignee: task.assignee ?? '' }, level: 'error', kind: 'worker.error', message: `${this.name}: ${(err as Error).message}` }).catch(() => undefined);
       } finally {
         this.active.delete(task.id);
         void this.tick();
@@ -258,6 +334,7 @@ export class WorkerLoop {
   stopAll(reason: StopReason, message: string): void {
     this.stopped = true;
     for (const a of this.active.values()) a.stop?.(reason, message);
+    for (const abort of this.uploading.values()) abort.abort(message);
   }
 
   async drain(timeoutMs = 15_000): Promise<void> {

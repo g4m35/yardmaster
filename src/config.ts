@@ -199,8 +199,8 @@ export const ConfigSchema = z.object({
     .object({ maxLoadPerCpu: z.number().default(0.9), minFreeMemMb: z.number().default(1024) })
     .default({ maxLoadPerCpu: 0.9, minFreeMemMb: 1024 }),
   cleanup: z
-    .object({ auto: z.boolean().default(true), logRetentionDays: z.number().default(14), deleteMergedBranches: z.boolean().default(true) })
-    .default({ auto: true, logRetentionDays: 14, deleteMergedBranches: true }),
+    .object({ auto: z.boolean().default(true), logRetentionDays: z.number().default(14), eventRetentionDays: z.number().int().min(1).max(3650).nullable().default(30), deleteMergedBranches: z.boolean().default(true) })
+    .default({ auto: true, logRetentionDays: 14, eventRetentionDays: 30, deleteMergedBranches: true }),
   disk: z
     .object({
       /** Hold new work when the worktree disk has less than this free. */

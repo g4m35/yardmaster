@@ -18,7 +18,7 @@ import type { Client } from './api.ts';
 import type { TaskPatch } from './coordinator.ts';
 import { changedLineCount, formatIssues, runReview, shouldReview } from './review.ts';
 import { siblingWorktrees, warmStart } from './warmstart.ts';
-import { UsageMeter, type UsageSnapshot } from './usage.ts';
+import { emptyUsage, UsageMeter, type UsageSnapshot } from './usage.ts';
 import { routeEffort, routedEffortOf } from './jev.ts';
 import { EffortPolicyError, launchEffort, launchIdentity } from './effort.ts';
 import { verifyArtifact as runVerify } from './verification.ts';
@@ -335,7 +335,8 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   const rawLog = join(paths.logs(), `${task.id}-${task.generation}.jsonl`);
   const runId = await api['run.start']({ taskId: task.id, machineId: ctx.machineId, agent: ctx.agent, model: ctx.model, logPath: rawLog });
   let attemptReaped = true;
-  ctx.cleanup?.(() => attemptReaped ? api['run.exit']({ runId, taskId: task.id, owner: claimOwner(task), reaped: true }) : undefined);
+  let finalUsageRecorded = true;
+  ctx.cleanup?.(() => attemptReaped && finalUsageRecorded ? api['run.exit']({ runId, taskId: task.id, owner: claimOwner(task), reaped: true }) : undefined);
   const log = new LogBuffer(api, runId);
   ctx.cleanup?.(() => log.close());
   await api['run.update']({ runId, patch: { phase: 'prepare' } });
@@ -388,7 +389,10 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
     }
     for (const sk of warm.skipped) await event(ctx, 'info', 'task.warm_start_skipped', `Didn't bring over ${sk.rel}: ${sk.why}`);
     for (const command of config.worktree.setup) {
+      await api['run.update']({ runId, patch: { phase: 'setup:spawning' } });
+      attemptReaped = false;
       const r = await runShell(command, { cwd: wt, timeoutMs: config.verifyTimeoutMinutes * 60_000, signal: ctx.signal, onSpawn: async ({ pid, startedAt }) => { await api['run.update']({ runId, patch: { phase: 'setup', pid, proc_started: startedAt } }); } });
+      attemptReaped = r.reaped;
       if (!r.reaped) { attemptReaped = false; await api['run.update']({ runId, patch: { status: 'cleanup_failed' } }); return finishNeedsHuman(ctx, 'A setup process survived cleanup; work is held for recovery.'); }
       await api['run.update']({ runId, patch: { phase: 'prepare', pid: null, proc_started: null } });
       if (r.code !== 0) return finishNeedsHuman(ctx, `Worktree setup \`${command}\` failed:\n${tail(r.stdout, 20, 1500)}`);
@@ -401,14 +405,32 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   let resumeId = adapter.resumable && settings.resume && !freshWorktree && task.agent_session && task.session_agent === ctx.agent && task.session_at !== null && Date.now() - task.session_at < 60 * 60_000 ? task.agent_session : null;
   let pinned = !resumeId && adapter.resumable ? randomUUID() : null;
   let baseline = resumeId ? task.session_cost : 0;
-  const taskRemaining = task.budget_usd !== null ? Math.max(0, task.budget_usd - task.cost_usd) : null;
+  const reservation = await api['run.update']({ runId, patch: {}, launch: true });
+  if (!reservation) throw new Error('Missing launch budget authorization.');
+  const taskRemaining = reservation.amountUsd;
   phase('prepare');
   const effort = await routeEffort({ config: config.effortRouting, agent: ctx.agent, model: ctx.model, settings,
-    tier: task.tier, task, repoPath: ctx.repoPath, signal: ctx.signal });
+    tier: task.tier, task, repoPath: ctx.repoPath, signal: ctx.signal,
+    beforeSpawn: async () => {
+      await api['run.update']({ runId, patch: { phase: 'route:spawning' } });
+      attemptReaped = false;
+    },
+    onSpawn: async ({ pid, startedAt }) => {
+      await api['run.update']({ runId, patch: { phase: 'route', pid, proc_started: startedAt } });
+    },
+  });
+  if (effort.process?.reaped) {
+    attemptReaped = true;
+    await api['run.update']({ runId, patch: { phase: 'prepare', pid: null, proc_started: null } });
+  }
+  if (effort.reason === 'process_unreaped' || effort.reason === 'registration_failed') {
+    if (!attemptReaped) await api['run.update']({ runId, patch: { status: 'cleanup_failed', stop_reason: `JEV ${effort.reason}` } });
+    return finishNeedsHuman(ctx, `Effort routing could not finish safely (${effort.reason}). Work is preserved; confirm process recovery before retrying.`);
+  }
   if (config.effortRouting.enabled) phase('route');
   const input: AdapterContext = { prompt: resumeId ? buildResumePrompt(ctx, { messages: context.messages, conflicts }) : buildPrompt(ctx, { ...context, conflicts }),
     cwd: wt, model: ctx.model, settings, tier: task.tier, routedEffort: routedEffortOf(effort),
-    budgetUsd: taskRemaining === null ? null : taskRemaining + baseline,
+    budgetUsd: taskRemaining,
     session: resumeId ? { resume: resumeId } : pinned ? { pin: pinned } : undefined };
   const build = (): LaunchSpec => {
     const spec = adapter.build(input);
@@ -491,7 +513,7 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   let stderrTail = '';
   let stop: { reason: StopReason; message: string } | null = null;
   let lastActivity = '';
-  const budget = task.budget_usd;
+  const budget = reservation.amountUsd;
   const owner = claimOwner(task);
 
   let coding: OwnedProcess | null = null;
@@ -515,8 +537,8 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
     if (ev.type === 'tool') toolCalls++;
     if (ev.type === 'usage') {
       meter.add(ev);
-      if (budget !== null && task.cost_usd + spent() > budget) {
-        requestStop('budget', `This task reached its budget of ${formatUsd(budget)} (spent ${formatUsd(task.cost_usd + spent())}).`);
+      if (budget !== null && spent() > budget) {
+        requestStop('budget', `This run exceeded its reserved budget allowance of ${formatUsd(budget)} (observed ${formatUsd(spent())}).`);
       }
       return;
     }
@@ -550,6 +572,10 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   };
   const releaseAgent = await ctx.reserveAgent?.(ctx.agent, ctx.signal);
   if (releaseAgent) ctx.cleanup?.(releaseAgent);
+  await api['run.update']({ runId, patch: {}, launch: true });
+  await api['run.update']({ runId, patch: { phase: 'agent:spawning' } });
+  attemptReaped = false;
+  finalUsageRecorded = false;
   coding = startOwnedProcess(spec.command, spec.args, {
     cwd: wt, env: cleanEnv({ ...spec.env, YARDMASTER_TASK_ID: task.id, YARDMASTER_ATTEMPT: String(task.attempts),
       YARDMASTER_GENERATION: String(task.generation), YARDMASTER_PROJECT_ID: task.project_id }),
@@ -600,8 +626,10 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
     consume(decoder.end() + (buffered ? '\n' : ''));
     raw.end();
   });
+  attemptReaped = result.reaped;
   const code = result.code ?? 127;
   if (!result.reaped) {
+    await recordUsage(meter.snapshot());
     attemptReaped = false;
     await log.close();
     await api['run.update']({ runId, patch: { status: 'cleanup_failed', stop_reason: result.reap.reason ?? 'Process cleanup could not be verified', ended_at: Date.now() } }).catch(() => undefined);
@@ -614,6 +642,7 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   const cost = spent();
   const { tokensIn, tokensOut } = meter;
   await recordUsage(meter.snapshot());
+  finalUsageRecorded = true;
   await api['run.update']({ runId, patch: { exit_code: code, last_activity: lastActivity, phase: 'collect', pid: null, proc_started: null } }).catch((err) => { if (!isStale(err)) throw err; });
   if (result.end === 'hook_failed' || result.end === 'spawn_failed') return finishNeedsHuman(ctx, `The agent could not be safely started/registered: ${result.error || stderrTail}`, runId);
   const totals: TaskPatch = {};
@@ -642,8 +671,8 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
         return { status: 'superseded', message: stopped.message };
       case 'preempted':
         await savePartialWork(ctx, wt);
-        await update(ctx, { status: 'queued', pending_rebase: true, attempts: Math.max(0, task.attempts - 1), assignee: null, machine_id: null, lease_until: null, retry_note: 'You were paused because another task was editing the same files. Its work is now merged into your branch.' });
         await event(ctx, 'warn', 'task.preempted', stopped.message);
+        await update(ctx, { status: 'queued', pending_rebase: true, attempts: Math.max(0, task.attempts - 1), assignee: null, machine_id: null, lease_until: null, retry_note: 'You were paused because another task was editing the same files. Its work is now merged into your branch.' });
         return { status: 'queued', message: stopped.message };
       case 'redirected':
         await savePartialWork(ctx, wt);
@@ -668,8 +697,8 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   if ((code !== 0 || resultOk === false) && resumeId && toolCalls === 0) {
     // The session couldn't be continued (expired, cleaned up, or the CLI refused): start fresh, without charging an attempt.
     await finishRun('failed', 'resume_failed');
-    await update(ctx, { status: 'queued', agent_session: null, attempts: Math.max(0, task.attempts - 1), assignee: null, machine_id: null, lease_until: null, not_before: null });
     await event(ctx, 'info', 'task.resume_failed', `Couldn't continue the earlier ${adapter.label} session; starting a fresh one.`);
+    await update(ctx, { status: 'queued', agent_session: null, attempts: Math.max(0, task.attempts - 1), assignee: null, machine_id: null, lease_until: null, not_before: null });
     return { status: 'queued', message: 'resume failed; retrying fresh' };
   }
   if (code !== 0 || resultOk === false) {
@@ -678,8 +707,8 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
     if (kind === 'auth') return finishNeedsHuman(ctx, `${adapter.label} is not signed in on this machine. ${adapter.setupHint ?? ''}`, undefined, totals);
     if (kind === 'rate_limit') {
       const wait = config.retry.backoffSeconds * 1000 * Math.max(1, task.attempts) * 3;
-      await update(ctx, { status: 'queued', attempts: Math.max(0, task.attempts - 1), not_before: Date.now() + wait, assignee: null, machine_id: null, lease_until: null });
       await event(ctx, 'warn', 'task.rate_limited', `${adapter.label} hit a usage limit. Trying again in ${Math.round(wait / 1000)}s.`);
+      await update(ctx, { status: 'queued', attempts: Math.max(0, task.attempts - 1), not_before: Date.now() + wait, assignee: null, machine_id: null, lease_until: null });
       return { status: 'queued', message: 'rate limited' };
     }
     if (code === 127 || /ENOENT|command not found/i.test(failureText)) return finishNeedsHuman(ctx, `${adapter.label} is not installed on this machine. ${adapter.setupHint ?? ''}`, undefined, totals);
@@ -733,7 +762,17 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
     await api['run.update']({ runId, patch: { phase: 'verify' } });
     log.push(`verify ${commands.join(' && ')}`);
     phase('collect');
-    const result = await ctx.verifySlots.use(() => runVerify(wt, commands, config.verifyTimeoutMinutes, ctx.signal, async ({ pid, startedAt }) => { await api['run.update']({ runId, patch: { pid, proc_started: startedAt } }); }), ctx.signal);
+    const result = await ctx.verifySlots.use(() => runVerify(wt, commands, config.verifyTimeoutMinutes, ctx.signal,
+      async ({ pid, startedAt }) => { await api['run.update']({ runId, patch: { phase: 'verify', pid, proc_started: startedAt } }); }, {
+        beforeSpawn: async () => {
+          await api['run.update']({ runId, patch: { phase: 'verify:spawning' } });
+          attemptReaped = false;
+        },
+        onExit: async (reaped) => {
+          attemptReaped = reaped;
+          if (reaped) await api['run.update']({ runId, patch: { phase: 'verify', pid: null, proc_started: null } });
+        },
+      }), ctx.signal);
     phase('verify');
     if (!result.ok) {
       if (!result.reaped) {
@@ -761,35 +800,48 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
     phase('collect');
     await api['run.update']({ runId, patch: { phase: 'review_wait' } });
     let reviewRun: string | null = null;
-    let reviewReaped = false;
+    let reviewReaped = true;
+    let reviewAccounted = true;
     let reviewSequence = 0;
+    let reviewFinalizing = false;
     let releaseReviewer: (() => void) | undefined;
-    const currentCost = (await api['task.get']({ id: task.id })).task.cost_usd;
-    const allowance = task.budget_usd === null ? config.review.budgetUsd : Math.min(config.review.budgetUsd, Math.max(0, task.budget_usd - currentCost));
-    if (allowance <= 0) return finishNeedsHuman(ctx, 'No task allowance remains for the requested review.', runId);
-    const outcome = await runReview({ task, config: { ...config, review: { ...config.review, budgetUsd: allowance } },
+    const reviewConfig = { ...config, review: { ...config.review } };
+    const outcome = await runReview({ task, config: reviewConfig,
       implementer: ctx.agent, installed: ctx.installed ?? [ctx.agent], cwd: wt, base: baseSha!, signal: ctx.signal,
       hooks: {
         beforeLaunch: async ({ reviewer, model }) => {
           releaseReviewer = await ctx.reserveAgent?.(reviewer, ctx.signal);
           if (releaseReviewer) ctx.cleanup?.(releaseReviewer);
-          reviewRun = await api['run.start']({ taskId: task.id, machineId: ctx.machineId, agent: reviewer, model, logPath: '', role: 'review' });
+          reviewRun = await api['run.start']({ taskId: task.id, machineId: ctx.machineId, agent: reviewer, model, logPath: '', role: 'review', implementationExited: runId });
           const captured = reviewRun;
-          ctx.cleanup?.(() => reviewReaped ? api['run.exit']({ runId: captured, taskId: task.id, owner: claimOwner(task), reaped: true }) : undefined);
+          ctx.cleanup?.(() => reviewReaped && reviewAccounted ? api['run.exit']({ runId: captured, taskId: task.id, owner: claimOwner(task), reaped: true }) : undefined);
+          const held = await api['run.update']({ runId: reviewRun, patch: {}, launch: true });
+          if (!held || held.amountUsd === null) throw new Error('Review requires a finite phase allowance.');
+          reviewConfig.review.budgetUsd = held.amountUsd;
           await api['run.update']({ runId: reviewRun, patch: { phase: 'review', verdict_sha: head } });
         },
-        onSpawn: async ({ pid, startedAt }) => { if (reviewRun) await api['run.update']({ runId: reviewRun, patch: { pid, proc_started: startedAt } }); },
-        onUsage: async (usage) => { if (reviewRun) await api['run.usage']({ runId: reviewRun, taskId: task.id, owner: claimOwner(task), sequence: ++reviewSequence, usage }); },
+        beforeSpawn: async () => {
+          if (!reviewRun) throw new Error('No admitted review run.');
+          await api['run.update']({ runId: reviewRun, patch: { phase: 'review:spawning' } });
+          reviewReaped = false;
+          reviewAccounted = false;
+        },
+        onSpawn: async ({ pid, startedAt }) => { if (reviewRun) await api['run.update']({ runId: reviewRun, patch: { phase: 'review', pid, proc_started: startedAt } }); },
+        onUsage: async (usage) => { if (reviewRun && !reviewFinalizing) await api['run.usage']({ runId: reviewRun, taskId: task.id, owner: claimOwner(task), sequence: ++reviewSequence, usage }); },
       },
-    }).finally(() => releaseReviewer?.());
+    }).catch((err: Error) => ({ skipped: err.message, reason: 'failed' as const, reviewer: null, required: config.review.required,
+      costUsd: 0, tokensIn: 0, tokensOut: 0, costEstimated: true, usage: emptyUsage(), model: null, startedAt: Date.now(), endedAt: Date.now(), status: 'not_started' as const, error: err.message, reaped: reviewReaped })).finally(() => releaseReviewer?.());
+    reviewFinalizing = true;
     reviewReaped = outcome.reaped;
     phase('review');
     if (reviewRun) {
       await api['run.usage']({ runId: reviewRun, taskId: task.id, owner: claimOwner(task), sequence: ++reviewSequence, usage: outcome.usage });
+      reviewAccounted = true;
       await api['run.update']({ runId: reviewRun, patch: { status: !outcome.reaped ? 'cleanup_failed' : 'skipped' in outcome ? outcome.status === 'not_started' ? 'skipped' : 'failed' : 'succeeded',
         ended_at: outcome.endedAt, stop_reason: 'skipped' in outcome ? outcome.skipped : null, verdict: 'review' in outcome ? JSON.stringify(outcome.review) : null,
-        phase: null } }).catch((err) => { if (!isStale(err)) throw err; });
+        ...(outcome.reaped ? { phase: null, pid: null, proc_started: null } : {}) } }).catch((err) => { if (!isStale(err)) throw err; });
     }
+    if (reviewRun && outcome.reaped) await api['run.exit']({ runId: reviewRun, taskId: task.id, owner: claimOwner(task), reaped: true });
     if (!outcome.reaped) return finishNeedsHuman(ctx, 'The reviewer process may still be alive; work is held for process recovery.', runId);
     if ((await revParse(wt, 'HEAD')) !== head || !(await isClean(wt))) return finishNeedsHuman(ctx, 'The reviewer changed the accepted artifact. Its verdict cannot approve this work; the changes are preserved.', runId);
     if ('skipped' in outcome) {
@@ -801,11 +853,11 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
       log.push(`review by ${outcome.reviewer}: ${outcome.review.verdict}${issues.length ? ` (${issues.length} issue${issues.length > 1 ? 's' : ''})` : ''}`);
       if (issues.length && task.review_rounds < config.review.maxRounds) {
         await finishRun('succeeded');
+        await event(ctx, 'warn', 'task.review_changes', `${outcome.reviewer} asked for changes to "${task.title}": ${clip(issues.join(' '), 200)}`);
         await update(ctx, {
           status: 'queued', attempts: Math.max(0, task.attempts - 1), review_rounds: task.review_rounds + 1, assignee: null, machine_id: null, lease_until: null, not_before: null,
           retry_note: `A reviewer (${outcome.reviewer}) asked for changes before merging. Address each point, keep the rest of your work:\n${issues.map((i) => `- ${i}`).join('\n')}`,
         });
-        await event(ctx, 'warn', 'task.review_changes', `${outcome.reviewer} asked for changes to "${task.title}": ${clip(issues.join(' '), 200)}`);
         return { status: 'queued', message: 'review requested changes' };
       }
       if (issues.length) {
@@ -854,7 +906,7 @@ async function update(ctx: RunContext, patch: TaskPatch) {
 }
 
 async function event(ctx: RunContext, level: 'info' | 'warn' | 'error' | 'success', kind: string, message: string) {
-  await ctx.api['task.event']({ projectId: ctx.task.project_id, taskId: ctx.task.id, level, kind, message }).catch(() => undefined);
+  await ctx.api['task.event']({ projectId: ctx.task.project_id, taskId: ctx.task.id, level, kind, message, owner: claimOwner(ctx.task) }).catch(() => undefined);
 }
 
 async function finishNeedsHuman(ctx: RunContext, message: string, runId?: string, totals: TaskPatch = {}): Promise<RunOutcome> {
@@ -888,15 +940,15 @@ async function retryOrStop(ctx: RunContext, totals: TaskPatch, message: string, 
     // fresh session (the old one is anchored on its failed approach), then stop.
     const stronger = config.retry.escalate ? escalate(task.tier) : task.tier;
     if (stronger !== task.tier && task.attempts < task.max_attempts) {
-      await update(ctx, { ...base, agent_session: null, status: 'queued', tier: stronger, not_before: null, assignee: null, machine_id: null, retry_note: clip(message, 2500) });
       await event(ctx, 'warn', 'task.retry', `"${task.title}" failed the same way ${same} times; trying once more with a stronger model (${stronger}). ${clip(message, 200)}`);
+      await update(ctx, { ...base, agent_session: null, status: 'queued', tier: stronger, not_before: null, assignee: null, machine_id: null, retry_note: clip(message, 2500) });
       return { status: 'queued', message };
     }
     return finishNeedsHuman(ctx, `It failed the same way ${same} times, so it was stopped to save budget. ${message}`, undefined, base);
   }
   if (task.attempts >= task.max_attempts) {
-    await update(ctx, { ...base, status: 'failed', attention: `Gave up after ${task.attempts} attempts. ${clip(message, 600)}`, finished_at: Date.now() });
     await event(ctx, 'error', 'task.failed', `"${task.title}" failed after ${task.attempts} attempts: ${clip(message, 200)}`);
+    await update(ctx, { ...base, status: 'failed', attention: `Gave up after ${task.attempts} attempts. ${clip(message, 600)}`, finished_at: Date.now() });
     return { status: 'failed', message };
   }
   // A stronger (pricier) model only after a second failure, or when the agent got stuck: a first failure is usually
@@ -906,7 +958,7 @@ async function retryOrStop(ctx: RunContext, totals: TaskPatch, message: string, 
   const wait = opts.backoff === false ? 0 : config.retry.backoffSeconds * 1000 * task.attempts;
   // A stuck agent starts over with a fresh session; anything else continues where it left off.
   const session: TaskPatch = opts.escalateNow ? { agent_session: null } : {};
-  await update(ctx, { ...base, ...session, status: 'queued', tier, not_before: wait ? Date.now() + wait : null, assignee: null, machine_id: null, retry_note: clip(message, 2500) });
   await event(ctx, 'warn', 'task.retry', `"${task.title}" attempt ${task.attempts} didn't work; retrying${tier !== task.tier ? ` with a stronger model (${tier})` : ''}. ${clip(message, 200)}`);
+  await update(ctx, { ...base, ...session, status: 'queued', tier, not_before: wait ? Date.now() + wait : null, assignee: null, machine_id: null, retry_note: clip(message, 2500) });
   return { status: 'queued', message };
 }

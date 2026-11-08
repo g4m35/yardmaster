@@ -1,5 +1,26 @@
 # Performance
 
+# Current local stress check
+
+Run `node scripts/benchmark.ts` from a source checkout on Node 24. It creates and removes a disposable home/repository, seeds 1,000 tasks and 10,000 events, warms each operation five times, and measures 100 samples without provider calls. No personal hub is connected. Admission samples explicitly release their unattached allowance because no child is launched.
+
+On macOS arm64, Node 24.22.2, during concurrent test/agent activity on 2026-11-07:
+
+| Operation | Median | p95 |
+| --- | ---: | ---: |
+| Board API | 153.7 ms | 282.5 ms |
+| Registry API | 0.12 ms | 0.32 ms |
+| Last 100 events | 0.14 ms | 0.41 ms |
+| Queue admission | 26.4 ms | 41.5 ms |
+
+End-of-run RSS was 245 MiB. These are in-process API dispatch measurements, excluding HTTP, browser rendering, provider latency and cold startup. There is no measured baseline comparison or cross-machine performance guarantee. Raw measurement is retained in the hillclimb evidence; rerun on the target machine for a meaningful comparison.
+
+Registry history and passive machine/session inventories are bounded; live runs remain visible. SSE refreshes coalesce and serialize. Cleanup removes up to 1,000 expired project events per pass, using `cleanup.eventRetentionDays` (30 by default, `null` to retain indefinitely). Unfinished and process-held task evidence survives retention and stale cleanup plans. Accepted artifact refs are pruned only after terminal integration, ancestry validation and compare-and-delete; unmerged artifacts remain reachable.
+
+# Historical measurements
+
+These earlier measurements are retained for context and have not been requalified by the current hillclimb. The current stress check above has a different dataset and load; it is not a direct regression comparison.
+
 Goal: Yardmaster should never be the thing an agent waits on, and it should remove waiting agents would
 otherwise do. Measured on an M-series MacBook (2026-11-03). Reproduce with the scripts in `bench/`.
 
@@ -30,15 +51,14 @@ triggers). Measured context at startup:
 | + `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` (drops the Artifact and DesignSync tools) | 29,907 |
 | + only the coding tools (Bash, Read, Edit, Write, NotebookEdit, LSP, WebFetch, WebSearch) | **about 14,000 per turn** |
 
-Each turn re-reads that context (cheaply when cached, but every task writes its own cache, because caches are
-per directory and every task has its own worktree), so it multiplies by the number of turns. Your CLAUDE.md,
+Repeated context may be cheaper when the provider reports cache reuse. Cache identity depends on the provider and launch/session shape; neither a worktree change nor a matching Yardmaster launch fingerprint proves a cache miss or hit. Your CLAUDE.md,
 AGENTS.md, hooks and permission rules still apply in lean runs. `"full"` restores the old behavior;
 `mcpConfig` keeps chosen MCP servers.
 
 Also cheaper by default:
 - **Effort follows the tier**: cheap work runs at low reasoning effort, standard at medium, strong at high (Claude Code `--effort`, Codex `model_reasoning_effort`). Override per agent with `effort`.
 - **Escalation after the second failure**, not the first: the same model usually fixes its first failure once it sees the error, especially with its session resumed. A retry escalated to a stronger model no longer triggers a review by itself.
-- **The CLI enforces the budget too** (`--max-budget-usd` with what's left of the task's budget).
+- **Claude receives its native budget flag** with the reserved allowance; reported usage drives reactive stops. These are not a guaranteed hard cap; see BUDGETS.md.
 - **Reviews are capped**: read-only tools, 15 turns, $1 (`review.maxTurns`, `review.budgetUsd`).
 - **Spend is counted once per message.** Claude Code repeats a message's usage once per content block; counting each copy doubled the mid-run estimate, so budgets tripped at about half the real spend.
 - **The brief says which checks matter**: with `verifyQuick`, agents are told to run the quick checks on their changes rather than the whole suite.
@@ -109,3 +129,5 @@ The hub reacts to every state change immediately (debounced 15 ms) instead of wa
   thousands of tracked files.
 - (Corrected in 0.5: 0.3 measured only the startup time of skipping MCP servers, about 0.2 s, and called it not
   worth it. The token cost, measured since, is the real saving; see the lean launch above.)
+
+The existing `bench/scheduler.bench.ts` was also rerun with `N=1000` on this checkpoint: no-match claim pass 189.0 ms, board read 136.6 ms, and calling blockers individually outside a pass 1605.1 ms. The earlier same-harness historical figures above were lower. Concurrent machine load and different dates limit attribution, but repeated budget reads are a concrete optimization target; no claim of no performance regression is made.

@@ -1,7 +1,8 @@
 import * as z from 'zod/v4';
 import { getAdapter } from './adapters/index.ts';
 import { agentSettings, type Config } from './config.ts';
-import { runOneShot } from './oneshot.ts';
+import { runOneShot, type OneShotHooks, type OneShotResult } from './oneshot.ts';
+import type { Client } from './api.ts';
 import { NewTaskSchema, type NewTask } from './types.ts';
 
 const PlanSchema = z.object({ tasks: z.array(NewTaskSchema).min(1).max(30) });
@@ -45,17 +46,18 @@ export class PlanError extends Error {
  * Uses one read-only agent run to turn a plain-language goal into a task graph. Always stopped after 10 minutes;
  * agents whose CLI supports it (Claude Code) are also held to 40 turns and the given dollar budget.
  */
-export async function planGoal(goal: string, opts: { cwd: string; agent: string; config: Config; budgetUsd?: number | null }): Promise<{ tasks: NewTask[]; costUsd: number; tokensIn: number; tokensOut: number; model: string | null }> {
+export async function planGoal(goal: string, opts: { cwd: string; agent: string; config: Config; budgetUsd?: number | null; hooks?: OneShotHooks; onResult?: (result: OneShotResult) => Promise<void> }): Promise<{ tasks: NewTask[]; costUsd: number; tokensIn: number; tokensOut: number; model: string | null }> {
   if (!getAdapter(opts.agent, opts.config)) throw new Error(`Unknown agent ${opts.agent}`);
   const model = agentSettings(opts.config, opts.agent).models.strong ?? null;
-  const budget = opts.budgetUsd ?? opts.config.budget.perTaskUsd;
+  const budget = opts.budgetUsd === undefined ? opts.config.budget.perTaskUsd : opts.budgetUsd;
   const r = await runOneShot({
     agent: opts.agent, config: opts.config, prompt: planningPrompt(goal), cwd: opts.cwd, model, readOnly: true, tier: 'strong',
-    timeoutMs: 10 * 60_000, maxTurns: 40, budgetUsd: budget ?? undefined, interruptible: true,
+    timeoutMs: 10 * 60_000, maxTurns: 40, budgetUsd: budget ?? undefined, interruptible: true, hooks: opts.hooks,
   });
+  await opts.onResult?.(r);
   const spend = { costUsd: r.costUsd, tokensIn: r.tokensIn, tokensOut: r.tokensOut, model };
   if (r.interrupted) throw new PlanError('Planning was interrupted.', spend);
-  if (!r.ok && !r.text) throw new PlanError(`The planner failed: ${r.error || 'it stopped without output (it may have hit the 10-minute limit)'}`, spend);
+  if (!r.ok) throw new PlanError(`The planner failed: ${r.error || 'it stopped without output (it may have hit the 10-minute limit)'}`, spend);
   // The final message first (structured agents); then everything printed, for plain CLIs that print over many lines.
   let json: unknown;
   try {
@@ -70,4 +72,48 @@ export async function planGoal(goal: string, opts: { cwd: string; agent: string;
   const parsed = PlanSchema.safeParse(json);
   if (!parsed.success) throw new PlanError(`The plan was not in the expected shape: ${z.prettifyError(parsed.error)}`, spend);
   return { tasks: parsed.data.tasks, costUsd: r.costUsd, tokensIn: r.tokensIn, tokensOut: r.tokensOut, model };
+}
+
+/** Product planning lifecycle. The owner API admits before launch and records every outcome, including bad JSON. */
+export async function planGoalManaged(goal: string, opts: { cwd: string; agent: string; config: Config; client: Client; projectId: string; machineId: string }) {
+  const model = agentSettings(opts.config, opts.agent).models.strong ?? null;
+  const admitted = await opts.client['plan.start']({ projectId: opts.projectId, machineId: opts.machineId, agent: opts.agent, model });
+  let sequence = 0;
+  let result: OneShotResult | null = null;
+  let spawned = false;
+  let accounted = true;
+  let finalizing = false;
+  let succeeded = false;
+  let reason = 'Planning failed before launch.';
+  try {
+    const plan = await planGoal(goal, { ...opts, budgetUsd: admitted.budget.amountUsd,
+      hooks: {
+        beforeSpawn: async () => { await opts.client['plan.spawning']({ runId: admitted.runId }); },
+        onSpawn: async ({ pid, startedAt }) => {
+          spawned = true;
+          accounted = false;
+          if (startedAt === null) throw new Error('Planning process identity could not be read.');
+          await opts.client['plan.spawn']({ runId: admitted.runId, pid, startedAt });
+        },
+        onUsage: async (usage) => { if (finalizing) return; await opts.client['plan.usage']({ runId: admitted.runId, sequence: ++sequence, usage }); },
+      },
+      onResult: async (r) => {
+        finalizing = true;
+        result = r;
+        await opts.client['plan.usage']({ runId: admitted.runId, sequence: ++sequence, usage: r.usage });
+        accounted = true;
+        if (!r.reaped) throw new Error('Planning process cleanup was not confirmed; its budget remains held.');
+      },
+    });
+    succeeded = true;
+    reason = '';
+    return plan;
+  } catch (err) {
+    reason = err instanceof Error ? err.message : String(err);
+    throw err;
+  } finally {
+    // An unexpected throw after spawn is not evidence of exit. Fail closed and retain its hold.
+    const completed = result as OneShotResult | null;
+    if (accounted) await opts.client['plan.finish']({ runId: admitted.runId, reaped: completed?.reaped ?? !spawned, succeeded, reason });
+  }
 }

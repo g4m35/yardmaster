@@ -14,6 +14,8 @@ import { addLesson, creditLessons, lessonFromFix, lessonsFor, listLessons, markU
 import { coupling, filesIn } from './imports.ts';
 import { PairingStore } from './pairing.ts';
 import { buildRegistry } from './registry.ts';
+import { tx } from './transaction.ts';
+import { WORKER_FINALIZE_STATUSES } from './worker-policy.ts';
 
 /**
  * The single API surface. The hub serves it over HTTP, the CLI and MCP server call it locally or
@@ -137,12 +139,12 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       usage: z.object({ costUsd: z.number().finite().nonnegative(), tokensIn: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), tokensOut: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
         provenance: z.enum(['actual', 'estimated', 'mixed', 'unknown']), cacheReadTokens: z.number().int().nonnegative(), cacheWriteTokens: z.number().int().nonnegative().nullable() }) }),
       (p) => coord.recordRunUsage(p.runId, p.taskId, p.owner, p.sequence, p.usage)),
-    'run.exit': method(z.object({ runId: RunId, taskId: TaskId, owner: Owner, reaped: z.literal(true) }), (p) => {
-      const run = coord.getRun(p.runId);
-      if (!run || run.task_id !== p.taskId || !p.owner.generation || run.generation !== p.owner.generation || p.owner.assignee !== `machine:${run.machine_id}`) throw new Error('Exit acknowledgment does not belong to this run.');
-      if (['running', 'lost'].includes(run.status)) coord.updateRun(run.id, { status: 'stopped', ended_at: Date.now(), phase: null, pid: null, proc_started: null });
+    'run.exit': method(z.object({ runId: RunId, taskId: TaskId, owner: Owner, reaped: z.literal(true), process: z.object({ pid: z.number().int().positive(), startedAt: z.number().finite().positive() }).optional(), noLaunchPhase: z.string().min(1).optional() }), (p) => {
+      coord.confirmRunExit(p.runId, p.taskId, p.owner, p.process, p.noLaunchPhase);
     }),
     'fleet.identity': method(z.object({}), () => ({ kind: 'owner' } as { kind: 'owner' | 'worker'; machineId?: string; projectId?: string; expiresAt?: number })),
+    'integration.confirmStopped': method(z.object({ projectId: Id, by: z.string().default('you'), note: z.string().min(12).max(4000) }),
+      (p) => coord.confirmIntegrationStopped(p.projectId, p.by, p.note)),
     'registry.list': method(z.object({ projectId: Id.optional(), historyLimit: z.number().int().min(0).max(500).default(100) }), (p) => buildRegistry(coord.db, p)),
     'fleet.invite': method(z.object({ projectId: Id, ttlMs: z.number().int().optional(), credentialTtlMs: z.number().int().optional() }), (p) => pairing.createInvitation(owner, p)),
     'fleet.devices': method(z.object({}), () => ({ credentials: pairing.listCredentials(owner), invitations: pairing.listInvitations(owner) })),
@@ -173,7 +175,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       const t = coord.getTask(p.id);
       return { status: t?.status ?? 'missing', control: t?.control ?? null, assignee: t?.assignee ?? null, attempts: t?.attempts ?? 0, generation: t?.generation ?? 0, head_sha: t?.head_sha ?? null, branch: t?.branch ?? null, lease_until: t?.lease_until ?? null };
     }),
-    'task.control': method(z.object({ id: Id, action: z.enum(['retry', 'cancel', 'stop', 'approve', 'prioritize', 'redirect']), by: z.string().default('you'), note: z.string().max(4000).optional() }), (p) => coord.control(p.id, p.action, p.by, p.note)),
+    'task.control': method(z.object({ id: Id, action: z.enum(['retry', 'cancel', 'stop', 'approve', 'prioritize', 'redirect', 'confirm-stopped']), by: z.string().default('you'), note: z.string().max(4000).optional() }), (p) => coord.control(p.id, p.action, p.by, p.note)),
     'task.logs': method(z.object({ id: Id, lines: z.number().int().min(1).max(2000).default(80) }), (p) => {
       const run = coord.latestRun(p.id);
       if (!run) return '';
@@ -218,13 +220,19 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       };
     }),
     'task.usage': method(z.object({ id: TaskId, costUsd: z.number().min(0), tokensIn: z.number().int().min(0), tokensOut: z.number().int().min(0), owner: Owner.optional(), runId: RunId.optional() }), (p) => {
-      return coord.withRunOwner(p.runId ?? '', p.owner && { ...p.owner, statuses: ['running', 'verifying', 'ready', 'canceled', 'needs_human'] },
-        () => coord.addUsage(p.id, p.costUsd, p.tokensIn, p.tokensOut), p.id);
+      return coord.withRunOwner(p.runId ?? '', p.owner && { ...p.owner, statuses: WORKER_FINALIZE_STATUSES },
+        () => { throw new Error('Unsequenced task usage is no longer accepted. Upgrade the worker to run.usage absolute snapshots.'); }, p.id);
     }),
     'task.touched': method(z.object({ taskId: TaskId, runId: RunId, files: z.array(z.string()).max(2000), owner: Owner.optional() }), (p) => checkLiveOverlap(coord, p.taskId, p.runId, p.files, p.owner)),
     'task.event': method(
-      z.object({ projectId: z.string().nullable(), taskId: z.string().nullable(), level: z.enum(['info', 'warn', 'error', 'success']), kind: z.string(), message: z.string(), data: z.unknown().optional() }),
-      (p) => coord.event(p.projectId, p.taskId, p.level, p.kind, p.message, p.data),
+      z.object({ projectId: z.string().nullable(), taskId: z.string().nullable(), level: z.enum(['info', 'warn', 'error', 'success']), kind: z.string(), message: z.string(), data: z.unknown().optional(), owner: Owner.optional() }),
+      (p) => tx(coord.db, () => {
+        if (p.taskId) {
+          const task = coord.assertTaskOwner(p.taskId, p.owner && { ...p.owner, statuses: WORKER_FINALIZE_STATUSES });
+          if (task.project_id !== p.projectId) throw new Error('Event project does not match its task.');
+        }
+        return coord.event(p.projectId, p.taskId, p.level, p.kind, p.message, p.data);
+      }),
     ),
     'task.wait': method(z.object({ ids: z.array(Id).min(1).max(50), timeoutSec: z.number().min(0).max(600).default(60) }), async (p) => {
       const settled = (t: Task | null) => !t || TERMINAL_STATUSES.includes(t.status) || t.status === 'needs_human' || (t.status === 'ready' && !!t.attention);
@@ -320,6 +328,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
           const config: Config = coord.configFor(claim.project.id);
           return { ...claim, config, startPoint };
         } catch (err) {
+          coord.abandonUnlaunchedClaim(claim.task.id, claim.task.generation, p.machineId);
           // Give the claim back rather than leaving the task "running" with nobody on it.
           try {
             coord.updateTaskIfOwner(claim.task.id, { generation: claim.task.generation, assignee: claim.task.assignee! }, { status: 'queued', assignee: null, machine_id: null, lease_until: null, attempts: Math.max(0, claim.task.attempts - 1) });
@@ -328,12 +337,12 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
         }
       },
     ),
-    'run.start': method(z.object({ taskId: TaskId, machineId: Id, agent: Id, model: z.string().nullish(), logPath: z.string(), role: z.enum(['implement', 'review']).default('implement'), lessons: z.array(z.string()).max(20).default([]), owner: Owner.optional() }), (p) => {
+    'run.start': method(z.object({ taskId: TaskId, machineId: Id, agent: Id, model: z.string().nullish(), logPath: z.string(), role: z.enum(['implement', 'review']).default('implement'), lessons: z.array(z.string()).max(20).default([]), owner: Owner.optional(), implementationExited: RunId.optional() }), (p) => {
       const task = coord.getTask(p.taskId);
       if (!task) throw new Error(`No task ${p.taskId}`);
       coord.assertTaskOwner(p.taskId, p.owner);
       if (p.owner!.assignee !== `machine:${p.machineId}`) throw new Error('Run machine does not match the claim owner.');
-      const run = coord.startRun({ ...task, generation: p.owner!.generation! }, p.machineId, p.agent, p.model ?? null, p.logPath, p.role);
+      const run = coord.startRun({ ...task, generation: p.owner!.generation! }, p.machineId, p.agent, p.model ?? null, p.logPath, p.role, p.implementationExited);
       if (p.lessons.length) {
         coord.updateRun(run.id, { lessons: p.lessons });
         markUsed(coord, p.lessons);
@@ -361,16 +370,53 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       for (const issue of p.reviewIssues) addLesson(coord, task.project_id, `A reviewer flagged, and the fix was accepted: ${issue}`, 'review', task.scope, task.id);
       return null;
     }),
-    'run.update': method(z.object({ runId: RunId, patch: z.record(z.string(), z.unknown()), owner: Owner.optional() }), (p) => {
-      return coord.withRunOwner(p.runId, p.owner && { ...p.owner, statuses: ['running', 'verifying', 'ready', 'canceled', 'needs_human'] },
-        () => coord.updateRun(p.runId, p.patch as never));
+    'run.update': method(z.object({ runId: RunId, patch: z.record(z.string(), z.unknown()), owner: Owner.optional(), launch: z.boolean().optional() }), (p) => {
+      if (p.launch) {
+        if (Object.keys(p.patch).length) throw new Error('Launch authorization cannot update a run.');
+        return coord.launchBudget(p.runId, p.owner);
+      }
+      return coord.withRunOwner(p.runId, p.owner && { ...p.owner, statuses: WORKER_FINALIZE_STATUSES },
+        () => {
+          if (['cost_usd', 'tokens_in', 'tokens_out', 'cost_estimated'].some(k => k in p.patch)) throw new Error('Usage must be recorded through sequenced run.usage.');
+          return coord.updateRun(p.runId, p.patch as never);
+        });
     }),
     'run.log': method(z.object({ runId: RunId, lines: z.array(z.string()).max(500), owner: Owner.optional() }), (p) => {
-      return coord.withRunOwner(p.runId, p.owner && { ...p.owner, statuses: ['running', 'verifying', 'ready', 'canceled', 'needs_human'] }, () => {
+      return coord.withRunOwner(p.runId, p.owner && { ...p.owner, statuses: WORKER_FINALIZE_STATUSES }, () => {
         if (p.lines.length) appendFileSync(activityLogPath(p.runId), p.lines.join('\n') + '\n');
       });
     }),
 
+    // Owner-only: scoped worker RPC authorization denies all plan.* methods.
+    'plan.confirmStopped': method(z.object({ runId: RunId, by: z.string().default('you'), note: z.string().min(12).max(4000) }),
+      (p) => coord.confirmPlanStopped(p.runId, p.by, p.note)),
+    'plan.start': method(z.object({ projectId: Id, machineId: Id, agent: Id, model: z.string().nullable() }),
+      (p) => coord.startPlan(p.projectId, p.machineId, p.agent, p.model)),
+    'plan.spawning': method(z.object({ runId: RunId }), (p) => {
+      const run = coord.getRun(p.runId);
+      if (!run || String(run.role) !== 'plan' || run.status !== 'running') throw new Error('No live planning run.');
+      coord.updateRun(run.id, { phase: 'plan:spawning' });
+    }),
+    'plan.spawn': method(z.object({ runId: RunId, pid: z.number().int().positive(), startedAt: z.number().finite().positive() }), (p) => {
+      const run = coord.getRun(p.runId);
+      if (!run || String(run.role) !== 'plan' || run.status !== 'running') throw new Error('No live planning run.');
+      coord.updateRun(run.id, { phase: 'plan', pid: p.pid, proc_started: p.startedAt });
+    }),
+    'plan.usage': method(z.object({ runId: RunId, sequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      usage: z.object({ costUsd: z.number().finite().nonnegative(), tokensIn: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), tokensOut: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+        provenance: z.enum(['actual', 'estimated', 'mixed', 'unknown']), cacheReadTokens: z.number().int().nonnegative(), cacheWriteTokens: z.number().int().nonnegative().nullable() }) }), (p) => {
+      const run = coord.getRun(p.runId);
+      if (!run || String(run.role) !== 'plan') throw new Error('No planning run.');
+      coord.recordRunUsage(run.id, run.task_id, { generation: run.generation, assignee: `machine:${run.machine_id}` }, p.sequence, p.usage);
+    }),
+    'plan.finish': method(z.object({ runId: RunId, reaped: z.boolean(), succeeded: z.boolean(), reason: z.string().optional() }), (p) => tx(coord.db, () => {
+      const run = coord.getRun(p.runId);
+      if (!run || String(run.role) !== 'plan') throw new Error('No planning run.');
+      if (run.status === 'cleanup_failed') throw new Error('Planning cleanup requires process recovery.');
+      coord.updateRun(run.id, { status: p.reaped ? p.succeeded ? 'succeeded' : 'failed' : 'cleanup_failed', ended_at: Date.now(), stop_reason: p.reason ?? null,
+        ...(p.reaped ? { pid: null, proc_started: null, phase: null } : {}) });
+      if (p.reaped) coord.confirmRunExit(run.id, run.task_id, { generation: run.generation, assignee: `machine:${run.machine_id}` });
+    })),
     'budget.today': method(z.object({}), () => coord.spentToday()),
     'spend.record': method(z.object({ projectId: z.string().nullable(), agent: Id, model: z.string().nullable(), costUsd: z.number().min(0), tokensIn: z.number().int().min(0), tokensOut: z.number().int().min(0), role: z.enum(['plan']) }), (p) =>
       coord.recordSpend({ ...p, machineId: hooks.machineId }),

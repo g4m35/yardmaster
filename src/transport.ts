@@ -34,9 +34,10 @@ export function httpTransport(baseUrl: string, token: string, machineId: string)
       }
       if (!(await revParse(repoPath, sha))) throw new Error(`Commit ${sha.slice(0, 10)} from the hub is still missing after fetching.`);
     },
-    async uploadBranch(task, repoPath, branch, base) {
+    async uploadBranch(task, repoPath, branch, base, signal) {
       if (!Number.isSafeInteger(task.generation) || task.generation < 1) throw new Error('Upload requires a valid claim generation. Upgrade the worker and reclaim the task.');
       if (task.assignee !== `machine:${machineId}` || task.status !== 'ready' || !task.head_sha) throw new Error('Upload requires the current ready claim and its accepted commit.');
+      signal?.throwIfAborted();
       const file = join(paths.tmp(), `${shortId('u')}.bundle`);
       try {
         const withBase = await git(repoPath, ['bundle', 'create', file, `refs/heads/${branch}`, `^${base}`], { allowFail: true });
@@ -50,7 +51,7 @@ export function httpTransport(baseUrl: string, token: string, machineId: string)
           headers: { ...auth, 'content-type': 'application/octet-stream', 'content-length': String(statSync(file).size) },
           body: Readable.toWeb(createReadStream(file)) as unknown as BodyInit,
           duplex: 'half',
-          signal: AbortSignal.timeout(BUNDLE_TIMEOUT_MS),
+          signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(BUNDLE_TIMEOUT_MS)]) : AbortSignal.timeout(BUNDLE_TIMEOUT_MS),
         } as RequestInit & { duplex: 'half' });
         const body = (await res.json()) as { ok: boolean; error?: string; result?: { head?: string } };
         if (!res.ok || !body.ok) throw new Error(body.error ?? `upload failed (${res.status})`);

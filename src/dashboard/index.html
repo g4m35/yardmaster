@@ -630,6 +630,9 @@
       ['Task', unknown(e.taskId)], ['Run', unknown(e.runId)], ['Session', unknown(e.sessionId)],
       ['Generation', unknown(e.generation)], ['Freshness', unknown(e.freshness) + ' · ' + age(e.lastSeenAt)],
       ['Last activity', unknown(e.lastActivity)],
+      ['Effort source', unknown(e.effortSource)],
+      ['Launch identity', unknown(e.launchFingerprint)],
+      ['Usage', e.usage ? (e.usage.provenance === 'unknown' ? 'Unknown' : usd(e.usage.costUsd) + ' · ' + e.usage.provenance + ' · ' + e.usage.tokensIn + ' in / ' + e.usage.tokensOut + ' out') : 'Unknown'],
       ['Cache read / write', unknown(e.cache?.readTokens) + ' / ' + unknown(e.cache?.writeTokens) + ' tokens'],
     ];
   }
@@ -802,7 +805,7 @@
       d.waiting ? ['Waiting on', d.waiting] : null,
       ['Agent', run ? `${run.agent}${run.model ? ' · ' + run.model : ''}` : t.agent || 'picked automatically'],
       ['Attempt', `${t.attempts} of ${t.max_attempts}`],
-      ['Cost', usd(t.cost_usd + (run && run.status === 'running' ? run.cost_usd : 0)) + (run && run.cost_estimated ? ' (estimated)' : '')],
+      ['Cost', usd(t.cost_usd) + (run && run.usage_provenance === 'unknown' ? ' (usage unknown)' : run && run.cost_estimated ? ' (estimated)' : '')],
       t.scope.length ? ['Files', t.scope.join(', ') + (t.scope_inferred ? ' (guessed from the request)' : '')] : null,
       d.deps.length ? ['After', d.deps.map((x) => `${x.title} (${LABEL[x.status]})`).join(', ')] : null,
       t.branch ? ['Branch', t.branch] : null,
@@ -868,6 +871,21 @@
   $('d-close').addEventListener('click', closeDrawer);
   $('refresh-btn').addEventListener('click', () => refresh());
   $('registry-view').addEventListener('change', renderRegistry);
+
+  // Keep keyboard focus on visible controls even when a browser's native dialog
+  // traversal briefly sends the last Tab to the document body.
+  for (const dialog of [$('drawer'), $('add-dialog')]) dialog.addEventListener('keydown', event => {
+    if (event.key !== 'Tab') return;
+    const controls = [...dialog.querySelectorAll('button, input, select, textarea, a[href], [tabindex]')]
+      .filter(node => !node.disabled && node.tabIndex >= 0 && node.getClientRects().length);
+    if (!controls.length) { event.preventDefault(); dialog.focus(); return; }
+    const first = controls[0], last = controls[controls.length - 1];
+    if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) {
+      event.preventDefault(); last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault(); first.focus();
+    }
+  });
 
   // ---------- add work ----------
   const dlg = $('add-dialog');

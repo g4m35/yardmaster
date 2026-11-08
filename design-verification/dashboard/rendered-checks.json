@@ -1,0 +1,40 @@
+{
+  "checks": [
+    "four truthful registry states render",
+    "desktop has no horizontal overflow",
+    "Enter opens native agent dialog",
+    "modal contains Tab focus 0",
+    "modal contains Tab focus 1",
+    "modal contains Tab focus 2",
+    "modal contains Tab focus 3",
+    "modal contains Tab focus 4",
+    "modal contains Tab focus 5",
+    "modal contains Tab focus 6",
+    "modal contains Tab focus 7",
+    "modal contains Tab focus 8",
+    "modal contains Tab focus 9",
+    "modal contains Tab focus 10",
+    "modal contains Tab focus 11",
+    "Escape restores exact Inspect focus",
+    "observed session preserves unknown signals and no stop",
+    "guidance draft caret and focus survive SSE burst",
+    "390px has no horizontal overflow",
+    "reduced motion disables lamp animation",
+    "stop acknowledgment says request",
+    "registry failure retains prior snapshot with stale notice",
+    "no uncaught exceptions or console.error"
+  ],
+  "geometry": {
+    "desktop": {
+      "width": 1440,
+      "scrollWidth": 1425,
+      "height": 1641
+    },
+    "mobile": {
+      "width": 390,
+      "scrollWidth": 375,
+      "height": 2823
+    }
+  },
+  "errors": []
+}

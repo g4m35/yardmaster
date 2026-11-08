@@ -1,0 +1,255 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { request } from 'node:http';
+import { mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { Hub } from '../src/hub.ts';
+import { openDb } from '../src/db.ts';
+import { fleetClient, connectWorker } from '../src/fleet-client.ts';
+import { loadConfig, resolveConfig } from '../src/config.ts';
+import { Semaphore } from '../src/runner.ts';
+import { httpTransport } from '../src/transport.ts';
+import { WorkerLoop, type BranchTransport } from '../src/worker.ts';
+import { WorkerJournal } from '../src/worker-journal.ts';
+import type { Task } from '../src/types.ts';
+import { sandbox, sh, settleTasks, until } from './helpers.ts';
+
+/** Real HTTP, auth, scheduler, verification, journals and Git; only model inference is mocked. */
+async function fleet() {
+  const box = sandbox({ maxParallel: 1, review: { mode: 'never' }, worktree: { warmStart: 'off' },
+    disk: { minFreeGb: 0, maxWorktreesGb: null }, cleanup: { auto: false, deleteMergedBranches: false } });
+  const hub = new Hub({ db: openDb(join(box.home, 'fleet-e2e.db')), token: 'fixture-owner-only', machineId: 'm-hub',
+    host: '127.0.0.1', port: 0, includeMock: false, tickMs: 150, quiet: true });
+  const workers: WorkerLoop[] = [];
+  const timers: NodeJS.Timeout[] = [];
+  try {
+    const url = await hub.start();
+    const project = await hub.coord.registerProject(box.repo);
+    const owner = fleetClient(url, hub.token);
+    const machines = [];
+    for (const suffix of ['a', 'b']) {
+      const machineId = `m-fleet-${suffix}`;
+      const repo = join(box.root, `machine-${suffix}-clone`);
+      sh(box.root, 'git', ['clone', '--no-local', '-q', box.repo, repo]);
+      sh(repo, 'git', ['config', 'user.name', machineId]);
+      sh(repo, 'git', ['config', 'user.email', `${machineId}@example.test`]);
+      // Invitation creation and unauthenticated redemption both cross the real Hub HTTP boundary.
+      const invite = await owner['fleet.invite']({ projectId: project.id });
+      const response = await fetch(`${url}/api/pair`, { method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ code: invite.code, machineId }), signal: AbortSignal.timeout(5000) });
+      assert.equal(response.status, 200);
+      const paired = (await response.json()).result as { token: string; identity: { credentialId: string; machineId: string; projectId: string } };
+      assert.match(paired.token, /^ymw_/);
+      assert.equal(paired.identity.machineId, machineId);
+      assert.equal(paired.identity.projectId, project.id);
+      const channel = await connectWorker({ hub: url, machineId, projectIds: [project.id], token: paired.token });
+      assert.equal(channel.identity.kind, 'worker');
+      const local = resolveConfig([loadConfig(), { worktreeRoot: join(box.root, `machine-${suffix}-worktrees`) }]);
+      const transport = httpTransport(url, paired.token, machineId);
+      const createWorker = (transfer: BranchTransport = transport, maxParallel = 1) => {
+        const worker = new WorkerLoop({ client: channel.client, machineId, name: `machine ${suffix}`, repos: () => ({ [project.id]: repo }),
+          agents: () => ['mock'], localConfig: () => resolveConfig([local, { maxParallel }]), verifySlots: new Semaphore(1), transport: transfer });
+        workers.push(worker);
+        return worker;
+      };
+      machines.push({ machineId, repo, token: paired.token, credentialId: paired.identity.credentialId, client: channel.client, transport, createWorker });
+    }
+    const pump = (worker: WorkerLoop) => {
+      let pending = false;
+      const timer = setInterval(() => {
+        if (pending) return;
+        pending = true;
+        void worker.heartbeat().then(() => worker.tick()).finally(() => { pending = false; }).catch(() => undefined);
+      }, 100);
+      timers.push(timer);
+    };
+    return { ...box, hub, url, project, owner, machines, pump,
+      async close() {
+        for (const timer of timers) clearInterval(timer);
+        for (const worker of workers) worker.stopAll('shutdown', 'fleet fixture finished');
+        await Promise.all(workers.map(worker => worker.drain()));
+        await hub.stop();
+        hub.coord.db.close();
+        rmSync(box.root, { recursive: true, force: true });
+      } };
+  } catch (err) {
+    await hub.stop(); hub.coord.db.close(); rmSync(box.root, { recursive: true, force: true }); throw err;
+  }
+}
+
+function latch() {
+  let release!: () => void;
+  const promise = new Promise<void>(resolve => { release = resolve; });
+  return { promise, release };
+}
+
+test('paired machines verify and integrate disjoint work, then fetch a dependency from the hub', { timeout: 60_000 }, async () => {
+  const f = await fleet();
+  const release = latch();
+  const uploads = new Map<string, Task>();
+  try {
+    const [a, b] = f.machines;
+    assert.ok(a && b);
+    const gated = (machine: typeof a): BranchTransport => ({
+      fetchBase: (...args) => machine.transport.fetchBase(...args),
+      async uploadBranch(task, ...args) {
+        uploads.set(task.id, task);
+        await release.promise;
+        return machine.transport.uploadBranch(task, ...args);
+      },
+    });
+    const wa = a.createWorker(gated(a));
+    const wb = b.createWorker(gated(b));
+    const { created } = f.hub.coord.addTasks(f.project.id, [
+      { key: 'foundation', title: 'Add the first machine module', prompt: '@mock write left/one.js export const one = 1', files: ['left/one.js'], agent: 'mock' },
+      { title: 'Add the second machine module', prompt: '@mock write right/two.js export const two = 2', files: ['right/two.js'], agent: 'mock' },
+      { title: 'Use the integrated dependency', prompt: '@mock write left/three.js export const three = 3', files: ['left/three.js'], after: ['foundation'], agent: 'mock',
+        verify: ["node -e \"require('node:assert/strict').match(require('node:fs').readFileSync('left/one.js','utf8'), /one = 1/)\""] },
+    ], 'fleet e2e');
+    await wa.tick();
+    await wb.tick();
+    await until(() => uploads.size, count => count === 2, 20_000, 'both independent machines reaching verified upload');
+    assert.deepEqual(created.slice(0, 2).map(task => f.hub.coord.getTask(task.id)!.status), ['ready', 'ready']);
+    assert.deepEqual(new Set(created.slice(0, 2).map(task => f.hub.coord.latestRun(task.id)!.machine_id)), new Set([a.machineId, b.machineId]));
+    assert.equal(f.hub.coord.getTask(created[2]!.id)!.status, 'queued', 'dependent work waits for integration');
+    for (const task of uploads.values()) {
+      const machine: { repo: string; machineId: string } = task.machine_id === a.machineId ? a : b;
+      assert.equal(sh(machine.repo, 'git', ['rev-parse', `refs/heads/${task.branch}`]), task.head_sha);
+      assert.equal(new WorkerJournal(machine.machineId).artifacts[task.id]!.head, task.head_sha);
+      assert.ok(f.hub.coord.eventsSince(0, null, 100, task.id).some(event => event.kind === 'task.ready'));
+    }
+    release.release();
+    f.pump(wa); f.pump(wb);
+    const done = await settleTasks(f.hub.coord, created.map(task => task.id), f.root, 30_000);
+    assert.deepEqual(done.map(task => task.status), ['done', 'done', 'done']);
+    for (const [file, content] of [['left/one.js', 'one = 1'], ['right/two.js', 'two = 2'], ['left/three.js', 'three = 3']]) {
+      assert.ok(sh(f.repo, 'git', ['show', `yardmaster/integration:${file}`]).includes(content!));
+    }
+    const dependent = f.hub.coord.getTask(created[2]!.id)!;
+    const dependencyMachine = dependent.machine_id === a.machineId ? a : b;
+    assert.match(sh(dependencyMachine.repo, 'git', ['for-each-ref', '--format=%(refname)', 'refs/yardmaster/hub/']), /refs\/yardmaster\/hub\/yardmaster\/integration/);
+    assert.equal(sh(dependencyMachine.repo, 'git', ['show', `${dependent.base_sha}:left/one.js`]), 'export const one = 1');
+    for (const machine of [a, b]) assert.equal(sh(machine.repo, 'git', ['branch', '--show-current']), 'main');
+    for (const task of uploads.values()) {
+      assert.equal(sh(f.repo, 'git', ['rev-parse', `refs/yardmaster/accepted/${task.id}/${task.generation}`]), task.head_sha);
+      sh(f.repo, 'git', ['merge-base', '--is-ancestor', task.head_sha!, 'yardmaster/integration']);
+    }
+
+    // A second registered project is real, but its reads and bundles remain private.
+    const otherRepo = join(f.root, 'other-project');
+    mkdirSync(otherRepo);
+    sh(otherRepo, 'git', ['init', '-q', '-b', 'main']);
+    sh(otherRepo, 'git', ['commit', '--allow-empty', '-qm', 'private project root']);
+    const other = await f.hub.coord.registerProject(otherRepo);
+    assert.notEqual(other.id, f.project.id);
+    const privateTask = f.hub.coord.addTasks(other.id, [{ title: 'Private project data', agent: 'mock' }], 'fixture').created[0]!;
+    await assert.rejects(a.client['task.list']({ projectId: other.id }), /denied/i);
+    await assert.rejects(a.client['task.get']({ id: privateTask.id }), /denied/i);
+    const cross = await fetch(`${f.url}/api/projects/${other.id}/base-bundle`, { headers: { authorization: `Bearer ${a.token}` } });
+    assert.equal((await cross.json()).ok, false);
+    assert.notEqual(cross.status, 200);
+    assert.equal(await f.owner['fleet.revoke']({ id: a.credentialId }), true);
+    await assert.rejects(a.client['task.peek']({ id: created[0]!.id }), /revoked/i);
+    await assert.rejects(connectWorker({ hub: f.url, machineId: a.machineId, projectIds: [f.project.id], token: a.token }), /revoked/i);
+    await assert.rejects(a.transport.fetchBase(f.project, a.repo, dependent.base_sha!), /refused/);
+  } finally { release.release(); await f.close(); }
+});
+
+test('a canceled HTTP bundle aborts while its sibling renews; a replacement generation refuses that old bundle', { timeout: 45_000 }, async () => {
+  const f = await fleet();
+  let aborted = false;
+  let uploading: Task | null = null;
+  let oldBundle: Buffer | undefined;
+  let uploadStarted = false;
+  let canceledTaskId = '';
+  try {
+    const a = f.machines[0]!;
+    const slow: BranchTransport = {
+      fetchBase: (...args) => a.transport.fetchBase(...args),
+      async uploadBranch(task, repo, branch, base, signal) {
+        if (task.id !== canceledTaskId) return a.transport.uploadBranch(task, repo, branch, base, signal);
+        uploading = task;
+        const bundle = join(f.root, 'in-flight.bundle');
+        sh(repo, 'git', ['bundle', 'create', bundle, `refs/heads/${branch}`, `^${base}`]);
+        oldBundle = readFileSync(bundle);
+        const query = new URLSearchParams({ branch, machine: a.machineId, head: task.head_sha!, generation: String(task.generation) });
+        await new Promise<never>((_resolve, reject) => {
+          const req = request(`${f.url}/api/tasks/${task.id}/bundle?${query}`, { method: 'POST',
+            headers: { authorization: `Bearer ${a.token}`, 'content-type': 'application/octet-stream', 'content-length': oldBundle!.length } }, response => {
+            response.resume(); reject(new Error(`Partial bundle unexpectedly answered ${response.statusCode}`));
+          });
+          const abort = () => { aborted = true; req.destroy(new Error('canceled upload')); };
+          signal!.addEventListener('abort', abort, { once: true });
+          req.once('error', reject);
+          req.once('close', () => signal!.removeEventListener('abort', abort));
+          // Begin a real Hub upload but deliberately withhold the final bytes.
+          req.write(oldBundle!.subarray(0, Math.max(1, Math.floor(oldBundle!.length / 2))), () => { uploadStarted = true; });
+        });
+        throw new Error('Unreachable');
+      },
+    };
+    const wa = a.createWorker(slow, 2);
+    const tasks = f.hub.coord.addTasks(f.project.id, [
+      { title: 'Cancel this in-flight artifact', prompt: '@mock write cancel/a.txt accepted', files: ['cancel/a.txt'], agent: 'mock' },
+      { title: 'Keep sibling progress', prompt: '@mock sleep 1200\n@mock write sibling/b.txt accepted', files: ['sibling/b.txt'], agent: 'mock' },
+    ], 'fleet cancel e2e').created;
+    canceledTaskId = tasks[0]!.id;
+    await wa.tick();
+    await until(() => uploadStarted, Boolean, 20_000, 'partial bundle reaching real Hub');
+    const sibling = f.hub.coord.getTask(tasks[1]!.id)!;
+    assert.equal(sibling.machine_id, a.machineId);
+    // Expiring the lease makes renewal observable without a clock-dependent sleep.
+    f.hub.coord.db.prepare('UPDATE tasks SET lease_until = ? WHERE id = ?').run(Date.now() + 1000, sibling.id);
+    await f.owner['task.control']({ id: tasks[0]!.id, action: 'cancel', by: 'fleet test' });
+    await wa.heartbeat();
+    await until(() => aborted && !wa.active.has(tasks[0]!.id), Boolean, 5000, 'cancel aborting the upload');
+    assert.ok(f.hub.coord.getTask(sibling.id)!.lease_until! > Date.now() + 1000);
+    assert.equal(f.hub.coord.getTask(tasks[0]!.id)!.status, 'canceled');
+    f.pump(wa);
+    assert.equal((await settleTasks(f.hub.coord, [sibling.id], f.root, 20_000))[0]!.status, 'done');
+    assert.equal(sh(f.repo, 'git', ['show', 'yardmaster/integration:sibling/b.txt']), 'accepted');
+    wa.stopAll('shutdown', 'replace canceled worker');
+    await f.owner['task.control']({ id: tasks[0]!.id, action: 'retry', by: 'fleet test' });
+    const replacement = await a.client['worker.claim']({ machineId: a.machineId, agents: ['mock'], repos: { [f.project.id]: a.repo } });
+    assert.ok(replacement);
+    const stale = uploading as unknown as Task;
+    assert.ok(replacement.task.generation > stale.generation);
+    const query = new URLSearchParams({ branch: stale.branch!, machine: a.machineId, head: stale.head_sha!, generation: String(stale.generation) });
+    const response = await fetch(`${f.url}/api/tasks/${stale.id}/bundle?${query}`, { method: 'POST', headers: {
+      authorization: `Bearer ${a.token}`, 'content-type': 'application/octet-stream' }, body: new Uint8Array(oldBundle!) });
+    assert.equal(response.status, 409);
+    assert.equal((await response.json()).ok, false);
+    assert.equal(f.hub.coord.getTask(stale.id)!.generation, replacement.task.generation);
+    assert.equal(f.hub.coord.getMeta(`bundle:${stale.id}:${stale.generation}`), null);
+    assert.equal(sh(f.repo, 'git', ['for-each-ref', '--format=%(refname)', `refs/yardmaster/accepted/${stale.id}/`]), '');
+    await f.owner['task.control']({ id: stale.id, action: 'cancel', by: 'fixture cleanup' });
+  } finally { await f.close(); }
+});
+
+test('a paired worker reconnects and reuploads its durable verified branch without running the model again', { timeout: 40_000 }, async () => {
+  const f = await fleet();
+  try {
+    const a = f.machines[0]!;
+    let failures = 0;
+    const worker = a.createWorker({ fetchBase: (...args) => a.transport.fetchBase(...args), async uploadBranch() { failures++; throw new Error('fixture connection lost before upload'); } });
+    const task = f.hub.coord.addTasks(f.project.id, [{ title: 'Recover accepted work', prompt: '@mock write recovered.txt durable', files: ['recovered.txt'], agent: 'mock' }], 'fleet reconnect e2e').created[0]!;
+    await worker.tick();
+    await until(() => worker.active.size === 0 && failures > 0, Boolean, 20_000, 'durable failed upload');
+    worker.stopAll('shutdown', 'simulate worker restart');
+    const before = f.hub.coord.runsFor(task.id).map(run => run.id);
+    assert.equal(before.length, 1);
+    const journal = new WorkerJournal(a.machineId);
+    const artifact = journal.artifacts[task.id]!;
+    assert.equal(artifact.uploaded, false);
+    assert.ok(artifact.failures >= 1);
+    assert.equal(sh(a.repo, 'git', ['rev-parse', artifact.branch]), artifact.head);
+    artifact.retryAt = 0; journal.save();
+    await connectWorker({ hub: f.url, machineId: a.machineId, projectIds: [f.project.id], token: a.token });
+    const restarted = a.createWorker();
+    await restarted.recoverLocal();
+    assert.equal(new WorkerJournal(a.machineId).artifacts[task.id]!.uploaded, true);
+    assert.equal((await settleTasks(f.hub.coord, [task.id], f.root, 15_000))[0]!.status, 'done');
+    assert.deepEqual(f.hub.coord.runsFor(task.id).map(run => run.id), before);
+    assert.equal(sh(f.repo, 'git', ['show', 'yardmaster/integration:recovered.txt']), 'durable');
+  } finally { await f.close(); }
+});

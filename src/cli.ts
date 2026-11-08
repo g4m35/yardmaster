@@ -71,7 +71,7 @@ function parseArgs(argv: string[]): Args {
 }
 
 const SHORT: Record<string, string> = { f: 'follow', n: 'lines', y: 'yes', j: 'json', h: 'help' };
-const BOOLEAN_FLAGS = new Set(['scan', 'dedupe', 'restore', 'purge', 'with-hooks', 'no-hooks', 'experimental', 'no-skill', 'now', 'version', 'follow', 'yes', 'json', 'help', 'all', 'dry-run', 'foreground', 'force', 'no-changes-ok', 'watch', 'with-hook', 'no-hub', 'open', 'draft', 'quiet', 'hooks-path']);
+const BOOLEAN_FLAGS = new Set(['confirm-stopped', 'scan', 'dedupe', 'restore', 'purge', 'with-hooks', 'no-hooks', 'experimental', 'no-skill', 'now', 'version', 'follow', 'yes', 'json', 'help', 'all', 'dry-run', 'foreground', 'force', 'no-changes-ok', 'watch', 'with-hook', 'no-hub', 'open', 'draft', 'quiet', 'hooks-path']);
 
 const flag = (a: Args, k: string) => (typeof a.flags[k] === 'string' ? (a.flags[k] as string) : undefined);
 const list = (a: Args, k: string) => flag(a, k)?.split(',').map((s) => s.trim()).filter(Boolean);
@@ -171,6 +171,7 @@ ${bold('Get started')}
 ${bold('Manage work')}
   ym show <id>   ym logs <id> [-f]   ym retry|cancel|stop|approve <id>
   ym tell <id> "do X instead"  redirect a running agent (it keeps its work so far)
+  ym recover --confirm-stopped <id> --note "exit verified"  attest a PID-less spawn hold stopped
   ym pause [--now] [--all]     stop new work from starting (--now also parks running agents)
   ym resume                    start queued work again
   ym disk                      what uses disk space and what can be freed (--scan: duplicate dependencies anywhere)
@@ -259,28 +260,13 @@ async function cmdPlan(a: Args) {
   const config = loadConfig(root);
   const agent = flag(a, 'agent') ?? detectAgents(config)[0] ?? die('No coding agent installed to plan with.');
   const client = await getClient(a);
-  const daily = config.budget.dailyUsd;
-  const spent = await client['budget.today']({});
-  if (daily !== null && spent >= daily) die(`Today's budget is used up (${formatUsd(spent)} of ${formatUsd(daily)}). Raise budget.dailyUsd or plan tomorrow.`);
-  const budgetUsd = Math.min(config.budget.perTaskUsd ?? Infinity, daily !== null ? daily - spent : Infinity);
-  console.log(dim(`Asking ${getAdapter(agent, config)?.label ?? agent} to plan (read-only${Number.isFinite(budgetUsd) ? `, budget ${formatUsd(budgetUsd)}` : ''})...`));
-  // Counted against today's budget whether or not planning succeeds. A failure to record it never costs the plan.
-  const record = async (s: { costUsd: number; tokensIn: number; tokensOut: number; model: string | null }) => {
-    if (!s.costUsd && !s.tokensIn) return;
-    const projectId = await projectIdFor(root).catch(() => null);
-    await client['spend.record']({ projectId, agent, role: 'plan', ...s }).catch((err: Error) => console.error(yellow(`! Couldn't record the planning spend (${formatUsd(s.costUsd)}): ${err.message}`)));
-  };
-  let plan: Awaited<ReturnType<typeof planGoal>>;
-  try {
-    plan = await planGoal(goal, { cwd: root, agent, config, budgetUsd: Number.isFinite(budgetUsd) ? budgetUsd : null });
-  } catch (err) {
-    if (err instanceof PlanError) await record(err.spend);
-    throw err;
-  }
+  const project = await currentProject(client, root);
+  console.log(dim(`Asking ${getAdapter(agent, config)?.label ?? agent} to plan (read-only; admission and reactive budget limits apply)...`));
+  const { planGoalManaged } = await import('./planner.ts');
+  const plan = await planGoalManaged(goal, { cwd: root, agent, config, client, projectId: project.id, machineId: machineId() });
   const { tasks, costUsd } = plan;
   console.log(bold(`\nPlan (${tasks.length} tasks, planning cost ${formatUsd(costUsd)}):`));
   for (const t of tasks) console.log(`  ${cyan(t.key ?? '-')} ${t.title} ${dim(`[${t.tier ?? 'auto'}${t.files?.length ? `; ${t.files.join(', ')}` : ''}${t.after?.length ? `; after ${t.after.join(', ')}` : ''}]`)}`);
-  await record(plan);
   let go = Boolean(a.flags.yes);
   if (!go && process.stdin.isTTY) {
     const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -378,6 +364,18 @@ async function cmdLogs(a: Args) {
   };
   await show();
   if (a.flags.follow) setInterval(() => void show(), 1000);
+}
+
+async function cmdRecover(a: Args) {
+  if (a.flags['confirm-stopped'] !== true) die('Use ym recover --confirm-stopped <task> --note "how you verified process exit".');
+  const id = a._[1] ?? die('Pass the task with a PID-less spawning-window hold.');
+  const note = flag(a, 'note');
+  if (!note || note.trim().length < 12) die('Pass --note with how you confirmed every process has stopped (at least 12 characters).');
+  const client = await getClient(a);
+  if (id.startsWith('r-')) await client['plan.confirmStopped']({ runId: id, by: 'you', note });
+  else if (id.startsWith('p-')) await client['integration.confirmStopped']({ projectId: id, by: 'you', note });
+  else await client['task.control']({ id, action: 'confirm-stopped', by: 'you', note });
+  console.log(green(`✔ ${id}: owner exit attestation recorded. Work is preserved.${id.startsWith('t-') ? ` Retry with ym retry ${id}.` : ''}`));
 }
 
 async function cmdControl(a: Args, action: 'retry' | 'cancel' | 'stop' | 'approve') {
@@ -999,6 +997,7 @@ async function main() {
     case 'pair': return cmdPair(a);
     case 'add': return cmdAdd(a);
     case 'plan': return cmdPlan(a);
+    case 'recover': return cmdRecover(a);
     case 'status': case 'ls': return cmdStatus(a);
     case 'show': return cmdShow(a);
     case 'logs': return cmdLogs(a);

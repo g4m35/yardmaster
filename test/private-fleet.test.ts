@@ -145,7 +145,6 @@ test('worker claims and heartbeats bind the paired machine and only its scoped p
     authorizeWorkerRpc(f.coord, f.identity, 'machine.heartbeat', heartbeat);
     for (const bad of [{ ...heartbeat, id: 'm-two' }, { ...heartbeat, running: [{ taskId: f.task.id }] },
       { ...heartbeat, running: [{ taskId: f.other.id, generation: 1 }] },
-      { ...heartbeat, running: [{ taskId: f.task.id, generation: 2 }] },
       { ...heartbeat, info: { repos: { 'p-two': '/private' } } },
       { ...heartbeat, info: { repos: {}, is_hub: true } }]) {
       assert.throws(() => authorizeWorkerRpc(f.coord, f.identity, 'machine.heartbeat', bad));
@@ -204,7 +203,28 @@ test('lifecycle writes require a current generation, assignee, task and run on t
     assert.throws(() => authorizeWorkerRpc(f.coord, f.identity, 'task.update', good));
     fakedGeneration(f.db, f.task.id, 1);
     f.coord.updateTask(f.task.id, { status: 'canceled' });
-    assert.throws(() => authorizeWorkerRpc(f.coord, f.identity, 'run.update', { runId: f.run.id, owner: f.claim, patch: { status: 'succeeded' } }));
+    authorizeWorkerRpc(f.coord, f.identity, 'run.update', { runId: f.run.id, owner: f.claim, patch: { status: 'stopped' } });
+  } finally { f.db.close(); }
+});
+
+test('stale paired heartbeat entries do not prevent healthy claim renewal', async () => {
+  const f = fixture();
+  try {
+    f.coord.updateTask(f.sibling.id, { status: 'running', machine_id: 'm-one', assignee: 'machine:m-one', lease_until: Date.now() + 1000 });
+    fakedGeneration(f.db, f.sibling.id, 1);
+    f.coord.control(f.task.id, 'cancel', 'test');
+    const request = { id: 'm-one', name: 'worker', info: { repos: { 'p-one': f.box.repo } },
+      running: [{ taskId: f.task.id, generation: 1 }, { taskId: f.sibling.id, generation: 1 }] };
+    authorizeWorkerRpc(f.coord, f.identity, 'machine.heartbeat', request);
+    const result = await dispatch(buildMethods(f.coord, { machineId: 'm-hub' }), 'machine.heartbeat', request) as { controls: { taskId: string; renewed: boolean }[] };
+    assert.equal(result.controls.find(c => c.taskId === f.task.id)!.renewed, false);
+    assert.equal(result.controls.find(c => c.taskId === f.sibling.id)!.renewed, true);
+    assert.ok(f.coord.getTask(f.sibling.id)!.lease_until! > Date.now() + 30_000);
+    for (const method of ['run.update', 'run.log']) {
+      const params = { runId: f.run.id, owner: f.claim, patch: { status: 'stopped' }, lines: ['cancel acknowledged'] };
+      authorizeWorkerRpc(f.coord, f.identity, method, params);
+      await dispatch(buildMethods(f.coord, { machineId: 'm-hub' }), method, params);
+    }
   } finally { f.db.close(); }
 });
 

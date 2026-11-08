@@ -24,7 +24,8 @@ CREATE TABLE budget_reservations (
   amount_micros INTEGER CHECK (amount_micros IS NULL OR amount_micros >= 0),
   basis TEXT NOT NULL, enforcement TEXT NOT NULL,
   state TEXT NOT NULL CHECK (state IN ('held', 'released')), release_reason TEXT,
-  created_at INTEGER NOT NULL, attached_at INTEGER, released_at INTEGER
+  created_at INTEGER NOT NULL, attached_at INTEGER, released_at INTEGER,
+  claim_generation INTEGER, claim_machine TEXT
 );
 CREATE INDEX budget_reservations_state ON budget_reservations(state, task_id);
 CREATE TABLE usage_ledger (
@@ -54,6 +55,10 @@ SELECT 'legacy-' || r.id, r.role, t.project_id, r.task_id, r.id,
   'legacy', 'admission_only', 'held', r.started_at, r.started_at
 FROM runs r LEFT JOIN tasks t ON t.id = r.task_id
 WHERE r.status IN ('running', 'lost', 'cleanup_failed');
+-- Released versions did not record spawn intent. A PID-less live row cannot prove
+-- that its old supervisor had not just launched a child; retain an attestable hold.
+UPDATE runs SET phase = COALESCE(phase, 'legacy') || ':spawning'
+WHERE status IN ('running', 'lost', 'cleanup_failed') AND pid IS NULL;
 `;
 
 export type BudgetPhase = 'implement' | 'review' | 'plan';
@@ -313,6 +318,11 @@ function holdReason(a: Allowance, minMicros: number): string {
   }
 }
 
+/** The same explanation used by reserve(), for queued-task display without reserving anything. */
+export function describeBudgetHold(allowance: Allowance, minUsd = .01): string {
+  return holdReason(allowance, usd('minUsd', minUsd));
+}
+
 /**
  * Atomically admits one phase. The reserved amount is min(phase cap, task remaining, daily remaining), where
  * "remaining" already subtracts every other held reservation's unspent amount, so no allowance is promised twice.
@@ -491,4 +501,10 @@ export function describeAllowance(a: Allowance): string[] {
   lines.push('Budgets are admission limits plus reactive stops, not provider-enforced caps, except where a CLI is given its own cap.');
   lines.push(JEV_JUDGE_COST_NOTE);
   return lines;
+}
+
+/** Conservative capability label: custom/text adapters have no declared telemetry contract. */
+export function enforcementFor(agent: string): Enforcement {
+  if (agent === 'claude') return 'native_cap';
+  return ['codex', 'gemini', 'opencode', 'mock'].includes(agent) ? 'reactive' : 'admission_only';
 }

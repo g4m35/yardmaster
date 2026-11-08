@@ -43,6 +43,12 @@ export class Supervisor {
 
     for (const project of this.coord.listProjects()) {
       const cfg = this.coord.configFor(project.id).supervision;
+      const integrationProcess = this.coord.getMeta(`integration_process:${project.id}`);
+      if (integrationProcess && /"held"\s*:\s*true/.test(integrationProcess)) {
+        const key = `integration-process:${project.id}`;
+        keep(key);
+        this.raise({ key, projectId: project.id, taskId: null, message: `Integration for ${project.name} is held until its previous process is confirmed stopped. Work is preserved. Restart the hub for identity-proven recovery; only for an unregistered spawning window, inspect the processes and use ym recover --confirm-stopped ${project.id} --note "how exit was verified".` }, now);
+      }
 
       // Running agents that are burning time and money without touching any files.
       for (const t of this.coord.listTasks(project.id, ['running'])) {

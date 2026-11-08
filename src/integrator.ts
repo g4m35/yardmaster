@@ -8,7 +8,7 @@ import { addWorktree, branchExists, conflictedFiles, git, isAncestor, isClean, i
 import { rememberChecked } from './ci/verified.ts';
 import { Semaphore, verifyCommands } from './runner.ts';
 import { verifyArtifact } from './verification.ts';
-import { runShell } from './proc.ts';
+import { runShell, terminateRecordedProcess, type OwnedRunOptions } from './proc.ts';
 import { lockHash, refreshDeps, siblingWorktrees } from './warmstart.ts';
 import { clip, errorFingerprint, tail } from './text.ts';
 import type { Config } from './config.ts';
@@ -28,6 +28,9 @@ class KeyedMutex {
 async function commitExists(cwd: string, sha: string): Promise<boolean> {
   return (await git(cwd, ['cat-file', '-e', `${sha}^{commit}`], { allowFail: true })).code === 0;
 }
+
+class IntegrationHeld extends Error {}
+interface IntegrationProcess { phase: string; pid: number | null; startedAt: number | null }
 
 /**
  * The merge queue. Finished work lands on an integration branch inside a worktree Yardmaster owns, so the
@@ -64,6 +67,10 @@ export class Integrator {
     return tx(this.coord.db, () => {
       if (!this.current(task, statuses)) return false;
       this.coord.updateTask(task.id, patch);
+      if (patch.status === 'done') {
+        this.coord.setMeta(`integrating:${task.project_id}`, null);
+        this.coord.setMeta(`integrating_result:${task.project_id}`, null);
+      }
       return true;
     });
   }
@@ -83,8 +90,43 @@ export class Integrator {
     this.coord.event(project.id, null, 'warn', `integration.${key}`, message);
   }
 
+  /** Persist the spawn window too: a restart must never reset underneath an unregistered child. */
+  private processGuard(project: Project, phase: string): OwnedRunOptions['onSpawn'] {
+    this.coord.setMeta(`integration_process:${project.id}`, JSON.stringify({ phase: `${phase}:spawning`, pid: null, startedAt: null }));
+    return (proc) => {
+      this.coord.setMeta(`integration_process:${project.id}`, JSON.stringify({ phase, pid: proc.pid, startedAt: proc.startedAt }));
+    };
+  }
+
+  private processFinished(project: Project, reaped: boolean): void {
+    if (reaped) {
+      this.coord.setMeta(`integration_process:${project.id}`, null);
+      return;
+    }
+    const key = `integration_process:${project.id}`;
+    this.coord.setMeta(key, JSON.stringify({ ...JSON.parse(this.coord.getMeta(key) ?? '{}'), held: true }));
+    this.warnOnce(project, 'process_hold', 'Integration is held because an owned check process has not been confirmed stopped. Its worktree is preserved; no reset or further merge will run.');
+    throw new IntegrationHeld('Integration worktree is held for process recovery.');
+  }
+
+  private async recoverProcess(project: Project): Promise<boolean> {
+    const value = this.coord.getMeta(`integration_process:${project.id}`);
+    if (!value) return true;
+    let process: IntegrationProcess;
+    try { process = JSON.parse(value) as IntegrationProcess; } catch { return false; }
+    const result = process.pid ? await terminateRecordedProcess({ pid: process.pid, startedAt: process.startedAt }) : { status: 'unverified' };
+    if (!['exited', 'terminated'].includes(result.status)) {
+      this.coord.setMeta(`integration_process:${project.id}`, JSON.stringify({ ...process, held: true }));
+      this.warnOnce(project, 'process_hold', 'Integration is waiting for proof that its previous check process stopped. The merge worktree is held and will not be reset.');
+      return false;
+    }
+    this.coord.setMeta(`integration_process:${project.id}`, null);
+    return true;
+  }
+
   /** Must be called with the project lock held. Returns null when a person is working in the integration worktree. */
   private async ensureLocked(project: Project): Promise<{ path: string; head: string } | null> {
+    if (!(await this.recoverProcess(project))) return null;
     const config = this.coord.configFor(project.id);
     const branch = config.integration.branch;
     const path = this.integrationPath(project, config);
@@ -105,14 +147,22 @@ export class Integrator {
         this.warnOnce(project, 'manual', `The integration worktree (${path}) has uncommitted changes that Yardmaster did not make. Merging is paused for ${project.name} until you commit or discard them there.`);
         return null;
       }
-      // Our own merge was interrupted (crash or restart): roll back to exactly where it started.
-      await git(path, ['merge', '--abort'], { allowFail: true });
-      await git(path, ['reset', '--hard', marker]);
-    } else if (marker && (await revParse(path, 'HEAD')) !== marker && !(await this.coord.anyMerging(project.id))) {
-      // A merge commit was created but its re-verification never finished: undo it.
-      await git(path, ['reset', '--hard', marker]);
+      // A person may have edited after the crash. Ownership of the folder is not proof
+      // of ownership of every changed file; retain uncertain contents for inspection.
+      this.warnOnce(project, 'manual', `An interrupted merge has changed files in ${path}. Work is preserved; inspect and commit or resolve it before merging resumes.`);
+      return null;
+    } else if (marker) {
+      const currentHead = await revParse(path, 'HEAD');
+      const recordedResult = this.coord.getMeta(`integrating_result:${project.id}`);
+      if (currentHead !== marker && currentHead !== recordedResult) {
+        this.warnOnce(project, 'manual', `The integration branch advanced beyond its recorded interrupted merge. Its commits are preserved; inspect ${path} before recovering the merge.`);
+        return null;
+      }
+      if (currentHead !== marker) await git(path, ['reset', '--hard', marker]);
+      for (const task of this.coord.listTasks(project.id, ['merging'])) this.coord.updateTask(task.id, { status: 'ready' });
     }
     this.coord.setMeta(`integrating:${project.id}`, null);
+    this.coord.setMeta(`integrating_result:${project.id}`, null);
     if (config.integration.syncBase) await this.syncBase(project, path);
     const head = (await revParse(path, 'HEAD'))!;
     this.lastGood.set(project.id, head);
@@ -127,7 +177,7 @@ export class Integrator {
     if (cfg.integration.mode === 'none') return revParse(project.root, project.base_branch);
     if (this.busy.has(projectId) && this.lastGood.has(projectId)) return this.lastGood.get(projectId)!;
     const r = await this.lock.run(projectId, () => this.ensureLocked(project));
-    return r?.head ?? this.lastGood.get(projectId) ?? revParse(project.root, cfg.integration.branch);
+    return r?.head ?? this.lastGood.get(projectId) ?? this.coord.getMeta(`integrating:${projectId}`) ?? revParse(project.root, cfg.integration.branch);
   }
 
   /** Run something against the integration branch with the project lock held (used for base bundles). */
@@ -147,11 +197,13 @@ export class Integrator {
       if (!r) return;
       this.coord.setMeta(key, lockHash(path));
       for (const command of config.worktree.setup) {
-        const s = await runShell(command, { cwd: path, timeoutMs: config.verifyTimeoutMinutes * 60_000, signal: this.lifetime.signal });
+        const s = await runShell(command, { cwd: path, timeoutMs: config.verifyTimeoutMinutes * 60_000, signal: this.lifetime.signal, onSpawn: this.processGuard(project, 'setup') });
+        this.processFinished(project, s.reaped);
         if (s.code !== 0) this.coord.event(project.id, null, 'warn', 'integration.setup_failed', `Setup \`${command}\` failed in the merge worktree: ${clip(s.stdout.trim().split('\n').slice(-3).join(' '), 200)}`);
       }
       if (r.cloned.length) this.coord.event(project.id, null, 'info', 'integration.deps', `Merge worktree has ${r.cloned.map((c) => c.rel).join(', ')} (${(r.ms / 1000).toFixed(1)}s, no reinstall)`);
     } catch (err) {
+      if (err instanceof IntegrationHeld || this.coord.getMeta(`integration_process:${project.id}`)) throw err;
       this.coord.event(project.id, null, 'warn', 'integration.deps_failed', `Couldn't prepare dependencies for the merge worktree: ${clip((err as Error).message, 200)}`);
     }
   }
@@ -178,6 +230,10 @@ export class Integrator {
   private async stepOnce(projectId: string): Promise<boolean> {
     if (this.busy.has(projectId)) return false;
     const project = this.coord.getProject(projectId);
+    if (project && this.coord.getMeta(`integration_process:${project.id}`)) {
+      const recovered = await this.lock.run(project.id, () => this.ensureLocked(project));
+      if (!recovered) return false;
+    }
     if (!project) return false;
     const config = this.coord.configFor(projectId);
     const ready = this.coord
@@ -209,6 +265,7 @@ export class Integrator {
           const ok = await this.lock.run(projectId, () => this.integrateTrain(project, train, config));
           if (ok) return true;
         } catch (err) {
+          if (err instanceof IntegrationHeld) return false;
           this.coord.event(projectId, null, 'warn', 'integration.train_error', `Batch merge failed (${clip((err as Error).message, 200)}); merging one at a time.`);
           for (const t of train) this.trainFailed.add(t.id);
         } finally {
@@ -227,6 +284,7 @@ export class Integrator {
     try {
       await this.lock.run(projectId, () => this.integrate(project, task!, config));
     } catch (err) {
+      if (err instanceof IntegrationHeld) return false;
       this.transition(task, ['ready', 'merging'], { status: 'needs_human', attention: `Merging failed unexpectedly: ${clip((err as Error).message, 400)}` });
       this.coord.event(projectId, task.id, 'error', 'integration.error', `Could not merge "${task.title}": ${(err as Error).message}`);
     } finally {
@@ -264,11 +322,16 @@ export class Integrator {
     }
     // Quick per-task checks mean the full suite hasn't run on this change yet, so run it now.
     const baseMoved = !task.base_sha || task.base_sha !== before || config.verifyQuick.length > 0;
+    this.coord.setMeta(`integrating_result:${project.id}`, await revParse(path, 'HEAD'));
     const commands = verifyCommands(task, config);
     if (baseMoved && commands.length) {
       this.coord.event(project.id, task.id, 'info', 'integration.reverify', `Re-checking "${task.title}" combined with work merged since it started`);
       await this.prepareDeps(project, path, config, task.worktree ? [task.worktree] : []);
-      const result = await this.verifySlots.use(() => verifyArtifact(path, commands, config.verifyTimeoutMinutes, this.lifetime.signal));
+      const result = await this.verifySlots.use(() => verifyArtifact(path, commands, config.verifyTimeoutMinutes, this.lifetime.signal, this.processGuard(project, 'verify'), {
+        beforeSpawn: () => { this.processGuard(project, 'verify'); },
+        onExit: reaped => this.processFinished(project, reaped),
+      }), this.lifetime.signal);
+      this.processFinished(project, result.reaped);
       if (!result.ok) {
         await git(path, ['reset', '--hard', before]);
         this.coord.setMeta(`integrating:${project.id}`, null);
@@ -332,10 +395,15 @@ export class Integrator {
         return false;
       }
       merged.push(t);
+      this.coord.setMeta(`integrating_result:${project.id}`, await revParse(path, 'HEAD'));
     }
     this.coord.event(project.id, null, 'info', 'integration.train', `Checking ${merged.length} finished tasks together in one run: ${merged.map((t) => `"${clip(t.title, 40)}"`).join(', ')}`);
     await this.prepareDeps(project, path, config, merged.flatMap((t) => (t.worktree ? [t.worktree] : [])));
-    const result = await this.verifySlots.use(() => verifyArtifact(path, config.verify, config.verifyTimeoutMinutes, this.lifetime.signal));
+    const result = await this.verifySlots.use(() => verifyArtifact(path, config.verify, config.verifyTimeoutMinutes, this.lifetime.signal, this.processGuard(project, 'verify'), {
+      beforeSpawn: () => { this.processGuard(project, 'verify'); },
+      onExit: reaped => this.processFinished(project, reaped),
+    }), this.lifetime.signal);
+    this.processFinished(project, result.reaped);
     const stillMerging = merged.every((t) => this.current(t, ['merging']));
     if (!result.ok || !stillMerging) {
       await git(path, ['reset', '--hard', before]);
@@ -350,6 +418,8 @@ export class Integrator {
     const committed = tx(this.coord.db, () => {
       if (!merged.every((t) => this.current(t, ['merging']))) return false;
       for (const t of merged) this.coord.updateTask(t.id, { status: 'done', finished_at: Date.now(), attention: null });
+      this.coord.setMeta(`integrating:${project.id}`, null);
+      this.coord.setMeta(`integrating_result:${project.id}`, null);
       return true;
     });
     if (!committed) {
@@ -408,5 +478,12 @@ export class Integrator {
       if (tip && (await isAncestor(project.root, tip, integration))) await git(project.root, ['update-ref', '-d', `refs/heads/${task.branch}`, tip], { allowFail: true });
     }
     await git(project.root, ['update-ref', '-d', `refs/yardmaster/incoming/${task.id}`], { allowFail: true });
+    const acceptedRef = `refs/yardmaster/accepted/${task.id}/${task.generation}`;
+    const accepted = await revParse(project.root, acceptedRef);
+    if (accepted && await isAncestor(project.root, accepted, integration)) {
+      guard();
+      const removedRef = await git(project.root, ['update-ref', '-d', acceptedRef, accepted], { allowFail: true });
+      if (removedRef.code === 0) this.coord.setMeta(`bundle:${task.id}:${task.generation}`, null);
+    }
   }
 }

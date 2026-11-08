@@ -6,7 +6,7 @@ import { routeEffort } from '../src/jev.ts';
 import { defaultAgentSettings, EffortRoutingSchema, loadConfig, resolveConfig } from '../src/config.ts';
 import { claude, codex } from '../src/adapters/builtin.ts';
 import { registerAdapter } from '../src/adapters/index.ts';
-import { isAlive } from '../src/proc.ts';
+import { isAlive, groupAlive } from '../src/proc.ts';
 import { sandbox, sh, tempDir, until } from './helpers.ts';
 import { Hub } from '../src/hub.ts';
 import { openDb } from '../src/db.ts';
@@ -200,6 +200,28 @@ test('runner applies JEV once, preserves the coding brief, verifies and commits 
     assert.equal(latest.status, 'succeeded');
     assert.match((await s.hub.client['task.logs']({ id: s.ctx.task.id })), /JEV effort: apply/);
     assert.equal(sh(s.hub.coord.getTask(s.ctx.task.id)!.worktree!, 'git', ['show', 'HEAD:answer.txt']), 'works');
+  } finally { registerAdapter(claude); s.hub.coord.db.close(); }
+});
+
+test('runner holds after failed judge registration and never starts its coding agent', async () => {
+  const s = await runnerFixture('hang');
+  let pid = 0;
+  s.ctx.api = new Proxy(s.hub.client, { get(target, key: keyof Client) {
+    if (key !== 'run.update') return target[key];
+    return async (p: Parameters<Client['run.update']>[0]) => {
+      if (p.patch.phase === 'route' && typeof p.patch.pid === 'number') {
+        pid = p.patch.pid;
+        throw new Error('Judge PID registration refused');
+      }
+      return target['run.update'](p);
+    };
+  } }) as Client;
+  try {
+    const outcome = await runAttempt(s.ctx);
+    assert.equal(outcome.status, 'needs_human');
+    assert.ok(pid > 0);
+    assert.equal(groupAlive(pid), false);
+    assert.equal(existsSync(s.agentCapture), false);
   } finally { registerAdapter(claude); s.hub.coord.db.close(); }
 });
 

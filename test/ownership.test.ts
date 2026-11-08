@@ -58,6 +58,9 @@ for (const sequence of [['m-A', 'm-A', 'm-A'], ['m-A', 'm-B', 'm-A']]) {
         assert.equal(s.coord.getTask(task.id)!.summary, 'current owner');
         assert.deepEqual(s.coord.getRun(runId)!.touched, ['current.ts']);
         previous.push({ task: current, runId });
+        // No child was launched in this fixture. Report that proof before allowing a replacement;
+        // a vanished remote worker alone no longer implies that its process exited.
+        await s.client['run.exit']({ runId, taskId: task.id, owner, reaped: true });
         s.coord.updateTask(task.id, { lease_until: Date.now() - 1 });
         await recover(s.coord, 'm-hub', new Set());
         assert.equal(s.coord.getTask(task.id)!.status, 'queued');
@@ -90,7 +93,7 @@ test('legacy workers fail clearly, administrative writes are explicit, and expir
 test('interactive completion requires the live session generation and never revives cancellation', async () => {
   const s = await fixture();
   try {
-    const task = s.add();
+    const task = s.coord.addTasks(s.project.id, [{ title: 'Implement scoped ownership', agent: 'mock', files: ['src/**'] }], 'test').created[0]!;
     const sessionId = 'session:interactive';
     const first = s.coord.claimForSession(sessionId, s.project.id, task.id)!;
     s.coord.claimLocks(s.project.id, sessionId, ['src/**'], 'interactive work', 30);
@@ -114,6 +117,22 @@ test('interactive completion requires the live session generation and never revi
     const done = await s.client['session.finish']({ sessionId, taskId: task.id, generation: second.generation, summary: 'valid' });
     assert.equal(done.status, 'done');
     assert.equal(s.coord.activeLocks(s.project.id).length, 0);
+  } finally { s.coord.db.close(); }
+});
+
+test('finishing one session task preserves another claim and unrelated manual reservations', async () => {
+  const s = await fixture();
+  try {
+    const session = 'session:multi';
+    const tasks = s.coord.addTasks(s.project.id, [
+      { title: 'Change component alpha', agent: 'mock', files: ['alpha/**'] },
+      { title: 'Change component beta', agent: 'mock', files: ['beta/**'] },
+    ], 'test').created;
+    const a = s.coord.claimForSession(session, s.project.id, tasks[0]!.id)!;
+    s.coord.claimForSession(session, s.project.id, tasks[1]!.id);
+    s.coord.claimLocks(s.project.id, session, ['alpha/**', 'beta/**', 'manual/**'], 'session work', 30);
+    s.coord.finishForSession(session, a.id, 'complete', 'done', undefined, a.generation);
+    assert.deepEqual(s.coord.activeLocks(s.project.id).map(lock => lock.pattern).sort(), ['beta/**', 'manual/**']);
   } finally { s.coord.db.close(); }
 });
 
@@ -206,6 +225,9 @@ test('schema upgrade preserves existing task/run rows and allocates fresh identi
     assert.equal(coord.getTask(task.id)!.attempts, 1);
     assert.equal(coord.getRun(run.id)!.log_path, '/fixture/log');
     assert.equal(coord.renewLease(task.id, 'm-A'), false);
+    // The released-schema live run migrates with a budget hold. An administrative requeue cannot
+    // discard that hold: this fixture launched no child, so trusted recovery can prove it exited.
+    coord.confirmRecoveredRunExit(run.id, { status: 'exited', reason: 'Fixture never launched a process.' });
     coord.updateTask(task.id, { status: 'queued', assignee: null, machine_id: null, attempts: 0 });
     const fresh = coord.claimNext({ machineId: 'm-A', agents: ['mock'], repos: { [s.project.id]: s.repo }, runningByAgent: {} })!.task;
     assert.equal(fresh.generation, 1);

@@ -48,6 +48,8 @@ export interface OneShotResult {
 }
 
 export interface OneShotHooks {
+  /** Persist spawn intent before the supervisor can create a child. A failure launches nothing. */
+  beforeSpawn?: () => void | Promise<void>;
   /** Register the CLI's pid/start identity (e.g. on a live run row). A failure stops the CLI (`hook_failed`). */
   onSpawn?: (proc: OwnedProcessInfo) => void | Promise<void>;
   /** Live usage, delivered in order. Errors are collected in `hookErrors`; they do not stop the run. */
@@ -169,6 +171,7 @@ export async function runOneShot(opts: {
 
   let run: OwnedRunResult;
   try {
+    await opts.hooks?.beforeSpawn?.();
     proc = startOwnedProcess(spec.command, spec.args, {
       cwd: opts.cwd, env: cleanEnv({ ...spec.env, ...opts.env }), stdin: spec.stdin, signal,
       timeoutMs: opts.timeoutMs ?? 10 * 60_000, termGraceMs: opts.termGraceMs, exitGraceMs: opts.exitGraceMs, hookTimeoutMs: opts.hookTimeoutMs,

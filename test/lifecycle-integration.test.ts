@@ -98,6 +98,9 @@ test('late usage is sequence-idempotent and never borrows a newer claim identity
     const usage = { costUsd: .2, tokensIn: 100, tokensOut: 10, provenance: 'estimated' as const, cacheReadTokens: 20, cacheWriteTokens: 5 };
     const record = (sequence: number, costUsd: number) => s.hub.client['run.usage']({ runId: run.id, taskId: old.id, owner, sequence, usage: { ...usage, costUsd } });
     await record(1, .2); await record(1, .2);
+    // No child was launched in this accounting fixture. Its reservation still needs explicit
+    // exit proof before reusing the task; later historical telemetry remains valid after exit.
+    await s.hub.client['run.exit']({ runId: run.id, taskId: old.id, owner, reaped: true });
     s.hub.coord.updateTask(old.id, { status: 'queued', assignee: null, machine_id: null });
     const newer = s.hub.coord.claimNext({ machineId: 'm-fixture', agents: ['mock'], repos: { [s.project.id]: s.repo }, runningByAgent: {} })!.task;
     await record(2, .3); await record(1, 999); await record(3, .25);

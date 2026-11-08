@@ -36,6 +36,23 @@ function fixture() {
   return { db, machine, task, run, session };
 }
 
+test('planning is visible without an invented task or task-stop capability', () => {
+  const f = fixture();
+  try {
+    f.machine('m-one', ['p-one'], ['codex']);
+    f.run('r-plan', 'plan:p-one', 'm-one', { role: 'plan' });
+    const registry = buildRegistry(f.db, { projectId: 'p-one', now });
+    const plan = registry.entries.find(e => e.runId === 'r-plan')!;
+    assert.ok(plan);
+    assert.equal(plan.projectId, 'p-one');
+    assert.equal(plan.taskId, null);
+    assert.equal(plan.state, 'managed');
+    assert.equal(plan.capabilities.requestStop, false);
+    assert.equal(plan.usage!.provenance, 'unknown');
+    assert.equal(buildRegistry(f.db, { projectId: 'p-two', now }).entries.some(e => e.runId === 'r-plan'), false);
+  } finally { f.db.close(); }
+});
+
 test('registry distinguishes managed processes, passive sessions, stale connections and installed clients', () => {
   const f = fixture();
   try {

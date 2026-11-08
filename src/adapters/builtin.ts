@@ -59,7 +59,13 @@ export const claude: Adapter = {
       env.DISABLE_AUTOUPDATER = '1';
     }
     if (effort.emitted) args.push('--effort', effort.emitted);
-    if (ctx.budgetUsd !== undefined && ctx.budgetUsd !== null && ctx.budgetUsd > 0) args.push('--max-budget-usd', Math.max(0.05, ctx.budgetUsd).toFixed(2));
+    if (ctx.budgetUsd !== undefined && ctx.budgetUsd !== null && ctx.budgetUsd > 0) {
+      const configuredCaps = ctx.settings.extraArgs.flatMap((arg, index, all) => arg === '--max-budget-usd' ? [all[index + 1]] : arg.startsWith('--max-budget-usd=') ? [arg.slice('--max-budget-usd='.length)] : []);
+      if (configuredCaps.length > 1 || configuredCaps.some(cap => !cap || !Number.isFinite(Number(cap)) || Number(cap) <= 0 || Number(cap) > ctx.budgetUsd!)) {
+        throw new Error('Claude max-budget-usd must be positive and no greater than this run’s reserved allowance.');
+      }
+      if (!configuredCaps.length) args.push('--max-budget-usd', String(ctx.budgetUsd));
+    }
     if (ctx.maxTurns) args.push('--max-turns', String(ctx.maxTurns));
     args.push(...ctx.settings.extraArgs);
     return withEffort({ command: ctx.settings.command ?? 'claude', args, stdin: ctx.prompt, env }, effort);

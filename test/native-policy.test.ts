@@ -19,6 +19,16 @@ const codexEffort = (args: string[]) => args.filter((a) => a.includes('model_rea
 const policyError = (code: string) => (err: unknown) => err instanceof EffortPolicyError && err.code === code;
 const TIER_LIST: Tier[] = ['cheap', 'standard', 'strong'];
 
+test('Claude native budget never inflates a reserved allowance or accepts a larger local override', () => {
+  for (const budgetUsd of [.01, .023456, 1.000001]) {
+    const args = claude.build(ctx({}, { budgetUsd })).args;
+    assert.equal(Number(args[args.indexOf('--max-budget-usd') + 1]), budgetUsd);
+    assert.throws(() => claude.build(ctx({ extraArgs: ['--max-budget-usd', String(budgetUsd + 1)] }, { budgetUsd })), /reserved allowance/);
+  }
+  const args = claude.build(ctx({ extraArgs: ['--max-budget-usd=0.01'] }, { budgetUsd: .02 })).args;
+  assert.equal(args.filter(a => a.startsWith('--max-budget-usd')).length, 1);
+});
+
 // ---------- defaults stay backward compatible ----------
 
 test('managed defaults keep the tier efforts on every Claude/Codex build path, including plan and review equivalents', () => {

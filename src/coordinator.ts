@@ -24,7 +24,9 @@ import { defaultBranch, mainRepoRoot, projectIdFor } from './git.ts';
 import { basename } from 'node:path';
 import { writeFileSync } from 'node:fs';
 import { paths } from './paths.ts';
+import type { TerminateResult } from './proc.ts';
 import type { UsageSnapshot } from './usage.ts';
+import { attachRun, describeBudgetHold, enforcementFor, listHeld, observedSpendUsd, readAllowance, recordUsageDelta, release, requireHeld, reserve, type Reservation } from './budgets.ts';
 
 type Row = Record<string, unknown>;
 
@@ -96,6 +98,7 @@ export interface Claim {
   task: Task;
   project: Project;
   route: RouteChoice;
+  reservation: Reservation;
 }
 
 export interface AddResult {
@@ -444,7 +447,13 @@ export class Coordinator {
     return tx(this.db, () => {
       const task = this.assertTaskOwner(id, owner);
       if (patch.status === 'ready' && task.control) throw new Error(`Task control pending: ${task.control}`);
-      return this.updateTask(id, patch);
+      const updated = this.updateTask(id, patch);
+      if (patch.status && !['running', 'verifying'].includes(patch.status)) {
+        // An explicit owner handback with no attached run is conclusive no-launch proof. Lease recovery uses
+        // updateTask directly and must not take this path.
+        this.abandonUnlaunchedClaim(id, task.generation, task.machine_id);
+      }
+      return updated;
     });
   }
 
@@ -470,7 +479,7 @@ export class Coordinator {
   }
 
   addUsage(id: string, costUsd: number, tokensIn: number, tokensOut: number): void {
-    this.db.prepare('UPDATE tasks SET cost_usd = cost_usd + ?, tokens_in = tokens_in + ?, tokens_out = tokens_out + ?, updated_at = ? WHERE id = ?').run(costUsd, tokensIn, tokensOut, Date.now(), id);
+    this.db.prepare('UPDATE tasks SET cost_usd = ROUND(cost_usd + ?, 6), tokens_in = tokens_in + ?, tokens_out = tokens_out + ?, updated_at = ? WHERE id = ?').run(costUsd, tokensIn, tokensOut, Date.now(), id);
     this.invalidate();
   }
 
@@ -482,23 +491,45 @@ export class Coordinator {
       const run = this.db.prepare('SELECT * FROM runs WHERE id = ?').get(runId) as Row | undefined;
       if (!run || run.task_id !== taskId || !owner || owner.generation !== run.generation || owner.assignee !== `machine:${run.machine_id}` || (owner.generation ?? 0) < 1) throw new Error('Usage does not belong to this recorded run identity.');
       if (sequence <= Number(run.usage_seq)) return;
-      this.addUsage(taskId, usage.costUsd - Number(run.accounted_cost), usage.tokensIn - Number(run.accounted_in), usage.tokensOut - Number(run.accounted_out));
+      const planning = run.role === 'plan';
+      const projectId = planning ? String(run.task_id).slice(5) : this.getTask(taskId)?.project_id ?? null;
+      const delta = recordUsageDelta(this.db, { runId, sequence, taskId: planning ? null : taskId, projectId, ...usage });
+      if (!delta.applied) return;
+      if (!planning) this.addUsage(taskId, delta.costDeltaUsd, delta.tokensInDelta, delta.tokensOutDelta);
       this.db.prepare(`UPDATE runs SET cost_usd = ?, tokens_in = ?, tokens_out = ?, cost_estimated = ?,
         usage_provenance = ?, cache_read_tokens = ?, cache_write_tokens = ?, usage_seq = ?,
         accounted_cost = ?, accounted_in = ?, accounted_out = ? WHERE id = ?`)
-        .run(usage.costUsd, usage.tokensIn, usage.tokensOut, usage.provenance === 'actual' ? 0 : 1, usage.provenance,
-          usage.provenance === 'unknown' ? null : usage.cacheReadTokens, usage.cacheWriteTokens,
-          sequence, usage.costUsd, usage.tokensIn, usage.tokensOut, runId);
+        .run(delta.totalCostUsd, delta.totalTokensIn, delta.totalTokensOut, usage.provenance === 'actual' ? 0 : 1, usage.provenance,
+          usage.provenance === 'unknown' ? run.cache_read_tokens as number | null : usage.cacheReadTokens,
+          usage.provenance === 'unknown' ? run.cache_write_tokens as number | null : usage.cacheWriteTokens,
+          sequence, delta.totalCostUsd, delta.totalTokensIn, delta.totalTokensOut, runId);
       this.invalidate();
       this.changed();
     });
   }
 
   /** User and agent controls. All are safe to repeat. */
-  control(id: string, action: 'retry' | 'cancel' | 'stop' | 'approve' | 'prioritize' | 'redirect', by: string, note?: string): Task {
+  control(id: string, action: 'retry' | 'cancel' | 'stop' | 'approve' | 'prioritize' | 'redirect' | 'confirm-stopped', by: string, note?: string): Task {
     const t = this.getTask(id);
     if (!t) throw new Error(`No task ${id}`);
     switch (action) {
+      case 'confirm-stopped': {
+        if (!note || note.trim().length < 12) throw new Error('Describe how you confirmed every process from this spawning window has stopped (at least 12 characters).');
+        return tx(this.db, () => {
+          const current = this.getTask(id)!;
+          if (['running', 'verifying', 'merging'].includes(current.status)) throw new Error('Stop the active task before attesting to a recovered spawning window.');
+          const holds = this.runsFor(id).filter(r => r.status === 'cleanup_failed' && r.pid === null && r.phase?.endsWith(':spawning'));
+          if (!holds.length) throw new Error('No PID-less spawning-window hold exists for this task.');
+          for (const run of holds) {
+            this.updateRun(run.id, { status: 'stopped', phase: null, proc_started: null, ended_at: Date.now(), stop_reason: `Owner ${by} attested stopped: ${clip(note, 1000)}` });
+            const budget = listHeld(this.db).find(r => r.runId === run.id);
+            if (budget) release(this.db, budget.id, { kind: 'exited', runId: run.id });
+          }
+          this.event(current.project_id, id, 'warn', 'process.owner_confirmed_stopped', `${by} attested that spawning-window processes have stopped: ${clip(note, 1000)}`,
+            { runs: holds.map(r => ({ id: r.id, generation: r.generation, machineId: r.machine_id, phase: r.phase })) });
+          return this.updateTask(id, { attention: 'Process exit was explicitly attested by the owner. Work is preserved; retry when ready.' });
+        });
+      }
       case 'redirect': {
         const text = note?.trim();
         if (!text) throw new Error('Say what the agent should do differently.');
@@ -527,6 +558,7 @@ export class Coordinator {
       case 'cancel': {
         if (TERMINAL_STATUSES.includes(t.status)) return t;
         const next = this.updateTask(id, { status: 'canceled', control: ACTIVE_STATUSES.includes(t.status) ? 'stop' : null, finished_at: Date.now(), attention: null });
+        this.abandonUnlaunchedClaim(t.id);
         this.releaseLocks(t.project_id, id);
         this.event(t.project_id, id, 'warn', 'task.canceled', `${by} canceled "${t.title}". Its branch and worktree are kept until cleanup confirms nothing is lost.`);
         return next;
@@ -619,12 +651,17 @@ export class Coordinator {
 
   /** Records spend outside any task (planning), so the daily budget sees it. */
   recordSpend(s: { projectId: string | null; agent: string; model: string | null; costUsd: number; tokensIn: number; tokensOut: number; role: string; machineId: string }): void {
-    const now = Date.now();
-    this.db
-      .prepare(`INSERT INTO runs (id, task_id, attempt, machine_id, agent, model, status, cost_usd, tokens_in, tokens_out, cost_estimated, started_at, ended_at, role)
-                VALUES (?, ?, 0, ?, ?, ?, 'succeeded', ?, ?, ?, 0, ?, ?, ?)`)
-      .run(shortId('r'), `${s.role}:${s.projectId ?? 'none'}`, s.machineId, s.agent, s.model, s.costUsd, s.tokensIn, s.tokensOut, now, now, s.role);
-    this.invalidate();
+    tx(this.db, () => {
+      const now = Date.now();
+      const id = shortId('r');
+      this.db
+        .prepare(`INSERT INTO runs (id, task_id, attempt, machine_id, agent, model, status, cost_usd, tokens_in, tokens_out, cost_estimated, started_at, ended_at, role)
+                  VALUES (?, ?, 0, ?, ?, ?, 'succeeded', ?, ?, ?, 0, ?, ?, ?)`)
+        .run(id, `${s.role}:${s.projectId ?? 'none'}`, s.machineId, s.agent, s.model, s.costUsd, s.tokensIn, s.tokensOut, now, now, s.role);
+      recordUsageDelta(this.db, { runId: id, sequence: 1, taskId: null, ...s, provenance: 'actual' });
+      this.db.prepare('UPDATE runs SET usage_seq = 1, accounted_cost = cost_usd, accounted_in = tokens_in, accounted_out = tokens_out WHERE id = ?').run(id);
+      this.invalidate();
+    });
   }
 
   spentToday(): number {
@@ -632,10 +669,7 @@ export class Coordinator {
   }
 
   private spentTodayUncached(): number {
-    const start = new Date();
-    start.setHours(0, 0, 0, 0);
-    const r = this.db.prepare('SELECT COALESCE(SUM(cost_usd), 0) AS s FROM runs WHERE started_at >= ?').get(start.getTime()) as { s: number };
-    return r.s;
+    return observedSpendUsd(this.db);
   }
 
   /** Verified track record per agent on this project (overall and per tier), used by the learned router. */
@@ -667,7 +701,7 @@ export class Coordinator {
   }
 
   /** Why a queued task is not running yet, in plain language. Null means it can start now. */
-  blocker(task: Task, now = Date.now()): string | null {
+  blocker(task: Task, now = Date.now(), reservationHolder?: string): string | null {
     if (this.db.prepare("SELECT 1 FROM runs WHERE task_id = ? AND status = 'cleanup_failed' LIMIT 1").get(task.id)) return 'An earlier owned process has not been confirmed stopped. Worktree is held for recovery.';
     const pause = this.pausedState(task.project_id);
     if (pause.paused) return `Paused by ${pause.by ?? 'you'}. Resume to start new work.`;
@@ -694,13 +728,14 @@ export class Coordinator {
         if (tied) return `Waiting: ${other.id} "${clip(other.title, 40)}" is changing ${tied.theirs}, which ${tied.mine} ${tied.direction === 'imports' ? 'imports' : 'is imported by'}`;
       }
       for (const lock of this.activeLocks(task.project_id)) {
-        if (lock.holder === task.id) continue;
+        if (lock.holder === task.id || lock.holder === reservationHolder) continue;
         const hits = scopesOverlap(mine, [lock.pattern]);
         if (hits.length) return `Waiting: ${lock.holder} has reserved ${lock.pattern}${lock.reason ? ` (${clip(lock.reason, 40)})` : ''}`;
       }
     }
-    const daily = this.configFor(task.project_id).budget.dailyUsd;
-    if (daily !== null && this.spentToday() >= daily) return `Paused: today's budget of $${daily} is used up`;
+    const allowance = readAllowance(this.db, { taskId: task.id, taskCapUsd: task.budget_usd,
+      dailyCapUsd: this.configFor(task.project_id).budget.dailyUsd });
+    if (allowance.availableUsd !== null && allowance.availableUsd < .01) return describeBudgetHold(allowance);
     return null;
   }
 
@@ -740,6 +775,11 @@ export class Coordinator {
         });
         if (!route) continue;
         const project = this.getProject(task.project_id)!;
+        const admission = reserve(this.db, { phase: 'implement', projectId: task.project_id, taskId: task.id,
+          taskCapUsd: task.budget_usd, dailyCapUsd: cfg.budget.dailyUsd, enforcement: enforcementFor(route.agent) });
+        if (!admission.ok) continue;
+        this.db.prepare('UPDATE budget_reservations SET claim_generation = ?, claim_machine = ? WHERE id = ?')
+          .run(task.generation + 1, req.machineId, admission.reservation.id);
         this.advanceGeneration(task.id);
         const claimed = this.updateTask(task.id, {
           status: 'running', machine_id: req.machineId, assignee: `machine:${req.machineId}`, attempts: task.attempts + 1,
@@ -750,7 +790,7 @@ export class Coordinator {
         this.event(task.project_id, task.id, 'info', 'task.started',
           `${route.agent}${route.model ? ` (${route.model})` : ''} started "${task.title}" on ${machine?.name ?? req.machineId}${claimed.attempts > 1 ? ` (attempt ${claimed.attempts})` : ''}`,
           { agent: route.agent, reason: route.reason });
-        return { task: claimed, project, route };
+        return { task: claimed, project, route, reservation: admission.reservation };
       }
       const daily = queued[0] ? this.configFor(queued[0].project_id).budget.dailyUsd : null;
       const day = new Date().toDateString();
@@ -783,15 +823,150 @@ export class Coordinator {
 
   // ---------- runs ----------
 
-  startRun(task: Task, machineId: string, agent: string, model: string | null, logPath: string, role: 'implement' | 'review' = 'implement'): Run {
+  startRun(task: Task, machineId: string, agent: string, model: string | null, logPath: string, role: 'implement' | 'review' = 'implement', implementationExited?: string): Run {
     return tx(this.db, () => {
       const current = this.assertTaskOwner(task.id, { generation: task.generation, assignee: `machine:${machineId}` });
       if (current.control) throw new Error(`Task control pending: ${current.control}`);
+      if (implementationExited) {
+        const previous = this.getRun(implementationExited);
+        if (role !== 'review' || previous?.role !== 'implement' || previous.task_id !== current.id || previous.generation !== current.generation) throw new Error('Review exit proof must name this claim’s implementation run.');
+        this.confirmRunExit(previous.id, current.id, { generation: current.generation, assignee: `machine:${machineId}` });
+      }
+      let reservation: Reservation;
+      if (role === 'implement') {
+        const held = this.db.prepare(`SELECT id, run_id FROM budget_reservations WHERE task_id = ? AND phase = 'implement'
+          AND state = 'held' AND claim_generation = ? AND claim_machine = ?`).get(task.id, current.generation, machineId) as { id: string; run_id: string | null } | undefined;
+        if (held?.run_id) throw new Error('This claim already has an implementation run.');
+        if (held) reservation = listHeld(this.db).find(r => r.id === held.id)!;
+        else reservation = this.admitTaskPhase(current, agent, role);
+      } else {
+        // Exit proof must already have released the implementation hold. Status alone is insufficient.
+        if (listHeld(this.db).some(r => r.taskId === task.id && r.phase === 'implement')) throw new Error('Review waits for confirmed implementation exit.');
+        reservation = this.admitTaskPhase(current, agent, role);
+      }
       const id = shortId('r');
-      this.db.prepare('INSERT INTO runs (id, task_id, generation, attempt, machine_id, agent, model, log_path, status, started_at, role, tier) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-        .run(id, task.id, current.generation, current.attempts, machineId, agent, model, logPath, 'running', Date.now(), role, current.tier);
+      this.db.prepare('INSERT INTO runs (id, task_id, generation, attempt, machine_id, agent, model, log_path, status, started_at, role, tier, phase) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(id, task.id, current.generation, current.attempts, machineId, agent, model, logPath, 'running', Date.now(), role, current.tier, role === 'review' ? 'review_wait' : 'prepare');
+      attachRun(this.db, reservation.id, id);
       this.invalidate();
       return this.getRun(id)!;
+    });
+  }
+
+  private admitTaskPhase(task: Task, agent: string, phase: 'implement' | 'review'): Reservation {
+    const cfg = this.configFor(task.project_id);
+    const admission = reserve(this.db, { phase, projectId: task.project_id, taskId: task.id,
+      taskCapUsd: task.budget_usd, dailyCapUsd: cfg.budget.dailyUsd,
+      phaseCapUsd: phase === 'review' ? cfg.review.budgetUsd : null, enforcement: enforcementFor(agent) });
+    if (!admission.ok) throw new Error(`Budget admission denied: ${admission.reason}`);
+    if (phase === 'implement') this.db.prepare('UPDATE budget_reservations SET claim_generation = ?, claim_machine = ? WHERE id = ?').run(task.generation, task.machine_id, admission.reservation.id);
+    return admission.reservation;
+  }
+
+  /** Only for a claim that failed before a run could attach. Never called by lease expiry/reclaim. */
+  abandonUnlaunchedClaim(taskId: string, generation: number | null = null, machineId: string | null = null): void {
+    tx(this.db, () => {
+      const rows = this.db.prepare(`SELECT id FROM budget_reservations WHERE task_id = ? AND (? IS NULL OR claim_generation = ?)
+        AND (? IS NULL OR claim_machine = ?) AND run_id IS NULL AND state = 'held'`).all(taskId, generation, generation, machineId, machineId) as { id: string }[];
+      for (const row of rows) release(this.db, row.id, { kind: 'no_launch' });
+      this.invalidate();
+    });
+  }
+
+  /** Requires the current claim for launch, but historical identity for exit/accounting. */
+  launchBudget(runId: string, owner: ClaimOwner | undefined): Reservation {
+    return this.withRunOwner(runId, owner, () => {
+      const run = this.getRun(runId)!;
+      const task = this.getTask(run.task_id)!;
+      if (run.status !== 'running' || task.control) throw new Error('Run is no longer launchable.');
+      return requireHeld(this.db, runId);
+    });
+  }
+
+  confirmRunExit(runId: string, taskId: string, owner: ClaimOwner, process?: { pid: number; startedAt: number }, noLaunchPhase?: string): void {
+    tx(this.db, () => {
+      const run = this.getRun(runId);
+      if (!run || run.task_id !== taskId || !owner.generation || run.generation !== owner.generation || owner.assignee !== `machine:${run.machine_id}`) throw new Error('Exit acknowledgment does not belong to this run.');
+      const held = listHeld(this.db).find(r => r.runId === runId);
+      if (!held && !['running', 'lost', 'cleanup_failed'].includes(run.status)) return; // An acknowledged exit is replay-safe.
+      const matchedNoLaunch = noLaunchPhase !== undefined && run.pid === null && run.phase === noLaunchPhase && !noLaunchPhase.endsWith(':spawning');
+      if (noLaunchPhase !== undefined && !matchedNoLaunch) throw new Error('No-launch phase does not match this recorded run.');
+      const matchedProcess = process !== undefined && run.pid === process.pid && run.proc_started !== null && run.proc_started === process.startedAt;
+      if (process && !matchedProcess) throw new Error('Exit process identity does not match this recorded run.');
+      if (run.status === 'cleanup_failed' && !matchedProcess && !matchedNoLaunch) throw new Error('Process cleanup failed; identity-proven recovery must confirm exit before releasing its budget.');
+      const remoteRecovery = run.status === 'cleanup_failed' && run.stop_reason === 'Remote worker must confirm owned process-group exit before work can restart.';
+      if (['running', 'lost', 'cleanup_failed'].includes(run.status)) this.updateRun(run.id, { status: 'stopped', ended_at: Date.now(), phase: null, pid: null, proc_started: null });
+      if (held) release(this.db, held.id, { kind: 'exited', runId });
+      if (remoteRecovery) {
+        const task = this.getTask(taskId);
+        const otherLive = this.runsFor(taskId).some(r => r.id !== runId && r.generation === run.generation && ['running', 'lost', 'cleanup_failed'].includes(r.status));
+        if (task?.generation === run.generation && task.assignee === owner.assignee && task.status === 'needs_human' && task.attention?.startsWith('Remote recovery') && !task.control && !otherLive) {
+          this.updateTask(task.id, { status: 'queued', assignee: null, machine_id: null, lease_until: null, attention: null, attempts: Math.max(0, task.attempts - 1) });
+          this.event(task.project_id, task.id, 'info', 'task.remote_recovered', 'Worker confirmed its recorded process-group exit; this generation can safely retry.');
+        }
+      }
+      this.invalidate();
+      this.changed();
+    });
+  }
+
+  /** Trusted local recovery only. Pass the actual identity-checked supervisor result, never a task/lease status.
+   * Also handles generation-0 runs upgraded from released schema 5, which no modern worker can own. */
+  confirmRecoveredRunExit(runId: string, proof: TerminateResult): void {
+    if (!['exited', 'terminated'].includes(proof.status)) throw new Error('Recovery did not confirm process-group exit.');
+    tx(this.db, () => {
+      const run = this.getRun(runId);
+      if (!run) throw new Error(`Unknown run ${runId}`);
+      this.updateRun(runId, { status: 'stopped', pid: null, proc_started: null, phase: null, ended_at: Date.now(), stop_reason: 'process recovery confirmed group exit' });
+      const held = listHeld(this.db).find(r => r.runId === runId);
+      if (held) release(this.db, held.id, { kind: 'exited', runId });
+      this.invalidate();
+      this.changed();
+    });
+  }
+
+  confirmPlanStopped(runId: string, by: string, note: string): void {
+    tx(this.db, () => {
+      const run = this.getRun(runId);
+      if (!run || String(run.role) !== 'plan' || run.status !== 'cleanup_failed' || run.pid !== null || !run.phase?.endsWith(':spawning')) throw new Error('No PID-less planning spawn-window hold exists.');
+      if (note.trim().length < 12) throw new Error('Describe how you verified all planning processes stopped (at least 12 characters).');
+      const held = listHeld(this.db).find(r => r.runId === runId);
+      this.updateRun(runId, { status: 'stopped', phase: null, proc_started: null, ended_at: Date.now(), stop_reason: `Owner ${by} attested stopped: ${clip(note, 1000)}` });
+      if (held) release(this.db, held.id, { kind: 'exited', runId });
+      this.event(held?.projectId ?? null, null, 'warn', 'process.owner_confirmed_stopped', `${by} attested the planning process stopped: ${clip(note, 1000)}`,
+        { runId, generation: run.generation, machineId: run.machine_id, phase: run.phase });
+      this.invalidate();
+      this.changed();
+    });
+  }
+
+  confirmIntegrationStopped(projectId: string, by: string, note: string): void {
+    tx(this.db, () => {
+      if (!this.getProject(projectId)) throw new Error('Unknown integration project.');
+      if (note.trim().length < 12) throw new Error('Describe how every integration process was confirmed stopped (at least 12 characters).');
+      const key = `integration_process:${projectId}`;
+      const raw = this.getMeta(key);
+      const held = raw ? JSON.parse(raw) as { phase?: string; pid?: number | null } : null;
+      if (!held || held.pid !== null || !held.phase?.endsWith(':spawning')) throw new Error('No PID-less integration spawning-window hold exists. Recorded processes require identity-proven recovery.');
+      this.setMeta(key, null);
+      this.event(projectId, null, 'warn', 'process.owner_confirmed_stopped', `${by} attested integration processes stopped: ${clip(note, 1000)}`, { phase: held.phase });
+      this.invalidate(); this.changed();
+    });
+  }
+
+  startPlan(projectId: string, machineId: string, agent: string, model: string | null): { runId: string; budget: Reservation } {
+    return tx(this.db, () => {
+      if (!this.getProject(projectId)) throw new Error(`Unknown project ${projectId}`);
+      const cfg = this.configFor(projectId);
+      const admission = reserve(this.db, { phase: 'plan', projectId, taskId: null, taskCapUsd: null,
+        dailyCapUsd: cfg.budget.dailyUsd, phaseCapUsd: cfg.budget.perTaskUsd, enforcement: enforcementFor(agent) });
+      if (!admission.ok) throw new Error(`Budget admission denied: ${admission.reason}`);
+      const runId = shortId('r');
+      this.db.prepare(`INSERT INTO runs (id, task_id, generation, attempt, machine_id, agent, model, status, started_at, role, phase)
+        VALUES (?, ?, 1, 0, ?, ?, ?, 'running', ?, 'plan', 'plan')`).run(runId, `plan:${projectId}`, machineId, agent, model, Date.now());
+      attachRun(this.db, admission.reservation.id, runId);
+      this.invalidate();
+      return { runId, budget: requireHeld(this.db, runId) };
     });
   }
 
@@ -967,7 +1142,7 @@ export class Coordinator {
           if (taskId) throw new Error(`${t.id} is ${t.status}, not available.`);
           continue;
         }
-        const why = this.blocker(t);
+        const why = this.blocker(t, Date.now(), sessionId);
         if (why) {
           if (taskId) throw new Error(`${t.id} cannot start yet: ${why}`);
           continue;
@@ -988,7 +1163,11 @@ export class Coordinator {
         throw new Error('Unsupported interactive branch handoff: automated collection, immutable commit verification and review are not available for session.finish. No artifact was accepted; the task remains running. Use a managed worker for verified integration.');
       }
       const next = this.updateTask(taskId, { status: outcome, summary: clip(summary, 1200), finished_at: Date.now(), lease_until: null, attention: null });
-      this.releaseLocks(t.project_id, sessionId);
+      const otherClaims = this.listTasks(t.project_id, ['running', 'verifying', 'ready']).filter(other => other.id !== t.id && other.assignee === sessionId);
+      const releasable = t.scope.filter(pattern => !otherClaims.some(other => scopesOverlap([pattern], other.scope).length));
+      // A session may be editing unrelated work or own another task. Its manual reservations
+      // are independent; finishing one task only releases that task's unshared scope patterns.
+      if (releasable.length) this.releaseLocks(t.project_id, sessionId, releasable);
       this.event(t.project_id, taskId, outcome === 'done' ? 'success' : 'error', `task.${outcome}`, `${sessionId.replace('session:', '')} finished "${t.title}": ${clip(summary, 160)}`);
       return next;
     });

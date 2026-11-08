@@ -65,6 +65,7 @@ export interface ReviewSkipped extends ReviewUsage {
 }
 
 export interface ReviewHooks {
+  beforeSpawn?: OneShotHooks['beforeSpawn'];
   /**
    * Called after the reviewer is chosen and before it launches, e.g. to create the live review run row. A throw
    * propagates out of runReview before anything is spawned.
@@ -164,7 +165,7 @@ export async function runReview(opts: {
     agent: reviewer, config: opts.config, cwd: opts.cwd, readOnly: true, model,
     tier: 'standard', maxTurns: opts.config.review.maxTurns, budgetUsd: opts.config.review.budgetUsd, timeoutMs: opts.timeoutMs,
     prompt: reviewPrompt(opts.task, diff, opts.task.review_rounds), env: { YARDMASTER_REVIEW_ROUND: String(opts.task.review_rounds), YARDMASTER_TASK_ID: opts.task.id },
-    signal: opts.signal, hooks: { onSpawn: opts.hooks?.onSpawn, onUsage: opts.hooks?.onUsage },
+    signal: opts.signal, hooks: { beforeSpawn: opts.hooks?.beforeSpawn, onSpawn: opts.hooks?.onSpawn, onUsage: opts.hooks?.onUsage },
   });
   const usage = usageOf(r);
   if (r.status === 'canceled' || r.status === 'interrupted') {

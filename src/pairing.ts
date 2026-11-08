@@ -3,6 +3,7 @@ import type { Db } from './db.ts';
 import { tx } from './transaction.ts';
 import type { Coordinator, ClaimOwner } from './coordinator.ts';
 import type { Task, Run } from './types.ts';
+import { WORKER_ACTIVE_STATUSES, WORKER_FINALIZE_STATUSES } from './worker-policy.ts';
 
 /** Append to db.ts MIGRATIONS. Constructors and request handlers never create tables. */
 export const migrationDDL = `
@@ -196,24 +197,24 @@ function expandedTask(coord: Coordinator, who: WorkerIdentity, value: unknown): 
   }
   return t;
 }
-function owner(who: WorkerIdentity, value: unknown): ClaimOwner & { generation: number } {
+function owner(who: WorkerIdentity, value: unknown, statuses = WORKER_ACTIVE_STATUSES): ClaimOwner & { generation: number } {
   const o = record(value); const generation = integer(o.generation);
   if (o.assignee !== `machine:${who.machineId}`) fail();
-  // Caller-controlled statuses must never widen a lifecycle fence to canceled/finished claims.
+  // The method policy, shared with dispatch, determines the fence.
   if (o.statuses !== undefined && (!Array.isArray(o.statuses) || !o.statuses.length ||
-      o.statuses.some(s => !['running', 'verifying', 'ready'].includes(String(s))))) fail();
-  return { generation, assignee: o.assignee, statuses: ['running', 'verifying', 'ready'] };
+      o.statuses.some(s => !statuses.includes(s as Task['status'])))) fail();
+  return { generation, assignee: o.assignee, statuses };
 }
-function currentTask(coord: Coordinator, who: WorkerIdentity, value: unknown, claim: unknown): Task {
-  const t = task(coord, who, value); const o = owner(who, claim);
+function currentTask(coord: Coordinator, who: WorkerIdentity, value: unknown, claim: unknown, statuses = WORKER_ACTIVE_STATUSES): Task {
+  const t = task(coord, who, value); const o = owner(who, claim, statuses);
   if (t.machine_id !== who.machineId) fail();
   coord.assertTaskOwner(t.id, o); return t;
 }
-function ownRun(coord: Coordinator, who: WorkerIdentity, runId: unknown, claim: unknown, taskId?: unknown, historical = false): Run {
-  const r = coord.getRun(id(runId)); const o = owner(who, claim);
+function ownRun(coord: Coordinator, who: WorkerIdentity, runId: unknown, claim: unknown, taskId?: unknown, historical = false, statuses = WORKER_ACTIVE_STATUSES): Run {
+  const r = coord.getRun(id(runId)); const o = owner(who, claim, statuses);
   if (!r || r.machine_id !== who.machineId || r.generation !== o.generation || (taskId !== undefined && r.task_id !== taskId)) fail();
   task(coord, who, r.task_id);
-  if (!historical) currentTask(coord, who, r.task_id, claim);
+  if (!historical) currentTask(coord, who, r.task_id, claim, statuses);
   return r;
 }
 const TASK_PATCH = new Set(['status', 'attempts', 'tier', 'branch', 'worktree', 'base_sha', 'head_sha', 'lease_until',
@@ -257,8 +258,10 @@ export function authorizeWorkerRpc(coord: Coordinator, who: WorkerIdentity, meth
       if (!Array.isArray(p.running) || p.running.length > 50) fail();
       for (const raw of p.running) {
         const r = record(raw); const o = { generation: r.generation, assignee: `machine:${who.machineId}` };
-        currentTask(coord, who, r.taskId, o);
-        if (r.runId !== undefined && r.runId !== null) ownRun(coord, who, r.runId, o, r.taskId);
+        // Stale claims must not prevent this machine's other leases from renewing.
+        // Dispatch renews each generation independently and returns per-entry controls.
+        task(coord, who, r.taskId); owner(who, o);
+        if (r.runId !== undefined && r.runId !== null) ownRun(coord, who, r.runId, o, r.taskId, true);
       }
       return;
     }
@@ -276,17 +279,17 @@ export function authorizeWorkerRpc(coord: Coordinator, who: WorkerIdentity, meth
       if (p.machineId !== who.machineId) fail();
       currentTask(coord, who, p.taskId, p.owner); return;
     case 'run.update':
-      ownRun(coord, who, p.runId, p.owner);
+      ownRun(coord, who, p.runId, p.owner, undefined, false, WORKER_FINALIZE_STATUSES);
       if (Object.keys(record(p.patch)).some(key => !RUN_PATCH.has(key))) fail();
       return;
     case 'run.log':
-      ownRun(coord, who, p.runId, p.owner); return;
+      ownRun(coord, who, p.runId, p.owner, undefined, false, WORKER_FINALIZE_STATUSES); return;
     case 'task.usage':
       currentTask(coord, who, p.id, p.owner); ownRun(coord, who, p.runId, p.owner, p.id); return;
     case 'task.touched': case 'lesson.outcome':
       currentTask(coord, who, p.taskId, p.owner); ownRun(coord, who, p.runId, p.owner, p.taskId); return;
     case 'task.event':
-      project(who, p.projectId); currentTask(coord, who, p.taskId, p.owner); return;
+      project(who, p.projectId); currentTask(coord, who, p.taskId, p.owner, WORKER_FINALIZE_STATUSES); return;
     case 'run.exit':
       if (p.reaped !== true) fail();
       ownRun(coord, who, p.runId, p.owner, p.taskId, true); return;

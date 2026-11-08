@@ -19,6 +19,9 @@ export interface RegistryEntry {
   role: string | null;
   phase: string | null;
   effort: string | null;
+  effortSource?: string | null;
+  launchFingerprint?: string | null;
+  usage?: { costUsd: number; tokensIn: number; tokensOut: number; provenance: string };
   cache: { readTokens: number | null; writeTokens: number | null };
   machineId: string | null;
   machineName: string | null;
@@ -63,6 +66,7 @@ interface RunRow {
   started_at: number; ended_at: number | null; project_id: string; task_generation: number;
   task_assignee: string | null; task_machine: string | null; task_status: string; task_lease: number | null;
   phase: string | null; effort: string | null; cache_read_tokens: number | null; cache_write_tokens: number | null;
+  effort_source: string | null; launch_fingerprint: string | null; cost_usd: number; tokens_in: number; tokens_out: number; usage_provenance: string;
 }
 function number(value: unknown): number | null {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
@@ -83,9 +87,11 @@ function bounded(value: number, min: number, max: number): number {
   return value;
 }
 const RUN_COLUMNS = `SELECT r.id, r.task_id, r.generation, r.machine_id, r.agent, r.model, r.role,
-  r.pid, r.proc_started, r.status, r.last_activity, r.started_at, r.ended_at, r.phase, r.effort, r.cache_read_tokens, r.cache_write_tokens, t.project_id,
+  r.pid, r.proc_started, r.status, r.last_activity, r.started_at, r.ended_at, r.phase, r.effort, r.effort_source, r.launch_fingerprint,
+  r.cost_usd, r.tokens_in, r.tokens_out, r.usage_provenance, r.cache_read_tokens, r.cache_write_tokens, COALESCE(t.project_id, p.id) AS project_id,
   t.generation AS task_generation, t.assignee AS task_assignee, t.machine_id AS task_machine,
-  t.status AS task_status, t.lease_until AS task_lease FROM runs r JOIN tasks t ON t.id = r.task_id`;
+  t.status AS task_status, t.lease_until AS task_lease FROM runs r LEFT JOIN tasks t ON t.id = r.task_id
+  LEFT JOIN projects p ON r.role = 'plan' AND r.task_id = 'plan:' || p.id`;
 
 /** Database-only projection for one personal hub. No process scans, native polling, file reads or host discovery.
  * Live runs are deliberately uncapped so concurrent review rows cannot disappear behind a history limit.
@@ -101,7 +107,7 @@ export function buildRegistry(db: Db, options: {
   const inventoryLimit = bounded(options.inventoryLimit ?? 500, 1, 2000);
   const projectId = options.projectId ?? null;
   if (projectId !== null && !/^[A-Za-z0-9][A-Za-z0-9:_.-]{0,199}$/.test(projectId)) throw new Error('Invalid registry project');
-  const filter = projectId === null ? '' : ' AND t.project_id = ?';
+  const filter = projectId === null ? '' : ' AND COALESCE(t.project_id, p.id) = ?';
   const args = projectId === null ? [] : [projectId];
   const live = db.prepare(`${RUN_COLUMNS} WHERE r.status = 'running'${filter} ORDER BY r.started_at DESC, r.id`)
     .all(...args) as unknown as RunRow[];
@@ -113,9 +119,9 @@ export function buildRegistry(db: Db, options: {
   // Load only associated machines for a project, and never emit a machine's repos or other project names.
   const machines = db.prepare(`SELECT id, name, info, last_seen FROM machines
     ${projectId === null ? '' : `WHERE id IN (SELECT machine_id FROM sessions WHERE project_id = ?
-      UNION SELECT r.machine_id FROM runs r JOIN tasks t ON t.id = r.task_id WHERE t.project_id = ?)
+      UNION SELECT r.machine_id FROM runs r WHERE r.task_id IN (SELECT id FROM tasks WHERE project_id = ?) OR r.task_id = 'plan:' || ?)
       OR EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(info) THEN info ELSE '{}' END, '$.repos') WHERE key = ?)`}
-    ORDER BY last_seen DESC, id LIMIT ?`).all(...(projectId === null ? [] : [projectId, projectId, projectId]), inventoryLimit + 1) as unknown as MachineRow[];
+    ORDER BY last_seen DESC, id LIMIT ?`).all(...(projectId === null ? [] : [projectId, projectId, projectId, projectId]), inventoryLimit + 1) as unknown as MachineRow[];
   const machineMap = new Map(machines.slice(0, inventoryLimit).map(m => [m.id, m]));
   // A live run's machine stays observable even when passive inventory exceeds its cap.
   const machineById = (machineId: string | null): MachineRow | null => {
@@ -138,19 +144,22 @@ export function buildRegistry(db: Db, options: {
     const lastSeenAt = machine ? number(machine.last_seen) : null;
     const f = freshness(lastSeenAt, now, staleAfter);
     const active = r.status === 'running';
-    const current = r.generation > 0 && r.generation === r.task_generation && r.task_machine === r.machine_id &&
+    const planning = r.role === 'plan' && !!r.project_id;
+    const current = planning || (r.generation > 0 && r.generation === r.task_generation && r.task_machine === r.machine_id &&
       r.task_assignee === `machine:${r.machine_id}` && ['running', 'verifying', 'ready'].includes(r.task_status) &&
-      (r.task_status === 'ready' || (r.task_lease !== null && r.task_lease > now));
+      (r.task_status === 'ready' || (r.task_lease !== null && r.task_lease > now)));
     const pid = number(r.pid);
     const processStartedAt = number(r.proc_started);
     entries.push({ id: `run:${r.id}`, source: 'run', state: active && (!current || f.freshness !== 'fresh') ? 'stale' : 'managed',
       agent: text(r.agent), model: text(r.model), role: text(r.role), phase: text(r.phase), effort: text(r.effort),
+      effortSource: text(r.effort_source), launchFingerprint: text(r.launch_fingerprint),
+      usage: { costUsd: r.cost_usd, tokensIn: r.tokens_in, tokensOut: r.tokens_out, provenance: r.usage_provenance },
       cache: { readTokens: number(r.cache_read_tokens), writeTokens: number(r.cache_write_tokens) }, ...base(r.machine_id), projectId: r.project_id,
-      taskId: r.task_id, runId: r.id, sessionId: null, generation: number(r.generation),
+      taskId: planning ? null : r.task_id, runId: r.id, sessionId: null, generation: number(r.generation),
       pid: pid !== null && pid > 0 ? pid : null, processStartedAt,
       status: r.status, startedAt: number(r.started_at), endedAt: number(r.ended_at),
       lastActivity: text(r.last_activity), lastSeenAt, ...f,
-      capabilities: { inspect: true, requestStop: active && current && f.freshness === 'fresh' && pid !== null && pid > 0 && processStartedAt !== null,
+      capabilities: { inspect: true, requestStop: !planning && active && current && f.freshness === 'fresh' && pid !== null && pid > 0 && processStartedAt !== null,
         nativeStop: false } });
   }
   for (const s of sessions.slice(0, inventoryLimit)) {
@@ -185,6 +194,6 @@ export function buildRegistry(db: Db, options: {
   return { generatedAt: now, projectId, entries,
     coverage: { liveRuns: live.length, recentRuns: recent.length, historyLimit,
       sessionsTruncated: sessions.length > inventoryLimit, machinesTruncated: machines.length > inventoryLimit,
-      unknownSignals: ['native process liveness', 'native session model and effort', 'current run phase', 'cache read/write tokens',
+      unknownSignals: ['native process liveness', 'native session model and effort', 'unreported provider cache counters and cache residency',
         'per-run last activity timestamp', 'unbridged native hosts', 'native stop capability'] } };
 }

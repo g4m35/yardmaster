@@ -3,6 +3,7 @@ import { paths } from './paths.ts';
 import { migrationDDL as fleetMigrationDDL } from './pairing.ts';
 import { registryMigrationDDL } from './registry.ts';
 import { tx } from './transaction.ts';
+import { budgetMigrationDDL } from './budgets.ts';
 export { tx } from './transaction.ts';
 
 const MIGRATIONS: string[] = [
@@ -117,6 +118,7 @@ const MIGRATIONS: string[] = [
   UPDATE runs SET accounted_cost = cost_usd, accounted_in = tokens_in, accounted_out = tokens_out,
     usage_provenance = CASE WHEN cost_usd > 0 THEN CASE WHEN cost_estimated = 1 THEN 'estimated' ELSE 'actual' END ELSE 'unknown' END;
   `,
+  budgetMigrationDDL,
 ];
 
 export type Db = DatabaseSync;

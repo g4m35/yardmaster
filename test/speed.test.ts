@@ -107,7 +107,7 @@ test('Claude Code runs lean by default: no MCP, skills or optional tools; effort
   const settings = defaultAgentSettings({ models: { cheap: 'haiku' } });
   const spec = claude.build({ prompt: 'x', cwd: '/w', model: 'haiku', settings, tier: 'cheap', budgetUsd: 2.5, session: { pin: 'abc' } });
   const a = spec.args.join(' ');
-  for (const f of ['--strict-mcp-config', '--disable-slash-commands', '--exclude-dynamic-system-prompt-sections', '--session-id abc', '--effort low', '--max-budget-usd 2.50']) assert.ok(a.includes(f), `missing ${f} in ${a}`);
+  for (const f of ['--strict-mcp-config', '--disable-slash-commands', '--exclude-dynamic-system-prompt-sections', '--session-id abc', '--effort low', '--max-budget-usd 2.5']) assert.ok(a.includes(f), `missing ${f} in ${a}`);
   assert.ok(a.includes(`--tools ${CLAUDE_CODING_TOOLS.join(',')}`));
   assert.equal(spec.env?.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, '1');
   const full = claude.build({ prompt: 'x', cwd: '/w', model: null, settings: defaultAgentSettings({ context: 'full', effort: { strong: '' } }), tier: 'strong', session: { resume: 'prev' } });

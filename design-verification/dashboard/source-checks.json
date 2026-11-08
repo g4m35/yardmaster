@@ -66,8 +66,9 @@
     }
   ],
   "renderedVerification": {
-    "result": "unverified",
-    "reason": "Parent owns isolated fake-hub Browserbase capture and final gates. No browser was launched and no screenshot or native keyboard result is claimed."
+    "result": "partial-pass",
+    "evidence": "rendered-checks.json",
+    "scope": "Isolated contract fixture, desktop1440 and mobile390; keyboard modal wrapping/Escape/focus; SSE draft and caret preservation; registry failure; stop-request acknowledgment; reduced motion. Not real hub browser integration or full onboarding/auth/project-switch coverage."
   },
   "libraryQuota": {
     "result": "not-applicable",
