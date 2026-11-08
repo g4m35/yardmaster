@@ -22,11 +22,21 @@ async function fixture() {
   const coord = new Coordinator(openDb(join(box.home, 'recovery.db')));
   const project = await coord.registerProject(box.repo);
   const client = localClient(buildMethods(coord, { machineId: 'm-hub' }));
+  const channel = { hub: 'http://fixture.local', projectIds: [project.id] };
+  const journals: WorkerJournal[] = [];
+  const workers: WorkerLoop[] = [];
+  const journal = () => { const value = new WorkerJournal('m-worker', channel); journals.push(value); return value; };
+  const stopControllers = async () => {
+    for (const worker of workers) { worker.stopAll('shutdown', 'fixture controller stopped'); for (const [id, active] of worker.active) if (!active.stop) worker.active.delete(id); }
+    await Promise.all(workers.map(worker => worker.drain()));
+    for (const value of journals) value.release();
+  };
+  const close = async () => { await stopControllers(); coord.db.close(); };
   const task = coord.addTasks(project.id, [{ title: 'Recover remote work safely', prompt: '@mock write result.txt correct', agent: 'mock' }], 'test').created[0]!;
   const claimed = coord.claimNext({ machineId: 'm-worker', agents: ['mock'], repos: { [project.id]: box.repo }, runningByAgent: {} })!.task;
   const owner = { generation: claimed.generation, assignee: claimed.assignee! };
-  const worker = (transport: BranchTransport, api = client) => new WorkerLoop({ client: api, machineId: 'm-worker', repos: () => ({ [project.id]: box.repo }), agents: () => ['mock'], localConfig: () => loadConfig(), verifySlots: new Semaphore(1), transport });
-  return { ...box, coord, project, client, task: claimed, owner, worker };
+  const worker = (transport: BranchTransport, api = client) => { const value = new WorkerLoop({ hub: channel.hub, client: api, machineId: 'm-worker', repos: () => ({ [project.id]: box.repo }), agents: () => ['mock'], localConfig: () => loadConfig(), verifySlots: new Semaphore(1), transport }); workers.push(value); return value; };
+  return { channel, journal, stopControllers, close, ...box, coord, project, client, task: claimed, owner, worker };
 }
 const noopTransport: BranchTransport = { async fetchBase() {}, async uploadBranch(task) { return { head: task.head_sha! }; } };
 
@@ -34,25 +44,26 @@ test('expired remote leases recover idle phases with durable no-launch proof', a
   for (const phase of ['prepare', 'route', 'collect', 'verify', 'review_wait']) {
     const s = await fixture();
     try {
-      const journal = new WorkerJournal('m-worker');
+      const journal = s.journal();
       const api = journal.wrap(s.client);
       const runId = await api['run.start']({ taskId: s.task.id, machineId: 'm-worker', agent: 'mock', logPath: '', owner: s.owner });
       await api['run.update']({ runId, owner: s.owner, patch: { phase, pid: null } });
       s.coord.updateTask(s.task.id, { lease_until: Date.now() - 1 });
       await recover(s.coord, 'm-hub', new Set());
       assert.equal(s.coord.getRun(runId)!.status, 'cleanup_failed');
-      assert.equal((await new WorkerJournal('m-worker').recover(s.client)).size, 0, phase);
+      journal.release();
+      assert.equal((await s.journal().recover(s.client)).size, 0, phase);
       assert.equal(s.coord.getTask(s.task.id)!.status, 'queued', phase);
       assert.equal(s.coord.getTask(s.task.id)!.generation, s.task.generation, phase);
       assert.equal(listHeld(s.coord.db).length, 0, phase);
-    } finally { s.coord.db.close(); }
+    } finally { await s.close(); }
   }
 });
 
 test('a waking runner keeps reaped identity when its lease expires before final acknowledgment', async () => {
   const s = await fixture(); const child = await sleeper();
   try {
-    const journal = new WorkerJournal('m-worker'); const api = journal.wrap(s.client);
+    const journal = s.journal(); const api = journal.wrap(s.client);
     const runId = await api['run.start']({ taskId: s.task.id, machineId: 'm-worker', agent: 'mock', logPath: '', owner: s.owner });
     await api['run.update']({ runId, owner: s.owner, patch: { phase: 'agent', pid: child.pid, proc_started: await processStartTime(child.pid!) } });
     s.coord.updateTask(s.task.id, { lease_until: Date.now() - 1 });
@@ -64,7 +75,7 @@ test('a waking runner keeps reaped identity when its lease expires before final 
     assert.equal(s.coord.getTask(s.task.id)!.status, 'queued');
     assert.equal(listHeld(s.coord.db).length, 0);
     assert.equal(Object.keys(journal.runs).length, 0);
-  } finally { await terminateOwnedGroup(child.pid!, { graceMs: 20 }); s.coord.db.close(); }
+  } finally { await terminateOwnedGroup(child.pid!, { graceMs: 20 }); await s.close(); }
 });
 
 test('lost-machine attestation is owner-only, requires stale connection and never retries work', async () => {
@@ -82,7 +93,7 @@ test('lost-machine attestation is owner-only, requires stale connection and neve
     assert.equal(s.coord.getRun(run.id)!.status, 'stopped');
     assert.equal(listHeld(s.coord.db).length, 0);
     assert.ok(s.coord.eventsSince(0, s.project.id, 100).some(event => event.kind === 'process.owner_confirmed_stopped'));
-  } finally { s.coord.db.close(); }
+  } finally { await s.close(); }
 });
 
 async function sleeper() {
@@ -94,26 +105,27 @@ async function sleeper() {
 for (const wrongIdentity of [false, true]) test(`returning worker checks its recorded child after owner attestation (wrong identity=${wrongIdentity})`, async () => {
   const s = await fixture(); const child = await sleeper();
   try {
-    const journal = new WorkerJournal('m-worker'); const api = journal.wrap(s.client);
+    const journal = s.journal(); const api = journal.wrap(s.client);
     const runId = await api['run.start']({ taskId: s.task.id, machineId: 'm-worker', agent: 'mock', logPath: '', owner: s.owner });
     const startedAt = (await processStartTime(child.pid!))! - (wrongIdentity ? 60_000 : 0);
     await api['run.update']({ runId, owner: s.owner, patch: { phase: 'agent', pid: child.pid!, proc_started: startedAt } });
     s.coord.updateTask(s.task.id, { lease_until: Date.now() - 1 });
     await recover(s.coord, 'm-hub', new Set());
     await s.client['task.control']({ id: s.task.id, action: 'confirm-stopped', remote: true, note: 'Remote worker was inspected and all children were stopped.' });
-    const held = await new WorkerJournal('m-worker').recover(s.client);
+    journal.release();
+    const held = await s.journal().recover(s.client);
     assert.equal(held.has(s.task.id), wrongIdentity);
     assert.equal(groupAlive(child.pid!), wrongIdentity);
-    assert.equal(Object.keys(new WorkerJournal('m-worker').runs).length, wrongIdentity ? 1 : 0);
+    assert.equal(Object.keys(s.journal().runs).length, wrongIdentity ? 1 : 0);
     assert.equal(s.coord.getTask(s.task.id)!.status, 'needs_human', 'recovery never silently retries an attested task');
-  } finally { await terminateOwnedGroup(child.pid!, { graceMs: 20 }); s.coord.db.close(); }
+  } finally { await terminateOwnedGroup(child.pid!, { graceMs: 20 }); await s.close(); }
 });
 
 test('remote restart reaps recorded TERM-resistant orphan before its first claim and clears run hold', async () => {
   const s = await fixture();
   const child = await sleeper();
   try {
-    const journal = new WorkerJournal('m-worker');
+    const journal = s.journal();
     const api = journal.wrap(s.client);
     const runId = await api['run.start']({ taskId: s.task.id, machineId: 'm-worker', agent: 'mock', logPath: '', owner: s.owner });
     const startedAt = await processStartTime(child.pid!);
@@ -124,18 +136,20 @@ test('remote restart reaps recorded TERM-resistant orphan before its first claim
       if (key === 'worker.claim') return async () => { claims++; assert.equal(groupAlive(child.pid!), false); assert.equal(s.coord.getRun(runId)!.status, 'stopped'); return null; };
       return target[key];
     } });
+    await s.stopControllers();
     await s.worker(noopTransport, client).tick();
     assert.equal(claims, 1);
     assert.equal(groupAlive(child.pid!), false);
-    assert.deepEqual(new WorkerJournal('m-worker').runs, {});
-  } finally { await terminateOwnedGroup(child.pid!, { graceMs: 5 }); s.coord.db.close(); }
+    assert.deepEqual(s.journal().runs, {});
+  } finally { await terminateOwnedGroup(child.pid!, { graceMs: 5 }); await s.close(); }
 });
 
 for (const identity of ['unknown', 'recycled']) test(`${identity} process identity is held locally, never killed or offered in a new claim`, async () => {
   const s = await fixture();
   const child = await sleeper();
   try {
-    const journal = new WorkerJournal('m-worker');
+    const journal = s.journal();
+    await journal.acquire(s.client);
     journal.runs['r-unknown'] = { runId: 'r-unknown', taskId: s.task.id, owner: s.owner, worktree: null, pid: child.pid!, startedAt: identity === 'unknown' ? null : (await processStartTime(child.pid!))! - 60_000 };
     journal.save();
     let excluded: string[] = [];
@@ -143,21 +157,22 @@ for (const identity of ['unknown', 'recycled']) test(`${identity} process identi
       if (key === 'worker.claim') return async (params: Parameters<Client['worker.claim']>[0]) => { excluded = params.activeTaskIds ?? []; return null; };
       return target[key];
     } });
+    await s.stopControllers();
     await s.worker(noopTransport, client).tick();
     assert.ok(excluded.includes(s.task.id));
     assert.equal(groupAlive(child.pid!), true);
-    assert.ok(new WorkerJournal('m-worker').runs['r-unknown']);
-  } finally { await terminateOwnedGroup(child.pid!, { graceMs: 5 }); s.coord.db.close(); }
+    assert.ok(s.journal().runs['r-unknown']);
+  } finally { await terminateOwnedGroup(child.pid!, { graceMs: 5 }); await s.close(); }
 });
 
 test('journal writes PID before registration RPC and retains spawning uncertainty', async () => {
   const s = await fixture();
   try {
     let runId = '';
-    const journal = new WorkerJournal('m-worker');
+    const journal = s.journal();
     const client = new Proxy(s.client, { get(target, key: keyof Client) {
       if (key === 'run.update') return async (p: Parameters<Client['run.update']>[0]) => {
-        assert.equal(new WorkerJournal('m-worker').runs[p.runId]!.pid, 456789);
+        assert.equal(s.journal().runs[p.runId]!.pid, 456789);
         throw new Error('offline');
       };
       return target[key];
@@ -165,18 +180,20 @@ test('journal writes PID before registration RPC and retains spawning uncertaint
     const api = journal.wrap(client);
     runId = await api['run.start']({ taskId: s.task.id, machineId: 'm-worker', agent: 'mock', logPath: '', owner: s.owner });
     await assert.rejects(api['run.update']({ runId, owner: s.owner, patch: { pid: 456789, proc_started: Date.now() } }), /offline/);
-    const restart = new WorkerJournal('m-worker');
+    journal.release();
+    const restart = s.journal();
+    await restart.acquire(s.client);
     restart.runs[runId]!.pid = null; restart.runs[runId]!.phase = 'agent:spawning'; restart.save();
     assert.ok((await restart.recover(s.client)).has(s.task.id));
     const file = join(s.home, sh(s.home, 'ls', []).split('\n').find(n => n.startsWith('worker-'))!);
     assert.equal(statSync(file).mode & 0o777, 0o600);
-  } finally { s.coord.db.close(); }
+  } finally { await s.close(); }
 });
 
 test('final sequenced usage survives restart and replays exactly once before exit acknowledgment', async () => {
   const s = await fixture();
   try {
-    const journal = new WorkerJournal('m-worker');
+    const journal = s.journal();
     let fail = true;
     const client = new Proxy(s.client, { get(target, key: keyof Client) {
       if (key === 'run.usage') return async (p: Parameters<Client['run.usage']>[0]) => { if (fail) throw new Error('network'); return target[key](p); };
@@ -189,12 +206,13 @@ test('final sequenced usage survives restart and replays exactly once before exi
     await api['run.usage']({ runId, taskId: s.task.id, owner: s.owner, sequence: 2, usage });
     await assert.rejects(api['run.exit']({ runId, taskId: s.task.id, owner: s.owner, reaped: true }), /network/);
     fail = false;
-    assert.equal((await new WorkerJournal('m-worker').recover(s.client)).size, 0);
+    journal.release();
+    assert.equal((await journal.recover(s.client)).size, 0);
     await s.client['run.usage']({ runId, taskId: s.task.id, owner: s.owner, sequence: 2, usage });
     assert.equal(s.coord.getTask(s.task.id)!.cost_usd, 0.5);
     assert.equal(s.coord.getRun(runId)!.usage_seq, 2);
-    assert.deepEqual(new WorkerJournal('m-worker').runs, {});
-  } finally { s.coord.db.close(); }
+    assert.deepEqual(s.journal().runs, {});
+  } finally { await s.close(); }
 });
 
 async function readyArtifact(s: Awaited<ReturnType<typeof fixture>>) {
@@ -205,12 +223,13 @@ async function readyArtifact(s: Awaited<ReturnType<typeof fixture>>) {
   writeFileSync(join(path, 'result.txt'), 'accepted');
   sh(path, 'git', ['add', '-A']); sh(path, 'git', ['commit', '-qm', 'accepted']);
   const head = sh(path, 'git', ['rev-parse', 'HEAD']);
-  const journal = new WorkerJournal('m-worker');
+  const journal = s.journal();
   const api = journal.wrap(s.client, { repo: s.repo, branch: s.task.branch!, base });
   const runId = await api['run.start']({ taskId: s.task.id, machineId: 'm-worker', agent: 'mock', logPath: '', owner: s.owner });
   await api['run.update']({ runId, owner: s.owner, patch: { status: 'done', pid: null, phase: 'prepare' } });
   await api['run.exit']({ runId, taskId: s.task.id, owner: s.owner, reaped: true, noLaunchPhase: 'prepare' });
   await api['task.update']({ id: s.task.id, owner: s.owner, patch: { status: 'ready', head_sha: head, base_sha: base, worktree: path, ready_at: Date.now(), lease_until: null } });
+  journal.release();
   return { path, head, base };
 }
 
@@ -222,14 +241,16 @@ test('ready artifact is durable before ready RPC; transient upload retries acros
     const transport: BranchTransport = { async fetchBase() {}, async uploadBranch(task) { calls++; assert.equal(task.head_sha, head); if (calls === 1) throw new Error('temporary network failure'); return { head }; } };
     await s.worker(transport).recoverLocal();
     assert.equal(s.coord.getTask(s.task.id)!.status, 'ready');
-    const saved = new WorkerJournal('m-worker');
+    await s.stopControllers();
+    const saved = s.journal();
+    await saved.acquire(s.client);
     assert.equal(saved.artifacts[s.task.id]!.failures, 1);
-    saved.artifacts[s.task.id]!.retryAt = 0; saved.save();
+    saved.artifacts[s.task.id]!.retryAt = 0; saved.save(); saved.release();
     await s.worker(transport).recoverLocal();
     assert.equal(calls, 2);
-    assert.equal(new WorkerJournal('m-worker').artifacts[s.task.id]!.uploaded, true);
+    assert.equal(s.journal().artifacts[s.task.id]!.uploaded, true);
     assert.equal(s.coord.runsFor(s.task.id).length, 1, 'upload must not launch another model attempt');
-  } finally { s.coord.db.close(); }
+  } finally { await s.close(); }
 });
 
 test('canceling during upload aborts within heartbeat while another claim still renews', async () => {
@@ -249,7 +270,7 @@ test('canceling during upload aborts within heartbeat while another claim still 
     await recovering;
     assert.equal(signal!.aborted, true);
     assert.ok(s.coord.getTask(second.id)!.lease_until! > Date.now());
-  } finally { s.coord.db.close(); }
+  } finally { await s.close(); }
 });
 
 for (const newCommit of [false, true]) test(`real single merge cleanup ${newCommit ? 'preserves later local commit' : 'removes accepted worker artifact'}`, async () => {
@@ -267,7 +288,7 @@ for (const newCommit of [false, true]) test(`real single merge cleanup ${newComm
     }
     await s.worker(noopTransport).tidyLocal();
     assert.equal(existsSync(path), newCommit);
-  } finally { await integrator.stop(); s.coord.db.close(); }
+  } finally { await integrator.stop(); await s.close(); }
 });
 
 test('upload retry budget is bounded and never invokes a new agent', async () => {
@@ -277,13 +298,14 @@ test('upload retry budget is bounded and never invokes a new agent', async () =>
     let calls = 0;
     const transport: BranchTransport = { async fetchBase() {}, async uploadBranch() { calls++; throw new Error('offline'); } };
     for (let i = 0; i < 7; i++) {
-      const journal = new WorkerJournal('m-worker'); journal.artifacts[s.task.id]!.retryAt = 0; journal.save();
+      await s.stopControllers();
+      const journal = s.journal(); await journal.acquire(s.client); journal.artifacts[s.task.id]!.retryAt = 0; journal.save(); journal.release();
       await s.worker(transport).recoverLocal();
     }
     assert.equal(calls, 6);
     assert.equal(s.coord.getTask(s.task.id)!.status, 'needs_human');
     assert.equal(s.coord.runsFor(s.task.id).length, 1, 'upload must not launch another model attempt');
-  } finally { s.coord.db.close(); }
+  } finally { await s.close(); }
 });
 
 test('replacement generation retires stale pending upload without blocking a later claim', async () => {
@@ -297,8 +319,8 @@ test('replacement generation retires stale pending upload without blocking a lat
     let calls = 0;
     await s.worker({ async fetchBase() {}, async uploadBranch() { calls++; throw new Error('must not upload canceled branch'); } }).recoverLocal();
     assert.equal(calls, 0);
-    assert.equal(new WorkerJournal('m-worker').artifacts[s.task.id]!.retired, true);
-  } finally { s.coord.db.close(); }
+    assert.equal(s.journal().artifacts[s.task.id]!.retired, true);
+  } finally { await s.close(); }
 });
 
 test('real remote mock attempt journals and uploads its ready artifact', async () => {
@@ -315,26 +337,26 @@ test('real remote mock attempt journals and uploads its ready artifact', async (
       return target[key];
     } });
     let uploads = 0;
-    const worker = s.worker({ async fetchBase() {}, async uploadBranch(task) { uploads++; assert.equal(new WorkerJournal('m-worker').artifacts[task.id]!.head, task.head_sha); return { head: task.head_sha! }; } }, client);
+    const worker = s.worker({ async fetchBase() {}, async uploadBranch(task) { uploads++; assert.equal(s.journal().artifacts[task.id]!.head, task.head_sha); return { head: task.head_sha! }; } }, client);
     await worker.tick();
     await until(() => uploads, value => value === 1);
     await worker.drain();
     assert.equal(s.coord.getTask(s.task.id)!.status, 'ready');
-    assert.deepEqual(new WorkerJournal('m-worker').runs, {});
-  } finally { s.coord.db.close(); }
+    assert.deepEqual(s.journal().runs, {});
+  } finally { await s.close(); }
 });
 
 test('explicit owner attestation retires the matching spawning intent while task status alone cannot', async () => {
   const s = await fixture();
   try {
-    const journal = new WorkerJournal('m-worker');
+    const journal = s.journal();
     const api = journal.wrap(s.client);
     const runId = await api['run.start']({ taskId: s.task.id, machineId: 'm-worker', agent: 'mock', logPath: '', owner: s.owner });
     await api['run.update']({ runId, owner: s.owner, patch: { phase: 'agent:spawning' } });
     s.coord.updateRun(runId, { status: 'stopped', pid: null, stop_reason: 'ordinary stop' });
-    assert.ok((await new WorkerJournal('m-worker').recover(s.client)).has(s.task.id));
+    assert.ok((await journal.recover(s.client)).has(s.task.id));
     s.coord.updateRun(runId, { stop_reason: 'Owner you attested stopped: manually inspected process table' });
-    assert.equal((await new WorkerJournal('m-worker').recover(s.client)).size, 0);
-    assert.deepEqual(new WorkerJournal('m-worker').runs, {});
-  } finally { s.coord.db.close(); }
+    assert.equal((await journal.recover(s.client)).size, 0);
+    assert.deepEqual(s.journal().runs, {});
+  } finally { await s.close(); }
 });

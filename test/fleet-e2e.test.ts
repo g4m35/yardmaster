@@ -51,13 +51,14 @@ async function fleet() {
       assert.equal(channel.identity.kind, 'worker');
       const local = resolveConfig([loadConfig(), { worktreeRoot: join(box.root, `machine-${suffix}-worktrees`) }]);
       const transport = httpTransport(url, paired.token, machineId);
+      const journalChannel = { hub: url, projectIds: [project.id] };
       const createWorker = (transfer: BranchTransport = transport, maxParallel = 1) => {
-        const worker = new WorkerLoop({ client: channel.client, machineId, name: `machine ${suffix}`, repos: () => ({ [project.id]: repo }),
+        const worker = new WorkerLoop({ hub: url, client: channel.client, machineId, name: `machine ${suffix}`, repos: () => ({ [project.id]: repo }),
           agents: () => ['mock'], localConfig: () => resolveConfig([local, { maxParallel }]), verifySlots: new Semaphore(1), transport: transfer });
         workers.push(worker);
         return worker;
       };
-      machines.push({ machineId, repo, token: paired.token, credentialId: paired.identity.credentialId, client: channel.client, transport, createWorker });
+      machines.push({ journalChannel, machineId, repo, token: paired.token, credentialId: paired.identity.credentialId, client: channel.client, transport, createWorker });
     }
     const pump = (worker: WorkerLoop) => {
       let pending = false;
@@ -137,17 +138,21 @@ test('real paired HTTP recovery survives sleep-past-lease and A to B to A owners
         assert.equal(claim?.task.id, task.id);
         const owner = { generation: claim!.task.generation, assignee: claim!.task.assignee! };
         generations.push(owner.generation);
-        const journal = new WorkerJournal(machine.machineId); const client = journal.wrap(machine.client);
+        const journal = new WorkerJournal(machine.machineId, machine.journalChannel); const client = journal.wrap(machine.client);
         const runId = await client['run.start']({ taskId: task.id, machineId: machine.machineId, agent: 'mock', logPath: '', owner });
         await client['run.update']({ runId, owner, patch: { phase, pid: null } });
         // A suspended machine sends no heartbeat; expire its stored lease without a 90-second test delay.
         f.hub.coord.updateTask(task.id, { lease_until: Date.now() - 1 });
         await recover(f.hub.coord, 'm-hub', new Set());
         assert.equal(f.hub.coord.getRun(runId)!.status, 'cleanup_failed');
-        assert.equal((await new WorkerJournal(machine.machineId).recover(machine.client)).size, 0);
+        journal.release();
+        const returningJournal = new WorkerJournal(machine.machineId, machine.journalChannel);
+        assert.equal((await returningJournal.recover(machine.client)).size, 0);
+        returningJournal.release();
         assert.equal(f.hub.coord.getTask(task.id)!.status, 'queued');
         assert.equal(listHeld(f.hub.coord.db).length, 0);
         await assert.rejects(client['task.update']({ id: task.id, owner, patch: { summary: 'stale owner must fail' } }));
+        journal.release();
       }
       const returning = await a.client['worker.claim']({ machineId: a.machineId, agents: ['mock'], repos: { [f.project.id]: a.repo } });
       assert.equal(returning?.task.id, task.id);
@@ -216,9 +221,9 @@ test('paired machines verify and integrate disjoint work, then fetch a dependenc
     assert.deepEqual(new Set(created.slice(0, 2).map(task => f.hub.coord.latestRun(task.id)!.machine_id)), new Set([a.machineId, b.machineId]));
     assert.equal(f.hub.coord.getTask(created[2]!.id)!.status, 'queued', 'dependent work waits for integration');
     for (const task of uploads.values()) {
-      const machine: { repo: string; machineId: string } = task.machine_id === a.machineId ? a : b;
+      const machine = task.machine_id === a.machineId ? a : b;
       assert.equal(sh(machine.repo, 'git', ['rev-parse', `refs/heads/${task.branch}`]), task.head_sha);
-      assert.equal(new WorkerJournal(machine.machineId).artifacts[task.id]!.head, task.head_sha);
+      assert.equal(new WorkerJournal(machine.machineId, machine.journalChannel).artifacts[task.id]!.head, task.head_sha);
       assert.ok(f.hub.coord.eventsSince(0, null, 100, task.id).some(event => event.kind === 'task.ready'));
     }
     release.release();
@@ -339,18 +344,20 @@ test('a paired worker reconnects and reuploads its durable verified branch witho
     await worker.tick();
     await until(() => worker.active.size === 0 && failures > 0, Boolean, 20_000, 'durable failed upload');
     worker.stopAll('shutdown', 'simulate worker restart');
+    await worker.drain();
     const before = f.hub.coord.runsFor(task.id).map(run => run.id);
     assert.equal(before.length, 1);
-    const journal = new WorkerJournal(a.machineId);
+    const journal = new WorkerJournal(a.machineId, a.journalChannel);
+    await journal.acquire(a.client);
     const artifact = journal.artifacts[task.id]!;
     assert.equal(artifact.uploaded, false);
     assert.ok(artifact.failures >= 1);
     assert.equal(sh(a.repo, 'git', ['rev-parse', artifact.branch]), artifact.head);
-    artifact.retryAt = 0; journal.save();
+    artifact.retryAt = 0; journal.save(); journal.release();
     await connectWorker({ hub: f.url, machineId: a.machineId, projectIds: [f.project.id], token: a.token });
     const restarted = a.createWorker();
     await restarted.recoverLocal();
-    assert.equal(new WorkerJournal(a.machineId).artifacts[task.id]!.uploaded, true);
+    assert.equal(new WorkerJournal(a.machineId, a.journalChannel).artifacts[task.id]!.uploaded, true);
     assert.equal((await settleTasks(f.hub.coord, [task.id], f.root, 15_000))[0]!.status, 'done');
     assert.deepEqual(f.hub.coord.runsFor(task.id).map(run => run.id), before);
     assert.equal(sh(f.repo, 'git', ['show', 'yardmaster/integration:recovered.txt']), 'durable');

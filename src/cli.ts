@@ -71,7 +71,7 @@ function parseArgs(argv: string[]): Args {
 }
 
 const SHORT: Record<string, string> = { f: 'follow', n: 'lines', y: 'yes', j: 'json', h: 'help' };
-const BOOLEAN_FLAGS = new Set(['confirm-stopped', 'remote', 'scan', 'dedupe', 'restore', 'purge', 'with-hooks', 'no-hooks', 'experimental', 'no-skill', 'now', 'version', 'follow', 'yes', 'json', 'help', 'all', 'dry-run', 'foreground', 'force', 'no-changes-ok', 'watch', 'with-hook', 'no-hub', 'open', 'draft', 'quiet', 'hooks-path']);
+const BOOLEAN_FLAGS = new Set(['confirm-stopped', 'remote', 'adopt-legacy-journal', 'scan', 'dedupe', 'restore', 'purge', 'with-hooks', 'no-hooks', 'experimental', 'no-skill', 'now', 'version', 'follow', 'yes', 'json', 'help', 'all', 'dry-run', 'foreground', 'force', 'no-changes-ok', 'watch', 'with-hook', 'no-hub', 'open', 'draft', 'quiet', 'hooks-path']);
 
 const flag = (a: Args, k: string) => (typeof a.flags[k] === 'string' ? (a.flags[k] as string) : undefined);
 const list = (a: Args, k: string) => flag(a, k)?.split(',').map((s) => s.trim()).filter(Boolean);
@@ -730,8 +730,9 @@ async function cmdWorker(a: Args) {
     if (identity.kind === 'worker') await client['task.list']({ projectId });
     else await client['project.resolve']({ projectId });
   }
+  if (a.flags['adopt-legacy-journal'] && identity.kind !== 'owner') die('Legacy adoption requires an explicit owner channel and all affected repos; scoped credentials remain restricted.');
   const loop = new WorkerLoop({
-    client, machineId: id, repos: () => repos, agents: () => detectAgents(loadConfig()), localConfig: () => loadConfig(),
+    hub, adoptLegacyJournal: Boolean(a.flags['adopt-legacy-journal']), client, machineId: id, repos: () => repos, agents: () => detectAgents(loadConfig()), localConfig: () => loadConfig(),
     transport: httpTransport(hub, token, id), verifySlots: new Semaphore(verifySlotsFor(loadConfig())),
   });
   await loop.heartbeat();

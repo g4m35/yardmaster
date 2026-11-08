@@ -8,6 +8,7 @@ import { type Adapter, type AgentEvent, WRITE_TOOL, arr, commonFailure, num, obj
 const toolEvent = (name: string, input: unknown): AgentEvent => ({ type: 'tool', name, input, write: WRITE_TOOL.test(name) });
 /** Cache-write tokens only when the CLI reported them: absent means unknown, never zero. */
 const cacheWrite = (v: unknown): { cacheWriteIn?: number } => (typeof v === 'number' && Number.isFinite(v) ? { cacheWriteIn: Math.max(0, v) } : {});
+const cacheRead = (v: unknown): { cachedIn?: number } => (typeof v === 'number' && Number.isFinite(v) ? { cachedIn: Math.max(0, v) } : {});
 
 export { DEFAULT_EFFORT };
 
@@ -88,7 +89,7 @@ export const claude: Adapter = {
         out.push({
           type: 'usage',
           tokensIn: num(u.input_tokens) + num(u.cache_creation_input_tokens),
-          cachedIn: num(u.cache_read_input_tokens),
+          ...cacheRead(u.cache_read_input_tokens),
           ...cacheWrite(u.cache_creation_input_tokens),
           tokensOut: num(u.output_tokens),
           cumulative: false,
@@ -104,7 +105,7 @@ export const claude: Adapter = {
       out.push({
         type: 'usage',
         tokensIn: num(u.input_tokens) + num(u.cache_creation_input_tokens),
-        cachedIn: num(u.cache_read_input_tokens),
+        ...cacheRead(u.cache_read_input_tokens),
         ...cacheWrite(u.cache_creation_input_tokens),
         tokensOut: num(u.output_tokens),
         costUsd: typeof j.total_cost_usd === 'number' ? j.total_cost_usd : undefined,
@@ -160,7 +161,7 @@ export const codex: Adapter = {
       case 'turn.completed': {
         const u = obj(j.usage);
         const cached = num(u.cached_input_tokens);
-        return [{ type: 'usage', tokensIn: Math.max(0, num(u.input_tokens) - cached), cachedIn: cached, tokensOut: num(u.output_tokens), cumulative: false }];
+        return [{ type: 'usage', tokensIn: Math.max(0, num(u.input_tokens) - cached), ...cacheRead(u.cached_input_tokens), tokensOut: num(u.output_tokens), cumulative: false }];
       }
       case 'turn.failed':
         return [{ type: 'error', text: str(obj(j.error).message) || 'turn failed' }];
@@ -203,7 +204,7 @@ export const opencode: Adapter = {
       const cache = obj(t.cache);
       // A missing cost stays absent (estimated later), not a recorded $0; a reported 0 is kept.
       return [{
-        type: 'usage', tokensIn: num(t.input) + num(cache.write), cachedIn: num(cache.read), ...cacheWrite(cache.write),
+        type: 'usage', tokensIn: num(t.input) + num(cache.write), ...cacheRead(cache.read), ...cacheWrite(cache.write),
         tokensOut: num(t.output) + num(t.reasoning), ...(typeof part.cost === 'number' && Number.isFinite(part.cost) ? { costUsd: part.cost } : {}), cumulative: false,
       }];
     }

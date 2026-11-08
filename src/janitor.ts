@@ -260,13 +260,18 @@ export async function runCleanup(coord: Coordinator, plan: CleanPlan): Promise<{
         case 'artifacts': {
           const wt = item.worktree!;
           const id = wt.split('/').pop()!;
-          const t = item.taskId ? coord.getTask(item.taskId) : coord.getTask(id);
-          if (item.taskId && (!t || t.generation !== item.generation)) throw new Error('Artifact owner changed; kept');
-          if (t && ['running', 'verifying', 'merging'].includes(t.status)) throw new Error('its task started running again; kept');
-          if (t && coord.db.prepare("SELECT 1 FROM runs WHERE task_id = ? AND status IN ('running','lost','cleanup_failed') LIMIT 1").get(t.id)) throw new Error('Process exit is unconfirmed; artifacts kept');
-          if (t && taskHasPendingUtilities(coord.db, t.id)) throw new Error('Utility exit is unconfirmed; artifacts kept');
+          const guard = () => {
+            const current = item.taskId ? coord.getTask(item.taskId) : coord.getTask(id);
+            if (item.taskId && (!current || current.project_id !== item.projectId || current.generation !== item.generation)) throw new Error('Artifact owner changed; kept');
+            if (current && ['running', 'verifying', 'merging'].includes(current.status)) throw new Error('its task started running again; kept');
+            if (current && coord.db.prepare("SELECT 1 FROM runs WHERE task_id = ? AND status IN ('running','lost','cleanup_failed') LIMIT 1").get(current.id)) throw new Error('Process exit is unconfirmed; artifacts kept');
+            if (current && taskHasPendingUtilities(coord.db, current.id)) throw new Error('Utility exit is unconfirmed; artifacts kept');
+            return current;
+          };
+          const t = guard();
           const still = (await findArtifacts(wt, coord.configFor(t?.project_id ?? '').disk.artifactDirs)).find((a) => a.path === item.target);
           if (!still) throw new Error('no longer looks like ignored build output; kept');
+          guard(); // No await between this ownership check and the synchronous rename.
           removeFast(item.target, join(dirname(dirname(wt)), '.trash'));
           break;
         }

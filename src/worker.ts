@@ -13,6 +13,8 @@ import type { MachineInfo, Project, Task } from './types.ts';
 import { VERSION } from './version.ts';
 
 export interface BranchTransport {
+  /** Canonical hub identity for channel-local recovery. Wrappers may instead pass WorkerLoop.hub. */
+  readonly hub?: string;
   /** Make sure `sha` (the integration head on the hub) exists in the local clone. */
   fetchBase(project: Project, repoPath: string, sha: string, signal?: AbortSignal): Promise<void>;
   /** Send the finished task branch to the hub so it can be merged there. */
@@ -57,8 +59,11 @@ export class WorkerLoop {
   private readonly transport: BranchTransport | null;
   private readonly verifySlots: Semaphore;
   private readonly journal: WorkerJournal | null;
+  private readonly adoptLegacyJournal: boolean;
+  private preparing: Promise<void> | null = null;
   private held = new Set<string>();
   private recovering: Promise<void> | null = null;
+  private tidying: Promise<void> | null = null;
   private readonly uploading = new Map<string, AbortController>();
   private claiming = false;
   private stopped = false;
@@ -74,6 +79,8 @@ export class WorkerLoop {
     agents: () => string[];
     localConfig: () => Config;
     transport?: BranchTransport;
+    hub?: string;
+    adoptLegacyJournal?: boolean;
     verifySlots: Semaphore;
     /** Called when worktrees exceed their disk quota; the hub uses it to run cleanup. */
     onDiskPressure?: () => Promise<void>;
@@ -86,8 +93,17 @@ export class WorkerLoop {
     this.agents = opts.agents;
     this.local = opts.localConfig;
     this.transport = opts.transport ?? null;
-    this.journal = this.transport ? new WorkerJournal(this.machineId) : null;
+    this.adoptLegacyJournal = opts.adoptLegacyJournal ?? false;
+    if (this.transport && !opts.hub && !this.transport.hub) throw new Error('A remote worker requires its canonical hub identity for recovery.');
+    this.journal = this.transport ? new WorkerJournal(this.machineId, { hub: opts.hub ?? this.transport.hub!, projectIds: Object.keys(this.repos()) }) : null;
     this.verifySlots = opts.verifySlots;
+  }
+
+  private async prepare(): Promise<void> {
+    if (!this.journal) return;
+    this.journal.assertScope(Object.keys(this.repos()));
+    this.preparing ??= this.journal.acquire(this.client, { adoptLegacy: this.adoptLegacyJournal }).catch(error => { this.preparing = null; throw error; });
+    await this.preparing;
   }
 
   async disk(): Promise<{ freeGb: number; worktreesGb: number }> {
@@ -115,6 +131,8 @@ export class WorkerLoop {
   }
 
   async heartbeat(): Promise<void> {
+    if (this.stopped) return;
+    await this.prepare();
     const running = new Map([...this.active.values()].map(({ task }) => [task.id, { taskId: task.id, generation: task.generation }]));
     for (const artifact of Object.values(this.journal?.artifacts ?? {})) if (!artifact.uploaded && !artifact.retired && artifact.failures < 6) running.set(artifact.taskId, { taskId: artifact.taskId, generation: artifact.generation });
     const result = await this.client['machine.heartbeat']({
@@ -169,7 +187,15 @@ export class WorkerLoop {
    * done with the exact accepted commit. Unmerged, detached, locked, dirty or active worktrees are kept.
    */
   async tidyLocal(): Promise<void> {
-    if (!this.transport) return;
+    if (!this.transport || this.stopped) return;
+    if (this.tidying) return this.tidying;
+    this.tidying = this.tidyOwned();
+    try { await this.tidying; } finally { this.tidying = null; }
+  }
+
+  private async tidyOwned(): Promise<void> {
+    await this.prepare();
+    if (this.stopped) return;
     const cfg = this.local();
     const root = worktreeRootOf(cfg);
     if (!existsSync(root)) return;
@@ -189,9 +215,8 @@ export class WorkerLoop {
           if (artifact && (artifact.branch !== t.branch || artifact.assignee !== t.assignee)) continue;
           // A merge commit differs from the verified branch tip. Fetch it before proving ancestry.
           if (!(await revParse(repo, t.head_sha))) {
-            const project = (await this.client['project.list']({})).find(p => p.id === projectId);
-            if (!project) continue;
-            await this.transport.fetchBase(project, repo, t.head_sha).catch(() => undefined);
+            const project = await this.client['worker.project']({ projectId });
+            await this.transport!.fetchBase(project, repo, t.head_sha).catch(() => undefined);
           }
           if ((await git(repo, ['merge-base', '--is-ancestor', accepted, t.head_sha], { allowFail: true })).code !== 0) continue;
           const entry = (await listWorktrees(repo)).find((w) => w.path === path);
@@ -202,7 +227,7 @@ export class WorkerLoop {
               current.branch !== t.branch || this.active.has(taskId)) continue;
           const latest = (await listWorktrees(repo)).find((w) => w.path === path);
           if (!latest || latest.locked || latest.prunable || latest.branch !== t.branch || latest.head !== accepted ||
-              !isLinkedWorktreeOf(path, repo) || !(await isClean(path)) || this.active.has(taskId)) continue;
+              !isLinkedWorktreeOf(path, repo) || !(await isClean(path)) || this.active.has(taskId) || this.stopped) continue;
           // Git's own worktree removal honors locks; bypassing it via the fast path would lose that guard.
           const removed = await git(repo, ['worktree', 'remove', path], { allowFail: true });
           if (removed.code !== 0) continue;
@@ -233,9 +258,11 @@ export class WorkerLoop {
 
   /** Recovery precedes admission and is shared by overlapping timer calls. */
   async recoverLocal(): Promise<void> {
-    if (!this.journal) return;
+    if (!this.journal || this.stopped) return;
     if (this.recovering) return this.recovering;
     this.recovering = (async () => {
+      await this.prepare();
+      if (this.stopped) return;
       this.held = await this.journal!.recover(this.client, new Set(this.active.keys()));
       for (const artifact of Object.values(this.journal!.artifacts)) {
         if (!this.stopped && !artifact.uploaded && !artifact.retired && artifact.failures < 6 && artifact.retryAt <= Date.now() && !this.held.has(artifact.taskId) && !this.active.has(artifact.taskId)) await this.retryUpload(artifact);
@@ -293,6 +320,7 @@ export class WorkerLoop {
     if (this.claiming || this.stopped) return;
     this.claiming = true;
     try {
+      await this.prepare();
       await this.recoverLocal();
       while (!this.stopped && (await this.hasCapacity())) {
         const runningByAgent: Record<string, number> = {};
@@ -363,6 +391,8 @@ export class WorkerLoop {
 
   async drain(timeoutMs = 15_000): Promise<void> {
     const deadline = Date.now() + timeoutMs;
-    while (this.active.size && Date.now() < deadline) await new Promise((r) => setTimeout(r, 200));
+    await this.preparing?.catch(() => undefined);
+    while ((this.active.size || this.uploading.size || this.recovering || this.tidying || this.claiming) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 200));
+    if (this.stopped && !this.active.size && !this.uploading.size && !this.recovering && !this.tidying && !this.claiming) this.journal?.release();
   }
 }

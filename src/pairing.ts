@@ -232,7 +232,7 @@ export function authorizeWorkerRpc(coord: Coordinator, who: WorkerIdentity, meth
   principal(coord, who); bounded(params);
   const p = record(params);
   switch (method) {
-    case 'task.list': case 'events.since': case 'lesson.list': case 'lock.check':
+    case 'worker.project': case 'task.list': case 'events.since': case 'lesson.list': case 'lock.check':
       project(who, p.projectId);
       if (p.taskId !== undefined && p.taskId !== null) task(coord, who, p.taskId);
       return;

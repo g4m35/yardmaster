@@ -22,6 +22,16 @@ async function fixture(ready = true) {
   const coord = new Coordinator(openDb(join(box.home, 'transfer.db')));
   const project = await coord.registerProject(box.repo);
   const client = localClient(buildMethods(coord, { machineId: 'm-hub' }));
+  const channel = { hub: 'http://fixture.local', projectIds: [project.id] };
+  const journals: WorkerJournal[] = [];
+  const workers: WorkerLoop[] = [];
+  const journal = () => { const value = new WorkerJournal('m-worker', channel); journals.push(value); return value; };
+  const stopControllers = async () => {
+    for (const worker of workers) { worker.stopAll('shutdown', 'fixture controller stopped'); for (const [id, active] of worker.active) if (!active.stop) worker.active.delete(id); }
+    await Promise.all(workers.map(worker => worker.drain()));
+    for (const value of journals) value.release();
+  };
+  const close = async () => { await stopControllers(); coord.db.close(); };
   coord.addTasks(project.id, [{ title: 'Transfer owned artifact', prompt: '@mock write result.txt correct', agent: 'mock' }], 'test');
   const task = coord.claimNext({ machineId: 'm-worker', agents: ['mock'], repos: { [project.id]: box.repo }, runningByAgent: {} })!.task;
   const owner = { generation: task.generation, assignee: task.assignee! };
@@ -29,15 +39,16 @@ async function fixture(ready = true) {
   let runId = '';
   if (ready) {
     sh(box.repo, 'git', ['branch', task.branch!, base]);
-    const journal = new WorkerJournal('m-worker');
-    const api = journal.wrap(client, { repo: box.repo, branch: task.branch!, base });
+    const value = journal();
+    const api = value.wrap(client, { repo: box.repo, branch: task.branch!, base });
     runId = await api['run.start']({ taskId: task.id, machineId: 'm-worker', agent: 'mock', logPath: '', owner });
     await api['run.update']({ runId, owner, patch: { status: 'done', phase: 'prepare', pid: null } });
     await api['run.exit']({ runId, taskId: task.id, owner, reaped: true, noLaunchPhase: 'prepare' });
     await api['task.update']({ id: task.id, owner, patch: { status: 'ready', head_sha: base, base_sha: base, lease_until: null } });
+    value.release();
   }
-  const worker = (transport: BranchTransport, api = client) => new WorkerLoop({ client: api, machineId: 'm-worker', repos: () => ({ [project.id]: box.repo }), agents: () => ['mock'], localConfig: () => loadConfig(), verifySlots: new Semaphore(1), transport });
-  return { ...box, coord, project, client, task, owner, base, runId, worker };
+  const worker = (transport: BranchTransport, api = client) => { const value = new WorkerLoop({ hub: channel.hub, client: api, machineId: 'm-worker', repos: () => ({ [project.id]: box.repo }), agents: () => ['mock'], localConfig: () => loadConfig(), verifySlots: new Semaphore(1), transport }); workers.push(value); return value; };
+  return { channel, journal, stopControllers, close, ...box, coord, project, client, task, owner, base, runId, worker };
 }
 
 test('upload bundle orphan is reaped from its journal before retry without another model run', async () => {
@@ -46,26 +57,29 @@ test('upload bundle orphan is reaped from its journal before retry without anoth
   await once(child.stdout!, 'data');
   try {
     const startedAt = await processStartTime(child.pid!);
-    const journal = new WorkerJournal('m-worker');
+    const journal = s.journal();
+    await journal.acquire(s.client);
     journal.runs[s.runId] = { runId: s.runId, taskId: s.task.id, owner: s.owner, worktree: null, pid: null, startedAt: null, phase: 'upload', idlePhase: 'upload', utilities: [{ token: 'orphan-bundle', command: 'git', state: 'live', pid: child.pid!, startedAt }] };
     journal.save();
     recordUtility(s.coord.db, runUtilityKey(s.runId), { action: 'intent', token: 'orphan-bundle', command: 'git' });
     recordUtility(s.coord.db, runUtilityKey(s.runId), { action: 'spawn', token: 'orphan-bundle', pid: child.pid!, startedAt });
     let uploads = 0;
+    journal.release();
     await s.worker({ async fetchBase() {}, async uploadBranch(task) { uploads++; assert.equal(groupAlive(child.pid!), false); return { head: task.head_sha! }; } }).recoverLocal();
     assert.equal(uploads, 1);
     assert.equal(groupAlive(child.pid!), false);
-    assert.equal(new WorkerJournal('m-worker').artifacts[s.task.id]!.uploaded, true);
-    assert.deepEqual(new WorkerJournal('m-worker').runs, {});
+    assert.equal(s.journal().artifacts[s.task.id]!.uploaded, true);
+    assert.deepEqual(s.journal().runs, {});
     assert.deepEqual(utilities(s.coord.db, runUtilityKey(s.runId)), []);
     assert.equal(s.coord.runsFor(s.task.id).length, 1);
-  } finally { await terminateOwnedGroup(child.pid!, { graceMs: 5 }); s.coord.db.close(); }
+  } finally { await terminateOwnedGroup(child.pid!, { graceMs: 5 }); await s.close(); }
 });
 
 test('bundle spawn intent with unknown identity holds upload and excludes a new model claim', async () => {
   const s = await fixture();
   try {
-    const journal = new WorkerJournal('m-worker');
+    const journal = s.journal();
+    await journal.acquire(s.client);
     journal.runs[s.runId] = { runId: s.runId, taskId: s.task.id, owner: s.owner, worktree: null, pid: null, startedAt: null, phase: 'upload', idlePhase: 'upload', utilities: [{ token: 'unknown-bundle', command: 'git', state: 'spawning', pid: null, startedAt: null }] };
     journal.save();
     recordUtility(s.coord.db, runUtilityKey(s.runId), { action: 'intent', token: 'unknown-bundle', command: 'git' });
@@ -75,13 +89,14 @@ test('bundle spawn intent with unknown identity holds upload and excludes a new 
       if (key === 'worker.claim') return async (p: Parameters<Client['worker.claim']>[0]) => { excluded = p.activeTaskIds ?? []; return null; };
       return target[key];
     } });
+    journal.release();
     await s.worker({ async fetchBase() {}, async uploadBranch() { uploads++; throw new Error('must remain held'); } }, api).tick();
     assert.ok(excluded.includes(s.task.id));
     assert.equal(uploads, 0);
     assert.equal(s.coord.getTask(s.task.id)!.status, 'ready');
-    assert.equal(new WorkerJournal('m-worker').runs[s.runId]!.utilities![0]!.state, 'spawning');
+    assert.equal(s.journal().runs[s.runId]!.utilities![0]!.state, 'spawning');
     assert.equal(s.coord.runsFor(s.task.id).length, 1);
-  } finally { s.coord.db.close(); }
+  } finally { await s.close(); }
 });
 
 test('canceling a hung git bundle reaps the registered utility and preserves an unrelated claim', async () => {
@@ -102,7 +117,7 @@ test('canceling a hung git bundle reaps the registered utility and preserves an 
     let registered = 0;
     const api = new Proxy(s.client, { get(target, key: keyof Client) {
       if (key === 'run.utility') return async (p: Parameters<Client['run.utility']>[0]) => {
-        const token = new WorkerJournal('m-worker').runs[p.runId]!.utilities!.find(child => child.token === p.operation.token)!;
+        const token = s.journal().runs[p.runId]!.utilities!.find(child => child.token === p.operation.token)!;
         assert.ok(token, 'journal must persist the token before any RPC');
         if (p.operation.action === 'intent') assert.equal(token.state, 'spawning');
         if (p.operation.action === 'spawn') { registered++; assert.equal(token.pid, p.operation.pid); }
@@ -115,17 +130,17 @@ test('canceling a hung git bundle reaps the registered utility and preserves an 
     const pending = worker.recoverLocal();
     await until(() => existsSync(marker), Boolean);
     pid = Number(readFileSync(marker, 'utf8'));
-    await until(() => Object.values(new WorkerJournal('m-worker').runs).some(run => run.utilities?.some(child => child.pid === pid)), Boolean);
+    await until(() => Object.values(s.journal().runs).some(run => run.utilities?.some(child => child.pid === pid)), Boolean);
     s.coord.control(s.task.id, 'cancel', 'test');
     await worker.heartbeat();
     await pending;
     assert.equal(groupAlive(pid), false);
     assert.ok(registered >= 2, 'branch check and git bundle both register their own utility');
     assert.ok(s.coord.getTask(second.id)!.lease_until! > Date.now());
-    assert.deepEqual(new WorkerJournal('m-worker').runs, {});
-    assert.equal(new WorkerJournal('m-worker').artifacts[s.task.id]!.failures, 0);
+    assert.deepEqual(s.journal().runs, {});
+    assert.equal(s.journal().artifacts[s.task.id]!.failures, 0);
     assert.equal(s.coord.runsFor(s.task.id).length, 1);
-  } finally { process.env.PATH = oldPath; if (pid) await terminateOwnedGroup(pid, { graceMs: 5 }); s.coord.db.close(); }
+  } finally { process.env.PATH = oldPath; if (pid) await terminateOwnedGroup(pid, { graceMs: 5 }); await s.close(); }
 });
 
 test('base fetch starts after durable run registration and stops with the preparing attempt', async () => {
@@ -144,7 +159,7 @@ test('base fetch starts after durable run registration and stops with the prepar
     const worker = s.worker({ async fetchBase(_project, _repo, _sha, incoming) {
       signal = incoming;
       assert.ok(currentProcessScopeSignal());
-      const runs = Object.values(new WorkerJournal('m-worker').runs);
+      const runs = Object.values(s.journal().runs);
       assert.equal(runs.length, 1);
       rowId = runs[0]!.runId;
       assert.ok(s.coord.getRun(rowId));
@@ -158,9 +173,9 @@ test('base fetch starts after durable run registration and stops with the prepar
     assert.equal(signal!.aborted, true);
     assert.equal(worker.active.size, 0);
     assert.ok(rowId);
-    assert.deepEqual(new WorkerJournal('m-worker').runs, {});
+    assert.deepEqual(s.journal().runs, {});
     assert.equal(s.coord.runsFor(s.task.id).length, 1);
-  } finally { s.coord.db.close(); }
+  } finally { await s.close(); }
 });
 
 test('base HTTP body streaming is canceled by the supplied signal', async () => {
@@ -174,7 +189,7 @@ test('base HTTP body streaming is canceled by the supplied signal', async () => 
     await new Promise<void>(resolve => server.once('request', () => resolve()));
     abort.abort('cancel base fetch');
     await assert.rejects(pending, /cancel base fetch|aborted/i);
-  } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); s.coord.db.close(); }
+  } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await s.close(); }
 });
 
 test('upload journal survives a lost final exit acknowledgment and retries only its accepted artifact', async () => {
@@ -188,19 +203,21 @@ test('upload journal survives a lost final exit acknowledgment and retries only 
     } });
     const transport: BranchTransport = { async fetchBase() {}, async uploadBranch(task) { uploads++; assert.equal(task.head_sha, s.base); return { head: task.head_sha! }; } };
     await s.worker(transport, api).recoverLocal();
-    const interrupted = new WorkerJournal('m-worker');
+    await s.stopControllers();
+    const interrupted = s.journal();
+    await interrupted.acquire(s.client);
     assert.equal(uploads, 1);
     assert.ok(interrupted.runs[s.runId]!.exit);
     assert.ok(interrupted.runs[s.runId]!.utilities!.every(child => child.state === 'exited'));
     assert.equal(interrupted.artifacts[s.task.id]!.uploaded, false);
-    interrupted.artifacts[s.task.id]!.retryAt = 0; interrupted.save();
+    interrupted.artifacts[s.task.id]!.retryAt = 0; interrupted.save(); interrupted.release();
     offline = false;
     await s.worker(transport, api).recoverLocal();
     assert.equal(uploads, 2);
-    assert.deepEqual(new WorkerJournal('m-worker').runs, {});
-    assert.equal(new WorkerJournal('m-worker').artifacts[s.task.id]!.uploaded, true);
+    assert.deepEqual(s.journal().runs, {});
+    assert.equal(s.journal().artifacts[s.task.id]!.uploaded, true);
     assert.equal(s.coord.runsFor(s.task.id).length, 1);
-  } finally { s.coord.db.close(); }
+  } finally { await s.close(); }
 });
 
 for (const state of ['missing', 'running'] as const) test(`${state} implementation row cannot authorize local upload utilities`, async () => {
@@ -216,11 +233,11 @@ for (const state of ['missing', 'running'] as const) test(`${state} implementati
       return target[key];
     } });
     await s.worker({ async fetchBase() {}, async uploadBranch() { throw new Error('must not upload'); } }, api).recoverLocal();
-    const saved = new WorkerJournal('m-worker');
+    const saved = s.journal();
     assert.match(saved.artifacts[s.task.id]!.error!, /no stopped implementation process/);
     assert.equal(saved.artifacts[s.task.id]!.failures, 1);
     assert.equal(utilityCalls, 0);
     assert.deepEqual(saved.runs, {});
     assert.equal(s.coord.runsFor(s.task.id).length, 1);
-  } finally { s.coord.db.close(); }
+  } finally { await s.close(); }
 });

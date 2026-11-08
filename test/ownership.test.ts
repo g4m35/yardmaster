@@ -268,10 +268,11 @@ for (const scenario of ['unchanged', 'attached commit', 'detached commit', 'deta
           return target['task.peek'](p);
         };
       } });
-      const worker = new WorkerLoop({ client, machineId: 'm-A', repos: () => ({ [s.project.id]: s.repo }), agents: () => ['mock'],
+      const worker = new WorkerLoop({ hub: 'http://fixture.local', client, machineId: 'm-A', repos: () => ({ [s.project.id]: s.repo }), agents: () => ['mock'],
         localConfig: () => loadConfig(), verifySlots: new Semaphore(1), transport: { async fetchBase() {}, async uploadBranch() { return { head }; } } });
       if (scenario === 'active') worker.active.set(task.id, { task: claim, agent: 'mock' });
       await worker.tidyLocal();
+      worker.stopAll('shutdown', 'fixture done'); worker.active.clear(); await worker.drain();
       assert.equal(existsSync(path), scenario !== 'unchanged');
       if (scenario !== 'unchanged') assert.equal(sh(path, 'git', ['rev-parse', '--show-toplevel']), path);
     } finally { s.coord.db.close(); }

@@ -21,7 +21,8 @@ export interface UsageSnapshot {
   /** Input tokens including cache reads and writes (the long-standing meaning of `tokensIn`). */
   tokensIn: number;
   tokensOut: number;
-  cacheReadTokens: number;
+  /** Null when no event reported cache reads separately (unknown, not zero). */
+  cacheReadTokens: number | null;
   /** Null when no event reported cache writes separately (unknown, not zero). */
   cacheWriteTokens: number | null;
   /** Usage events that were counted (repeats of one message id count once). */
@@ -46,11 +47,12 @@ interface Part {
   tokensIn: number;
   tokensOut: number;
   cacheRead: number;
+  cacheReadKnown: boolean;
   cacheWrite: number;
   cacheWriteKnown: boolean;
 }
 
-const ZERO: Part = { actual: 0, estimated: 0, actualEvents: 0, estimatedEvents: 0, tokensIn: 0, tokensOut: 0, cacheRead: 0, cacheWrite: 0, cacheWriteKnown: false };
+const ZERO: Part = { actual: 0, estimated: 0, actualEvents: 0, estimatedEvents: 0, tokensIn: 0, tokensOut: 0, cacheRead: 0, cacheReadKnown: false, cacheWrite: 0, cacheWriteKnown: false };
 
 function plus(a: Part, b: Part, sign = 1): Part {
   return {
@@ -58,6 +60,7 @@ function plus(a: Part, b: Part, sign = 1): Part {
     actualEvents: a.actualEvents + sign * b.actualEvents, estimatedEvents: a.estimatedEvents + sign * b.estimatedEvents,
     tokensIn: a.tokensIn + sign * b.tokensIn, tokensOut: a.tokensOut + sign * b.tokensOut,
     cacheRead: a.cacheRead + sign * b.cacheRead, cacheWrite: a.cacheWrite + sign * b.cacheWrite,
+    cacheReadKnown: a.cacheReadKnown || b.cacheReadKnown,
     cacheWriteKnown: a.cacheWriteKnown || b.cacheWriteKnown,
   };
 }
@@ -68,6 +71,7 @@ function maxPart(a: Part, b: Part): Part {
     actualEvents: b.actualEvents, estimatedEvents: b.estimatedEvents,
     tokensIn: Math.max(a.tokensIn, b.tokensIn), tokensOut: Math.max(a.tokensOut, b.tokensOut),
     cacheRead: Math.max(a.cacheRead, b.cacheRead), cacheWrite: Math.max(a.cacheWrite, b.cacheWrite),
+    cacheReadKnown: a.cacheReadKnown || b.cacheReadKnown,
     cacheWriteKnown: a.cacheWriteKnown || b.cacheWriteKnown,
   };
 }
@@ -106,6 +110,7 @@ export class UsageMeter {
     const cacheWriteKnown = ev.cacheWriteIn !== undefined;
     const base = {
       tokensIn: ev.tokensIn + cachedIn, tokensOut: ev.tokensOut, cacheRead: cachedIn,
+      cacheReadKnown: ev.cachedIn !== undefined,
       cacheWrite: Math.max(0, ev.cacheWriteIn ?? 0), cacheWriteKnown,
     };
     if (ev.costUsd !== undefined) {
@@ -124,7 +129,10 @@ export class UsageMeter {
 
   add(ev: Usage): void {
     if (ev.cumulative) {
+      const previous = this.total;
       this.snap = this.part(ev, true);
+      if (!this.snap.cacheReadKnown && previous.cacheReadKnown) { this.snap.cacheRead = previous.cacheRead; this.snap.cacheReadKnown = true; }
+      if (!this.snap.cacheWriteKnown && previous.cacheWriteKnown) { this.snap.cacheWrite = previous.cacheWrite; this.snap.cacheWriteKnown = true; }
       this.inc = ZERO;
       if (this.baseline > 0) this.notes.add('Token counts come from a resumed session\'s cumulative total and may include earlier runs.');
       return;
@@ -189,7 +197,7 @@ export class UsageMeter {
     const t = this.total;
     return {
       costUsd: t.actual + t.estimated, actualUsd: t.actual, estimatedUsd: t.estimated, provenance: this.provenance,
-      tokensIn: t.tokensIn, tokensOut: t.tokensOut, cacheReadTokens: t.cacheRead, cacheWriteTokens: t.cacheWriteKnown ? t.cacheWrite : null,
+      tokensIn: t.tokensIn, tokensOut: t.tokensOut, cacheReadTokens: t.cacheReadKnown ? t.cacheRead : null, cacheWriteTokens: t.cacheWriteKnown ? t.cacheWrite : null,
       events: t.actualEvents + t.estimatedEvents, sessionTotalUsd: this.baseline + t.actual + t.estimated, limitations: [...this.notes],
     };
   }
@@ -197,5 +205,5 @@ export class UsageMeter {
 
 /** A snapshot for work that never ran (no reviewer, canceled before launch). */
 export function emptyUsage(): UsageSnapshot {
-  return { costUsd: 0, actualUsd: 0, estimatedUsd: 0, provenance: 'unknown', tokensIn: 0, tokensOut: 0, cacheReadTokens: 0, cacheWriteTokens: null, events: 0, sessionTotalUsd: 0, limitations: [] };
+  return { costUsd: 0, actualUsd: 0, estimatedUsd: 0, provenance: 'unknown', tokensIn: 0, tokensOut: 0, cacheReadTokens: null, cacheWriteTokens: null, events: 0, sessionTotalUsd: 0, limitations: [] };
 }

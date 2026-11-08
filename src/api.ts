@@ -163,7 +163,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
     })),
     'run.usage': method(z.object({ runId: RunId, taskId: TaskId, owner: Owner, sequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
       usage: z.object({ costUsd: z.number().finite().nonnegative(), tokensIn: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), tokensOut: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-        provenance: z.enum(['actual', 'estimated', 'mixed', 'unknown']), cacheReadTokens: z.number().int().nonnegative(), cacheWriteTokens: z.number().int().nonnegative().nullable() }) }),
+        provenance: z.enum(['actual', 'estimated', 'mixed', 'unknown']), cacheReadTokens: z.number().int().nonnegative().nullable(), cacheWriteTokens: z.number().int().nonnegative().nullable() }) }),
       (p) => coord.recordRunUsage(p.runId, p.taskId, p.owner, p.sequence, p.usage)),
     'run.exit': method(z.object({ runId: RunId, taskId: TaskId, owner: Owner, reaped: z.literal(true), process: z.object({ pid: z.number().int().positive(), startedAt: z.number().finite().positive() }).optional(), noLaunchPhase: z.string().min(1).optional() }), (p) => {
       coord.confirmRunExit(p.runId, p.taskId, p.owner, p.process, p.noLaunchPhase);
@@ -367,6 +367,11 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
         }
       },
     ),
+    'worker.project': method(z.object({ projectId: Id }), p => {
+      const project = coord.getProject(p.projectId);
+      if (!project) throw new Error('Unknown worker project.');
+      return project;
+    }),
     'run.start': method(z.object({ taskId: TaskId, machineId: Id, agent: Id, model: z.string().nullish(), logPath: z.string(), role: z.enum(['implement', 'review']).default('implement'), lessons: z.array(z.string()).max(20).default([]), owner: Owner.optional(), implementationExited: RunId.optional() }), (p) => {
       const task = coord.getTask(p.taskId);
       if (!task) throw new Error(`No task ${p.taskId}`);
@@ -441,7 +446,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
     }),
     'plan.usage': method(z.object({ runId: RunId, sequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
       usage: z.object({ costUsd: z.number().finite().nonnegative(), tokensIn: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), tokensOut: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-        provenance: z.enum(['actual', 'estimated', 'mixed', 'unknown']), cacheReadTokens: z.number().int().nonnegative(), cacheWriteTokens: z.number().int().nonnegative().nullable() }) }), (p) => {
+        provenance: z.enum(['actual', 'estimated', 'mixed', 'unknown']), cacheReadTokens: z.number().int().nonnegative().nullable(), cacheWriteTokens: z.number().int().nonnegative().nullable() }) }), (p) => {
       const run = coord.getRun(p.runId);
       if (!run || String(run.role) !== 'plan') throw new Error('No planning run.');
       coord.recordRunUsage(run.id, run.task_id, { generation: run.generation, assignee: `machine:${run.machine_id}` }, p.sequence, p.usage);

@@ -29,6 +29,7 @@ export function httpTransport(baseUrl: string, token: string, machineId: string)
   const url = baseUrl.replace(/\/$/, '');
   const auth = { authorization: `Bearer ${token}` };
   return {
+    hub: url,
     fetchBase(project, repoPath, sha, signal) {
       return transferScope(signal, async () => {
         const ownedSignal = transferSignal(signal);
