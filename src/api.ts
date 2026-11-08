@@ -26,6 +26,8 @@ import { recordUtility, runUtilityKey, utilitiesStopped, utilities } from './uti
 
 export interface HubHooks {
   machineId: string;
+  /** Set only by the HTTP entry point; these controllers recover through their own journals. */
+  externalWorker?: boolean;
   supervisor?: Supervisor;
   stopRunning?: (projectId?: string | null) => void;
   integrationHead?: (projectId: string) => Promise<string | null>;
@@ -377,19 +379,21 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       if (!project) throw new Error('Unknown worker project.');
       return project;
     }),
-    'run.start': method(z.object({ taskId: TaskId, machineId: Id, agent: Id, model: z.string().nullish(), logPath: z.string(), role: z.enum(['implement', 'review']).default('implement'), lessons: z.array(z.string()).max(20).default([]), owner: Owner.optional(), implementationExited: RunId.optional() }), (p) => {
+    'run.start': method(z.object({ taskId: TaskId, machineId: Id, agent: Id, model: z.string().nullish(), logPath: z.string(), role: z.enum(['implement', 'review']).default('implement'), lessons: z.array(z.string()).max(20).default([]), owner: Owner.optional(), implementationExited: RunId.optional() }), (p) => tx(coord.db, () => {
       const task = coord.getTask(p.taskId);
       if (!task) throw new Error(`No task ${p.taskId}`);
       coord.assertTaskOwner(p.taskId, p.owner);
       if (p.owner!.assignee !== `machine:${p.machineId}`) throw new Error('Run machine does not match the claim owner.');
       const lessons = scopedLessons(task.project_id, p.lessons);
       const run = coord.startRun({ ...task, generation: p.owner!.generation! }, p.machineId, p.agent, p.model ?? null, p.logPath, p.role, p.implementationExited);
+      // Persist before the response permits launch; a same-host worker is not this hub's controller.
+      if (hooks.externalWorker && p.machineId === hooks.machineId) coord.setMeta(`http_run:${run.id}`, '1');
       if (lessons.length) {
         coord.updateRun(run.id, { lessons });
         markUsed(coord, lessons);
       }
       return run.id;
-    }),
+    })),
     'lesson.add': method(z.object({ projectId: Id, text: z.string().min(12).max(1000), files: z.array(z.string()).default([]), source: z.enum(['you', 'agent', 'review', 'fix']).default('agent'), taskId: z.string().nullish() }), (p) =>
       addLesson(coord, p.projectId, p.text, p.source, p.files, p.taskId ?? null),
     ),

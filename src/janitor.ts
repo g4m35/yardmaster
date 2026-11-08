@@ -409,9 +409,11 @@ export async function recover(coord: Coordinator, machineId: string, activeTaskI
     const task = coord.getTask(run.task_id);
     // Current claims must recover and requeue together below; clearing their hold here could hide the orphan.
     if (task?.generation === run.generation && task.machine_id === run.machine_id && ['running', 'verifying'].includes(task.status)) continue;
-    if (run.machine_id !== machineId) {
+    const externalOnHub = run.machine_id === machineId && coord.getMeta(`http_run:${run.id}`) === '1';
+    if (run.machine_id !== machineId || externalOnHub) {
       const machine = coord.getMachine(run.machine_id);
-      const lastActivity = Math.max(machine?.last_seen ?? 0, run.started_at, run.ended_at ?? 0);
+      // The embedded hub heartbeat says nothing about a separate controller on this same host.
+      const lastActivity = Math.max(externalOnHub ? 0 : machine?.last_seen ?? 0, run.started_at, run.ended_at ?? 0);
       if (now - lastActivity <= LEASE_MS) continue;
       tx(coord.db, () => {
         const fresh = coord.getRun(run.id);
@@ -446,9 +448,10 @@ export async function recover(coord: Coordinator, machineId: string, activeTaskI
       }
       continue;
     }
-    if (t.machine_id === machineId) {
+    const orphanRuns = unresolvedClaimRuns(coord, t);
+    const externalOnHub = t.machine_id === machineId && orphanRuns.some(run => coord.getMeta(`http_run:${run.id}`) === '1');
+    if (t.machine_id === machineId && !externalOnHub) {
       if (activeTaskIds.has(t.id)) continue;
-      const orphanRuns = unresolvedClaimRuns(coord, t);
       // No live runner in this process owns it: either an earlier hub process died, or a claim never started.
       if (!orphanRuns.length && !(t.lease_until && t.lease_until < now)) continue;
       let uncertain = '';

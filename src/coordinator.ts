@@ -533,7 +533,8 @@ export class Coordinator {
               if (this.getMeta(`recovery:${r.id}`) !== 'remote_lease_expired') return false;
               const machine = this.getMachine(r.machine_id);
               const credential = this.db.prepare('SELECT COUNT(*) AS total, SUM(revoked_at IS NULL AND expires_at > ?) AS live FROM fleet_credentials WHERE machine_id = ?').get(Date.now(), r.machine_id) as { total: number; live: number | null };
-              return !machine || Date.now() - machine.last_seen > LEASE_MS || (credential.total > 0 && !credential.live);
+              const externalOnHub = machine?.is_hub && this.getMeta(`http_run:${r.id}`) === '1';
+              return externalOnHub || !machine || Date.now() - machine.last_seen > LEASE_MS || (credential.total > 0 && !credential.live);
             }
             return r.pid === null && (r.phase?.endsWith(':spawning') || this.getMeta(`recovery:${r.id}`) === 'local_exit_unacknowledged' ||
               utilities(this.db, runUtilityKey(r.id)).some(child => child.state !== 'exited' && child.pid === null));
@@ -543,11 +544,12 @@ export class Coordinator {
             for (const child of utilities(this.db, runUtilityKey(run.id))) if (child.state !== 'exited') recordUtility(this.db, runUtilityKey(run.id), { action: 'exit', token: child.token, pid: child.pid, startedAt: child.startedAt, reaped: true });
             forgetStoppedUtilities(this.db, runUtilityKey(run.id));
             this.setMeta(`recovery:${run.id}`, null);
+            this.setMeta(`http_run:${run.id}`, null);
             this.updateRun(run.id, { status: 'stopped', phase: null, pid: null, proc_started: null, ended_at: Date.now(), stop_reason: `Owner ${by} attested stopped: ${clip(note, 1000)}` });
             const budget = listHeld(this.db).find(r => r.runId === run.id);
             if (budget) release(this.db, budget.id, { kind: 'exited', runId: run.id });
           }
-          this.event(current.project_id, id, 'warn', 'process.owner_confirmed_stopped', `${by} attested that spawning-window processes have stopped: ${clip(note, 1000)}`,
+          this.event(current.project_id, id, 'warn', 'process.owner_confirmed_stopped', `${by} attested that run processes have stopped: ${clip(note, 1000)}`,
             { runs: holds.map(r => ({ id: r.id, generation: r.generation, machineId: r.machine_id, phase: r.phase })) });
           return this.updateTask(id, { attention: 'Process exit was explicitly attested by the owner. Work is preserved; retry when ready.' });
         });
@@ -939,6 +941,7 @@ export class Coordinator {
       if (!utilitiesStopped(this.db, runUtilityKey(runId))) throw new Error('Owned utilities have not all confirmed exit.');
       if (!held && !['running', 'lost', 'cleanup_failed'].includes(run.status)) {
         forgetStoppedUtilities(this.db, runUtilityKey(runId));
+        this.setMeta(`http_run:${runId}`, null);
         return; // An acknowledged exit is replay-safe.
       }
       const matchedNoLaunch = noLaunchPhase !== undefined && run.pid === null && run.phase === noLaunchPhase && !noLaunchPhase.endsWith(':spawning');
@@ -951,6 +954,7 @@ export class Coordinator {
       if (held) release(this.db, held.id, { kind: 'exited', runId });
       forgetStoppedUtilities(this.db, runUtilityKey(runId));
       this.setMeta(`recovery:${runId}`, null);
+      this.setMeta(`http_run:${runId}`, null);
       if (remoteRecovery) {
         const task = this.getTask(taskId);
         const otherLive = this.runsFor(taskId).some(r => r.id !== runId && r.generation === run.generation && ['running', 'lost', 'cleanup_failed'].includes(r.status));
@@ -978,6 +982,7 @@ export class Coordinator {
       const held = listHeld(this.db).find(r => r.runId === runId);
       if (held) release(this.db, held.id, { kind: 'exited', runId });
       this.setMeta(`recovery:${runId}`, null);
+      this.setMeta(`http_run:${runId}`, null);
       forgetStoppedUtilities(this.db, runUtilityKey(runId));
       this.invalidate();
       this.changed();

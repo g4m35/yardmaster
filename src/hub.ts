@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { pipeline } from 'node:stream/promises';
 import { openDb, type Db } from './db.ts';
 import { Coordinator } from './coordinator.ts';
-import { buildMethods, dispatch, localClient, type Client, type Methods } from './api.ts';
+import { buildMethods, dispatch, localClient, type Client, type Methods, type HubHooks } from './api.ts';
 import { Integrator } from './integrator.ts';
 import { WorkerLoop } from './worker.ts';
 import { Semaphore } from './runner.ts';
@@ -46,6 +46,7 @@ export interface HubOptions {
 export class Hub {
   readonly coord: Coordinator;
   readonly methods: Methods;
+  private readonly httpMethods: Methods;
   readonly client: Client;
   readonly integrator: Integrator;
   readonly worker: WorkerLoop;
@@ -78,7 +79,7 @@ export class Hub {
     // Merge checks get a slot of their own: a long combined test run must not hold up every finished task's checks.
     this.integrator = new Integrator(this.coord, new Semaphore(1));
     this.supervisor = new Supervisor(this.coord);
-    this.methods = buildMethods(this.coord, {
+    const hooks: HubHooks = {
       machineId: this.machineId,
       captureNative: (params) => {
         if (this.captureAbort.signal.aborted) return Promise.reject(new Error('The hub is shutting down; native capture was not started.'));
@@ -96,7 +97,9 @@ export class Hub {
       adoptIntegration: (projectId, head, by, note) => this.integrator.adopt(projectId, head, by, note),
       cleanPlan: (projectId) => planCleanup(this.coord, projectId),
       cleanRun: async (projectId) => runCleanup(this.coord, await planCleanup(this.coord, projectId)),
-    });
+    };
+    this.methods = buildMethods(this.coord, hooks);
+    this.httpMethods = buildMethods(this.coord, { ...hooks, externalWorker: true });
     this.client = localClient(this.methods);
     const includeMock = opts.includeMock ?? process.env.YARDMASTER_ENABLE_MOCK === '1';
     this.worker = new WorkerLoop({
@@ -371,7 +374,7 @@ export class Hub {
           }
           const params = body.length ? JSON.parse(body.toString('utf8')) : {};
           if (worker) authorizeWorkerRpc(this.coord, worker, method, params);
-          const result = await dispatch(this.methods, method, params);
+          const result = await dispatch(this.httpMethods, method, params);
           return json(res, 200, { ok: true, result: result ?? null });
         } catch (err) {
           return json(res, 200, { ok: false, error: (err as Error).message });
