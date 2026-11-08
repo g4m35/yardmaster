@@ -26,6 +26,7 @@ import { notify } from './notify.ts';
 import { shortId } from './text.ts';
 import type { YardEvent } from './types.ts';
 import { VERSION } from './version.ts';
+import { submitSessionHandoff } from './handoff.ts';
 import { PairingStore, authorizeWorkerRpc, authorizeWorkerBaseBundle, authorizeWorkerUpload, type WorkerIdentity } from './pairing.ts';
 
 const BRANCH_RE = /^yardmaster\/t-[a-z0-9]+$/;
@@ -51,6 +52,8 @@ export class Hub {
   readonly token: string;
   readonly machineId: string;
   private readonly pairing: PairingStore;
+  private readonly nativeCaptures = new Map<string, Promise<unknown>>();
+  private readonly captureAbort = new AbortController();
   private server: Server | null = null;
   private timers: NodeJS.Timeout[] = [];
   private lastNotified = 0;
@@ -76,9 +79,17 @@ export class Hub {
     this.supervisor = new Supervisor(this.coord);
     this.methods = buildMethods(this.coord, {
       machineId: this.machineId,
+      captureNative: (params) => {
+        if (this.captureAbort.signal.aborted) return Promise.reject(new Error('The hub is shutting down; native capture was not started.'));
+        if (this.nativeCaptures.has(params.taskId)) return Promise.reject(new Error('Native capture is still in progress; inspect this task before retrying.'));
+        const operation = Promise.resolve().then(() => submitSessionHandoff(this.coord, this.machineId, params, this.captureAbort.signal));
+        this.nativeCaptures.set(params.taskId, operation);
+        void operation.finally(() => this.nativeCaptures.delete(params.taskId)).catch(() => undefined);
+        return operation;
+      },
       supervisor: this.supervisor,
       stopRunning: (projectId) => {
-        for (const a of this.worker.active.values()) if (!projectId || a.task.project_id === projectId) a.stop?.('shutdown', 'Paused by you');
+        for (const a of this.worker.active.values()) if ((!projectId || a.task.project_id === projectId) && this.coord.getTask(a.task.id)?.status === 'running') a.stop?.('shutdown', 'Paused by you');
       },
       integrationHead: (projectId) => this.integrator.head(projectId),
       adoptIntegration: (projectId, head, by, note) => this.integrator.adopt(projectId, head, by, note),
@@ -137,7 +148,7 @@ export class Hub {
     });
     // Only once this hub is sure to run: recovery restarts work a previous hub left behind. Scheduling starts after
     // it, so a requeued task never gets a new agent while the old one is still exiting.
-    await recover(this.coord, this.machineId, new Set(), { startup: true });
+    await recover(this.coord, this.machineId, new Set(this.nativeCaptures.keys()), { startup: true });
     // Deletes a previous run didn't get to finish (it was killed, or the machine slept).
     purgeTrash(join(worktreeRootOf(cfg), '.trash'));
     this.coord.onChange = () => this.kick();
@@ -230,7 +241,7 @@ export class Hub {
       await this.worker.tick();
       // Merges (and their re-verification) run in the background so a long test run never stalls scheduling.
       for (const p of this.coord.listProjects()) if (existsSync(p.root)) void this.integrator.step(p.id);
-      if (n % 4 === 0) await recover(this.coord, this.machineId, new Set(this.worker.active.keys()));
+      if (n % 4 === 0) await recover(this.coord, this.machineId, new Set([...this.worker.active.keys(), ...this.nativeCaptures.keys()]));
       if (n % 7 === 0) this.supervisor.check();
       if (n % 20 === 1) void this.refreshGraphs();
       if (n % 400 === 0 && loadConfig().cleanup.auto) this.cleanInBackground();
@@ -293,11 +304,12 @@ export class Hub {
   }
 
   async stop(): Promise<void> {
+    this.captureAbort.abort('The hub is shutting down.');
     for (const t of this.timers) clearInterval(t);
     this.coord.onChange = null;
     if (this.kickTimer) clearTimeout(this.kickTimer);
     this.worker.stopAll('shutdown', 'Yardmaster is shutting down');
-    await Promise.all([this.worker.drain(), this.integrator.stop()]);
+    await Promise.all([this.worker.drain(), this.integrator.stop(), Promise.allSettled([...this.nativeCaptures.values()])]);
     await new Promise<void>((r) => (this.server ? this.server.close(() => r()) : r()));
     this.releaseLock();
   }

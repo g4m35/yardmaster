@@ -174,7 +174,7 @@ ${bold('Manage work')}
   ym recover --confirm-stopped <id> --note "exit verified"  attest a PID-less spawn hold stopped
   ym recover --confirm-stopped <task> --remote --note "exit verified"  attest a lost worker stopped
   ym integration adopt <project> --head <SHA> --note "inspected"  check and keep interrupted merge work
-  ym pause [--now] [--all]     stop new work from starting (--now also parks running agents)
+  ym pause [--now] [--all]     stop new work from starting (--now parks coding; checks/review finish)
   ym resume                    start queued work again
   ym disk                      what uses disk space and what can be freed (--scan: duplicate dependencies anywhere)
   ym report [--days 7]         spend per merged task, waste, retries, and where the time goes
@@ -402,7 +402,7 @@ async function cmdPause(a: Args, pause: boolean) {
   const projectId = a.flags.all ? null : (await currentProject(client).catch(() => null))?.id ?? null;
   if (pause) {
     await client['fleet.pause']({ projectId, stopRunning: Boolean(a.flags.now), by: 'you' });
-    console.log(green(`✔ Paused ${projectId ? 'this project' : 'everything'}.`) + (a.flags.now ? ' Running agents saved their work and stopped; they continue on resume.' : ' Running agents finish their current task; nothing new starts.'));
+    console.log(green(`✔ Paused ${projectId ? 'this project' : 'everything'}.`) + (a.flags.now ? ' Coding stop requested; reported state confirms exit. Checks and reviews already running can finish.' : ' Running agents finish their current task; nothing new starts.'));
   } else {
     await client['fleet.resume']({ projectId, by: 'you' });
     console.log(green('✔ Resumed. Queued work will start again.'));

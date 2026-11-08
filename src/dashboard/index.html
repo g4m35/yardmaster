@@ -281,10 +281,10 @@
       <p>Start with a repository. Run <code>ym init</code> there, then <code>ym connect all</code> to connect supported coding clients. Return here and refresh.</p>
     </section>
     <section id="pause-ask" hidden aria-labelledby="pa-h" class="pause-ask">
-      <div><b id="pa-h">Pause new work?</b> Agents that are running right now can finish, or stop now and keep their work for later.</div>
+      <div><b id="pa-h">Pause new work?</b> Coding agents can finish, or stop now and keep their work for later. Checks and reviews already running can finish.</div>
       <div style="display:flex; gap:8px; flex-wrap:wrap">
         <button class="btn primary" id="pause-soft" type="button">Pause, let them finish</button>
-        <button class="btn" id="pause-now" type="button">Pause and stop them now</button>
+        <button class="btn" id="pause-now" type="button">Pause and stop coding</button>
         <button class="btn" id="pause-cancel" type="button">Keep going</button>
       </div>
     </section>
@@ -947,7 +947,7 @@
   $('pause-cancel').addEventListener('click', () => { pauseAsk.hidden = true; $('pause-btn').focus(); });
   const doPause = async (now) => {
     pauseAsk.hidden = true;
-    try { await rpc('fleet.pause', { projectId: projectId || null, stopRunning: now, by: 'dashboard' }); toast(now ? 'Paused. Stop requested for running work; wait for reported state.' : 'Paused. Running agents can finish first.'); refresh(); } catch (e) { toast(e.message); }
+    try { await rpc('fleet.pause', { projectId: projectId || null, stopRunning: now, by: 'dashboard' }); toast(now ? 'Paused. Stop requested for coding; checks and reviews can finish.' : 'Paused. Running agents can finish first.'); refresh(); } catch (e) { toast(e.message); }
   };
   $('pause-soft').addEventListener('click', () => doPause(false));
   $('pause-now').addEventListener('click', () => doPause(true));

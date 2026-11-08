@@ -9,7 +9,7 @@ import { isAlive, processStartTime, terminateRecordedProcess } from './proc.ts';
 import { recoverUtilities, runUtilityKey, taskHasPendingUtilities } from './utility-records.ts';
 import type { Run } from './types.ts';
 import type { TerminateResult } from './proc.ts';
-import { TERMINAL_STATUSES, type Project } from './types.ts';
+import { TERMINAL_STATUSES, type Project, type Task } from './types.ts';
 import { clip } from './text.ts';
 import { dirBytes, dirOfLogs, findArtifacts, freeGb, gb } from './disk.ts';
 
@@ -104,14 +104,23 @@ function safeList(dir: string): string[] {
   }
 }
 
+/** Historical native checkouts belong to their persisted run, even after the task points at a newer one. */
+function nativeWorktreeTask(coord: Coordinator, projectId: string, name: string): Task | null {
+  const match = /^(t-[a-z0-9]+)-native-([1-9][0-9]*)$/.exec(name);
+  if (!match) return null;
+  const task = coord.getTask(match[1]!);
+  return task?.project_id === projectId && coord.db.prepare("SELECT 1 FROM runs WHERE task_id = ? AND generation = ? AND agent = 'native' AND role = 'implement'").get(task.id, Number(match[2])) ? task : null;
+}
+
 /** Build output in a worktree that is kept: safe to delete because git ignores it and it can be rebuilt. */
-async function planArtifacts(coord: Coordinator, projectName: string, worktree: string, plan: CleanPlan): Promise<void> {
-  const project = coord.listProjects().find((p) => p.name === projectName);
-  const cfg = project ? coord.configFor(project.id).disk : null;
+async function planArtifacts(coord: Coordinator, project: Project, worktree: string, plan: CleanPlan): Promise<void> {
+  const cfg = coord.configFor(project.id).disk;
   if (!cfg?.trimArtifacts) return;
   for (const a of await findArtifacts(worktree, cfg.artifactDirs)) {
     if (a.bytes < 1e6) continue;
-    plan.remove.push({ kind: 'artifacts', target: a.path, worktree, project: projectName, projectId: project?.id, bytes: a.bytes, reason: `build output (${a.rel}, ${gb(a.bytes)}) in a kept worktree; git ignores it and it can be rebuilt` });
+    const name = worktree.split('/').pop()!;
+    const task = coord.getTask(name) ?? nativeWorktreeTask(coord, project.id, name);
+    plan.remove.push({ kind: 'artifacts', target: a.path, worktree, taskId: task?.id, generation: task?.generation, project: project.name, projectId: project.id, bytes: a.bytes, reason: `build output (${a.rel}, ${gb(a.bytes)}) in a kept worktree; git ignores it and it can be rebuilt` });
   }
 }
 
@@ -131,8 +140,11 @@ async function planProject(coord: Coordinator, project: Project, plan: CleanPlan
   for (const wt of worktrees) {
     if (!underRoot(wt.path, ourRoot)) continue; // user-owned worktrees are never candidates
     if (wt.path.endsWith('/_integration')) continue;
-    const taskId = wt.path.split('/').pop()!;
-    const task = tasks.get(taskId);
+    const name = wt.path.split('/').pop()!;
+    const nativeTask = nativeWorktreeTask(coord, project.id, name);
+    const nativeGeneration = name.split('-native-')[1];
+    const task = tasks.get(name) ?? (nativeTask && wt.branch === `yardmaster/native-${nativeTask.id}-${nativeGeneration}` ? nativeTask : null);
+    const taskId = task?.id ?? name;
     const item = { kind: 'worktree' as const, target: wt.path, project: project.name, projectId: project.id, taskId, generation: task?.generation, sha: wt.head ?? undefined, branch: wt.branch };
     if (wt.prunable || !existsSync(wt.path)) continue;
     if (wt.locked) {
@@ -150,7 +162,7 @@ async function planProject(coord: Coordinator, project: Project, plan: CleanPlan
     if (!TERMINAL_STATUSES.includes(task.status)) {
       if (task.status === 'needs_human') {
         plan.keep.push({ ...item, reason: `task ${task.id} needs you; kept for inspection` });
-        await planArtifacts(coord, project.name, wt.path, plan);
+        await planArtifacts(coord, project, wt.path, plan);
       }
       continue;
     }
@@ -160,7 +172,7 @@ async function planProject(coord: Coordinator, project: Project, plan: CleanPlan
     }
     if (!(await isClean(wt.path))) {
       plan.keep.push({ ...item, reason: `task ${task.id} (${task.status}) has uncommitted changes` });
-      await planArtifacts(coord, project.name, wt.path, plan);
+      await planArtifacts(coord, project, wt.path, plan);
       continue;
     }
     // Check the worktree's HEAD too: a detached HEAD can hold commits no branch points to.
@@ -171,7 +183,7 @@ async function planProject(coord: Coordinator, project: Project, plan: CleanPlan
       const ahead = (await gitOut(project.root, ['rev-list', '--count', `${integration}..${unmerged[0]}`]).catch(() => '?'));
       if (ahead !== '0') {
         plan.keep.push({ ...item, reason: `task ${task.id} (${task.status}) has ${ahead} commit(s) that were never merged` });
-        await planArtifacts(coord, project.name, wt.path, plan);
+        await planArtifacts(coord, project, wt.path, plan);
         continue;
       }
     }
@@ -189,13 +201,14 @@ async function planProject(coord: Coordinator, project: Project, plan: CleanPlan
   for (const branch of refs) {
     if (branch === integration) continue;
     const item = { kind: 'branch' as const, target: branch, project: project.name, projectId: project.id };
-    const task = tasks.get(branch.replace('yardmaster/', ''));
+    const nativeBranch = /^yardmaster\/native-(t-[a-z0-9]+)-([1-9][0-9]*)$/.exec(branch);
+    const task = tasks.get(branch.replace('yardmaster/', '')) ?? (nativeBranch ? nativeWorktreeTask(coord, project.id, `${nativeBranch[1]}-native-${nativeBranch[2]}`) : null);
     if (!task) {
       plan.keep.push({ ...item, reason: 'not linked to a known task' });
       continue;
     }
     if (!TERMINAL_STATUSES.includes(task.status)) continue;
-    if (checkedOut.has(branch) && !plan.remove.some((r) => r.kind === 'worktree' && r.target.endsWith(`/${task.id}`))) continue;
+    if (checkedOut.has(branch) && !plan.remove.some((r) => r.kind === 'worktree' && r.branch === branch)) continue;
     if (!(await intoTarget(branch))) {
       plan.keep.push({ ...item, reason: `task ${task.id} (${task.status}) has unmerged commits` });
       continue;
@@ -237,7 +250,7 @@ export async function runCleanup(coord: Coordinator, plan: CleanPlan): Promise<{
           if (!(await isClean(item.target))) throw new Error('changed since the plan was made; kept');
           await removeWorktree(root, item.target, { expectedHead: item.sha, expectedBranch: item.branch, guard });
           guard();
-          coord.updateTask(t.id, { worktree: null });
+          if (t.worktree && resolve(t.worktree) === resolve(item.target)) coord.updateTask(t.id, { worktree: null });
           break;
         }
         case 'prune':
@@ -246,7 +259,8 @@ export async function runCleanup(coord: Coordinator, plan: CleanPlan): Promise<{
         case 'artifacts': {
           const wt = item.worktree!;
           const id = wt.split('/').pop()!;
-          const t = coord.getTask(id);
+          const t = item.taskId ? coord.getTask(item.taskId) : coord.getTask(id);
+          if (item.taskId && (!t || t.generation !== item.generation)) throw new Error('Artifact owner changed; kept');
           if (t && ['running', 'verifying', 'merging'].includes(t.status)) throw new Error('its task started running again; kept');
           if (t && coord.db.prepare("SELECT 1 FROM runs WHERE task_id = ? AND status IN ('running','lost','cleanup_failed') LIMIT 1").get(t.id)) throw new Error('Process exit is unconfirmed; artifacts kept');
           if (t && taskHasPendingUtilities(coord.db, t.id)) throw new Error('Utility exit is unconfirmed; artifacts kept');
@@ -452,8 +466,8 @@ export async function diskReport(coord: Coordinator, projectId: string | null): 
     const dir = join(worktreeRootOf(coord.configFor(p.id)), `${p.name}-${p.id.slice(2, 8)}`);
     for (const name of safeList(dir)) {
       const path = join(dir, name);
-      const task = coord.getTask(name);
-      worktrees.push({ path, taskId: name, title: task?.title ?? (name === '_integration' ? 'integration branch' : null), status: task?.status ?? (name === '_integration' ? 'integration' : 'unknown'), bytes: await dirBytes(path), project: p.name });
+      const task = coord.getTask(name) ?? nativeWorktreeTask(coord, p.id, name);
+      worktrees.push({ path, taskId: task?.id ?? name, title: task?.title ?? (name === '_integration' ? 'integration branch' : null), status: task?.status ?? (name === '_integration' ? 'integration' : 'unknown'), bytes: await dirBytes(path), project: p.name });
     }
   }
   const plan = await planCleanup(coord, projectId ?? undefined);

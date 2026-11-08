@@ -6,6 +6,7 @@ import { openDb } from '../src/db.ts';
 import { Coordinator, StaleAttemptError } from '../src/coordinator.ts';
 import { buildMethods, localClient, type Client } from '../src/api.ts';
 import { runAttempt, Semaphore } from '../src/runner.ts';
+import { nativeArtifactRef } from '../src/handoff.ts';
 import { loadConfig } from '../src/config.ts';
 import { Integrator } from '../src/integrator.ts';
 import { WorkerLoop } from '../src/worker.ts';
@@ -14,6 +15,7 @@ import type { AgentEvent } from '../src/adapters/types.ts';
 import { listHeld } from '../src/budgets.ts';
 import { authorizeWorkerRpc, PairingStore } from '../src/pairing.ts';
 import { recover } from '../src/janitor.ts';
+import { diskReport, planCleanup, runCleanup } from '../src/janitor.ts';
 import { sandbox, sh, until } from './helpers.ts';
 
 async function fixture(config: Record<string, unknown> = {}) {
@@ -103,15 +105,16 @@ test('queued handoff survives hub restart and duplicate finish never borrows a n
   } finally { coord.db.close(); }
 });
 
-for (const phase of ['before verification', 'during checks']) test(`moved source HEAD ${phase} fails closed`, async () => {
+for (const phase of ['before verification', 'during checks']) test(`source edits ${phase} do not invalidate the captured artifact`, async () => {
   const s = await fixture();
   const move = () => { writeFileSync(join(s.repo, 'manual.txt'), 'manual commit'); sh(s.repo, 'git', ['add', 'manual.txt']); sh(s.repo, 'git', ['commit', '-qm', 'manual after capture']); };
   try {
     await s.submit();
     if (phase === 'before verification') move();
     const api = intercept(s.client, (key, p) => { if (phase === 'during checks' && key === 'task.update' && p.patch.status === 'verifying') move(); });
-    await assert.rejects(s.execute(api), /branch moved/);
-    assert.notEqual(s.coord.getTask(s.task.id)!.status, 'ready');
+    assert.equal((await s.execute(api)).status, 'ready');
+    assert.equal(s.coord.getTask(s.task.id)!.head_sha, s.sha);
+    assert.equal(sh(s.repo, 'git', ['rev-parse', nativeArtifactRef(s.task.id, s.claim.generation)]), s.sha);
     assert.equal(readFileSync(join(s.repo, 'manual.txt'), 'utf8'), 'manual commit');
     assert.deepEqual(listHeld(s.coord.db), []);
   } finally { s.coord.db.close(); }
@@ -178,7 +181,7 @@ test('cancel and native reclaim fence an old queued generation and release only 
     const queued = await s.submit();
     assert.deepEqual(s.coord.activeLocks(s.project.id).map(l => l.pattern).sort(), ['manual/**', 'other.txt']);
     s.coord.control(s.task.id, 'cancel', 'test');
-    assert.equal((await s.submit()).status, 'canceled', 'lost-response retry cannot resurrect canceled job');
+    await assert.rejects(s.submit(), /Native handoff is canceled/, 'lost-response retry cannot resurrect canceled job');
     s.coord.control(s.task.id, 'retry', 'test');
     const next = s.coord.claimForSession(s.sessionId, s.project.id, s.task.id)!;
     assert.ok(next.generation > queued.generation); assert.equal(next.native_handoff, null);
@@ -192,13 +195,60 @@ test('interrupted capture is recovered without inventing an artifact or launchin
   const s = await fixture();
   try {
     const started = s.coord.beginSessionHandoff(s.sessionId, s.task.id, s.claim.generation, 'native-result', 'm-hub', 'capture interrupted');
+    await assert.rejects(s.submit(), /capture is still in progress/);
     s.coord.confirmRunExit(started.run!.id, s.task.id, { generation: started.task.generation, assignee: started.task.assignee! });
     s.coord.updateTask(s.task.id, { lease_until: Date.now() - 1 });
     await recover(s.coord, 'm-hub', new Set());
     assert.equal(await s.workerClaim(), null);
-    assert.equal(s.coord.getTask(s.task.id)!.status, 'needs_human');
-    assert.match(s.coord.getTask(s.task.id)!.attention!, /capture was interrupted/);
+    assert.equal(s.coord.getTask(s.task.id)!.status, 'queued');
+    assert.match(s.coord.blocker(s.coord.getTask(s.task.id)!)!, /native client.*take.*again/);
     assert.deepEqual(listHeld(s.coord.db), []);
+  } finally { s.coord.db.close(); }
+});
+
+test('native redirect and failed-capture replay explain taking the task again without reporting success', async () => {
+  const s = await fixture();
+  try {
+    writeFileSync(join(s.repo, 'scratch.txt'), 'keep');
+    await assert.rejects(s.submit(), /Take this task again/);
+    const count = s.coord.runsFor(s.task.id).length;
+    await assert.rejects(s.submit(), /capture did not complete/);
+    assert.throws(() => s.coord.control(s.task.id, 'redirect', 'test', 'do something else'), /native client.*take this task again/);
+    assert.equal(s.coord.runsFor(s.task.id).length, count);
+    assert.equal(s.coord.getTask(s.task.id)!.status, 'needs_human');
+  } finally { s.coord.db.close(); }
+});
+
+for (const laterCommit of [false, true]) test(`historical native checkouts retain task ownership and guarded cleanup (later manual commit=${laterCommit})`, async () => {
+  const s = await fixture({ cleanup: { auto: false, deleteMergedBranches: true } });
+  try {
+    s.coord.updateTask(s.task.id, { verify: ['node -e "process.exit(1)"'] });
+    await s.submit(); assert.equal((await s.execute()).status, 'needs_human');
+    const old = s.coord.getTask(s.task.id)!.worktree!;
+    if (laterCommit) {
+      writeFileSync(join(old, 'manual.txt'), 'Preserve unmerged inspection');
+      sh(old, 'git', ['add', '-A']); sh(old, 'git', ['commit', '-qm', 'inspection commit']);
+    }
+    const claim = s.coord.claimForSession(s.sessionId, s.project.id, s.task.id)!;
+    writeFileSync(join(s.repo, 'result.txt'), 'fixed\n'); sh(s.repo, 'git', ['commit', '-qam', 'native fix']);
+    s.coord.updateTask(s.task.id, { verify: [] });
+    await s.client['session.finish']({ ...s.params, generation: claim.generation });
+    assert.equal((await s.execute()).status, 'ready');
+    await new Integrator(s.coord, new Semaphore(1)).step(s.project.id);
+    const latest = s.coord.getTask(s.task.id)!.worktree;
+    const report = await diskReport(s.coord, s.project.id);
+    assert.equal(report.worktrees.find(w => w.path === old)!.taskId, s.task.id);
+    const plan = await planCleanup(s.coord, s.project.id, { sizes: false });
+    if (laterCommit) {
+      assert.ok(plan.keep.some(item => item.target === old && /never merged/.test(item.reason)));
+      assert.equal(readFileSync(join(old, 'manual.txt'), 'utf8'), 'Preserve unmerged inspection');
+    } else {
+      assert.ok(plan.remove.some(item => item.target === old && item.taskId === s.task.id));
+      const result = await runCleanup(s.coord, { keep: plan.keep, remove: plan.remove.filter(item => item.kind === 'worktree' && item.target === old) });
+      assert.deepEqual(result.failed, []); assert.equal(existsSync(old), false);
+      assert.equal(s.coord.getTask(s.task.id)!.worktree, latest, 'retiring an old generation cannot clear the current checkout pointer');
+    }
+    assert.equal(sh(s.repo, 'git', ['branch', '--show-current']), 'native-result');
   } finally { s.coord.db.close(); }
 });
 

@@ -25,6 +25,8 @@ export function parseHandoff(raw: string | null | undefined): NativeHandoff | nu
   return data;
 }
 
+export const nativeArtifactRef = (taskId: string, generation: number) => `refs/yardmaster/native/${taskId}/${generation}`;
+
 /** Never check out, commit, reset, remove or update a ref in the native source. */
 export async function assertNativeSource(repo: string, data: NativeHandoff): Promise<string> {
   if (!(existsSync(data.cwd) && (realpathSync(data.cwd) === realpathSync(repo) || isLinkedWorktreeOf(data.cwd, repo)))) throw new Error('Unsupported remote native handoff: source must be an existing checkout of the hub repository. Native binary export is not implemented.');
@@ -40,19 +42,21 @@ export async function assertNativeSource(repo: string, data: NativeHandoff): Pro
   const ref = `refs/heads/${data.branch}`;
   const sha = await revParse(repo, ref);
   const attached = (await git(data.cwd, ['symbolic-ref', '-q', 'HEAD'], { allowFail: true })).stdout.trim();
-  if (!sha || attached !== ref || await revParse(data.cwd, 'HEAD') !== sha || !(await isClean(data.cwd))) throw new Error('Native source is dirty, detached, or no longer on the submitted branch. Commit the intended work and submit again; source work is preserved.');
-  if (data.sha && sha !== data.sha) throw new Error('Native source branch moved after capture; no artifact accepted. Source work is preserved.');
+  const clean = (await git(data.cwd, ['--no-optional-locks', 'status', '--porcelain', '--untracked-files=all'])).stdout.trim() === '';
+  if (!sha || attached !== ref || await revParse(data.cwd, 'HEAD') !== sha || !clean) throw new Error('Native source is dirty, detached, or no longer on the submitted branch. Take this task again by id in your native client, commit the intended work and resubmit; source work is preserved.');
   return sha;
 }
 
 /** Bounded capture only; long checks/review run in the existing WorkerLoop after this returns. */
-export async function submitSessionHandoff(coord: Coordinator, machineId: string, p: { sessionId: string; taskId: string; generation?: number; branch: string; summary: string; outcome: 'done' | 'failed' }): Promise<Task> {
+export async function submitSessionHandoff(coord: Coordinator, machineId: string, p: { sessionId: string; taskId: string; generation?: number; branch: string; summary: string; outcome: 'done' | 'failed' }, signal?: AbortSignal): Promise<Task> {
+  if (signal?.aborted) throw new Error('The hub is shutting down; native capture was not started.');
   if (p.outcome !== 'done') throw new Error('A branch can only be submitted with outcome done. Use plain completion to report failure.');
   const { task, run } = coord.beginSessionHandoff(p.sessionId, p.taskId, p.generation, p.branch, machineId, p.summary);
   if (!run) return task; // Replay of this captured session generation, including lost RPC responses.
   const owner = { generation: task.generation, assignee: task.assignee! };
   const key = runUtilityKey(run.id);
   const abort = new AbortController();
+  const captureSignal = signal ? AbortSignal.any([signal, abort.signal]) : abort.signal;
   const deadline = setTimeout(() => abort.abort('Native capture deadline (5 seconds) exceeded.'), 5000);
   const poll = setInterval(() => {
     try {
@@ -62,17 +66,20 @@ export async function submitSessionHandoff(coord: Coordinator, machineId: string
   }, 100);
   try {
     const data = parseHandoff(task.native_handoff)!;
-    const captured = await withProcessScope({ signal: abort.signal, timeoutMs: 5000,
+    const captured = await withProcessScope({ signal: captureSignal, timeoutMs: 5000,
       beforeSpawn: child => { const t = coord.assertTaskOwner(task.id, owner); if (t.control) throw new Error('Task control pending.'); recordUtility(coord.db, key, { action: 'intent', token: child.token, command: child.command }); },
       onSpawn: (token, child) => recordUtility(coord.db, key, { action: 'spawn', token, pid: child.pid, startedAt: child.startedAt }),
       onExit: (token, result) => recordUtility(coord.db, key, { action: 'exit', token, pid: result.pid, startedAt: result.startedAt, reaped: result.reaped }),
     }, async () => {
-      const sha = await assertNativeSource(coord.getProject(task.project_id)!.root, data);
+      const repo = coord.getProject(task.project_id)!.root;
+      const sha = await assertNativeSource(repo, data);
+      // Capture is the boundary: later editor changes cannot invalidate this immutable artifact.
+      await git(repo, ['update-ref', nativeArtifactRef(task.id, data.sessionGeneration), sha, '0'.repeat(sha.length)]);
       if (currentProcessScopeSignal()?.aborted) throw new Error('Native capture canceled.');
       return { ...data, sha };
     });
     coord.assertTaskOwner(task.id, owner);
-    if (abort.signal.aborted || coord.getTask(task.id)!.control) throw new Error('Native capture canceled.');
+    if (captureSignal.aborted || coord.getTask(task.id)!.control) throw new Error('Native capture canceled.');
     coord.updateRun(run.id, { status: 'succeeded', phase: null, ended_at: Date.now() });
     coord.confirmRunExit(run.id, task.id, owner);
     return coord.queueSessionHandoff(task, captured);
@@ -89,7 +96,7 @@ export async function submitSessionHandoff(coord: Coordinator, machineId: string
 export async function materializeNativeArtifact(repo: string, task: Task, path: string, branch: string): Promise<NativeHandoff> {
   const data = parseHandoff(task.native_handoff)!;
   if (!data.sha || task.machine_id !== data.machineId) throw new Error('Native handoff has no complete local capture.');
-  await assertNativeSource(repo, data);
+  if (await revParse(repo, nativeArtifactRef(task.id, data.sessionGeneration)) !== data.sha) throw new Error('Native captured ref is missing or changed. Take this task again by id in your native client and resubmit.');
   if (existsSync(path)) throw new Error('Native verification checkout already exists; preserve it and resolve recovery before resubmitting.');
   mkdirSync(dirname(path), { recursive: true });
   // Atomic create: never overwrite a user-created or previous Yardmaster ref.

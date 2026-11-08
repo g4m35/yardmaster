@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { request } from 'node:http';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { Hub } from '../src/hub.ts';
@@ -11,7 +13,8 @@ import { Semaphore } from '../src/runner.ts';
 import { httpTransport } from '../src/transport.ts';
 import { WorkerLoop, type BranchTransport } from '../src/worker.ts';
 import { WorkerJournal } from '../src/worker-journal.ts';
-import { recover } from '../src/janitor.ts';
+import { recover, planCleanup, runCleanup } from '../src/janitor.ts';
+import { groupAlive, processStartTime, terminateOwnedGroup } from '../src/proc.ts';
 import { listHeld } from '../src/budgets.ts';
 import type { Task } from '../src/types.ts';
 import { sandbox, sh, settleTasks, until } from './helpers.ts';
@@ -85,6 +88,42 @@ function latch() {
   const promise = new Promise<void>(resolve => { release = resolve; });
   return { promise, release };
 }
+
+test('real paired HTTP cancellation and a live utility preserve work against a stale hub cleanup plan', { timeout: 25_000 }, async () => {
+  const f = await fleet(); let child: ReturnType<typeof spawn> | undefined;
+  try {
+    const machine = f.machines[0]!;
+    const task = f.hub.coord.addTasks(f.project.id, [{ title: 'Keep a canceled utility checkout', agent: 'mock' }], 'cleanup fixture').created[0]!;
+    let claim = await machine.client['worker.claim']({ machineId: machine.machineId, agents: ['mock'], repos: { [f.project.id]: machine.repo } }); assert.ok(claim);
+    const path = join(f.root, 'worktrees', `${f.project.name}-${f.project.id.slice(2, 8)}`, task.id);
+    sh(f.repo, 'git', ['worktree', 'add', '-qb', claim.task.branch!, path, claim.startPoint!]);
+    await machine.client['task.update']({ id: task.id, owner: { generation: claim.task.generation, assignee: claim.task.assignee! }, patch: { worktree: path } });
+    await f.owner['task.control']({ id: task.id, action: 'cancel' });
+    const plan = await planCleanup(f.hub.coord, f.project.id, { sizes: false });
+    assert.ok(plan.remove.some(item => item.target === path));
+    await f.owner['task.control']({ id: task.id, action: 'retry' });
+    claim = await machine.client['worker.claim']({ machineId: machine.machineId, agents: ['mock'], repos: { [f.project.id]: machine.repo } }); assert.ok(claim);
+    const owner = { generation: claim.task.generation, assignee: claim.task.assignee! };
+    const runId = await machine.client['run.start']({ taskId: task.id, machineId: machine.machineId, agent: 'mock', owner, logPath: '' });
+    await machine.client['run.utility']({ runId, taskId: task.id, owner, operation: { action: 'intent', token: 'live-cleanup', command: 'git' } });
+    child = spawn(process.execPath, ['-e', "console.log('ready');setInterval(()=>{},1000)"], { cwd: path, detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    await once(child.stdout!, 'data');
+    const startedAt = await processStartTime(child.pid!);
+    await machine.client['run.utility']({ runId, taskId: task.id, owner, operation: { action: 'spawn', token: 'live-cleanup', pid: child.pid!, startedAt } });
+    await machine.client['run.update']({ runId, owner, patch: { status: 'succeeded' } });
+    await f.owner['task.control']({ id: task.id, action: 'cancel' });
+    await assert.rejects(machine.client['run.exit']({ runId, taskId: task.id, owner, reaped: true }), /utilities/);
+    assert.equal(groupAlive(child.pid!), true);
+    const fresh = await planCleanup(f.hub.coord, f.project.id, { sizes: false });
+    assert.ok(fresh.keep.some(item => item.target === path && /process|artifacts.*held/.test(item.reason)));
+    const result = await runCleanup(f.hub.coord, plan);
+    assert.ok(result.failed.some(item => item.item.target === path));
+    assert.equal(sh(path, 'git', ['rev-parse', 'HEAD']), claim.startPoint);
+    await terminateOwnedGroup(child.pid!, { graceMs: 20 });
+    await machine.client['run.utility']({ runId, taskId: task.id, owner, operation: { action: 'exit', token: 'live-cleanup', pid: child.pid!, startedAt, reaped: true } });
+    await machine.client['run.exit']({ runId, taskId: task.id, owner, reaped: true });
+  } finally { if (child?.pid) await terminateOwnedGroup(child.pid, { graceMs: 20 }); await f.close(); }
+});
 
 test('real paired HTTP recovery survives sleep-past-lease and A to B to A ownership in every idle phase', { timeout: 45_000 }, async () => {
   const f = await fleet();

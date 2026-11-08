@@ -1,4 +1,4 @@
-import { assertNativeSource, materializeNativeArtifact, parseHandoff, type NativeHandoff } from './handoff.ts';
+import { materializeNativeArtifact, nativeArtifactRef, parseHandoff, type NativeHandoff } from './handoff.ts';
 import { createWriteStream, existsSync, readFileSync, type WriteStream } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
@@ -789,8 +789,12 @@ async function runNativeArtifact(ctx: RunContext, runId: string, log: LogBuffer,
   const wt = worktreePathFor(config, ctx.project, `${task.id}-native-${task.generation}`);
   // Persist the owned destination before creating any files; recovery never targets the native source.
   await update(ctx, { worktree: wt, branch, base_sha: ctx.startPoint });
-  await materializeNativeArtifact(ctx.repoPath, task, wt, branch);
-  if (!(await isAncestor(wt, ctx.startPoint, data.sha!))) return finishNeedsHuman(ctx, 'Native commit must contain the current integration base. Rebase/merge in the native client and resubmit.', runId);
+  try { await materializeNativeArtifact(ctx.repoPath, task, wt, branch); }
+  catch (error) {
+    if (error instanceof UtilityProcessError || /Task control pending:/.test((error as Error).message) || ctx.signal?.aborted) throw error;
+    return finishNeedsHuman(ctx, `Native artifact could not be prepared: ${(error as Error).message}`, runId);
+  }
+  if (!(await isAncestor(wt, ctx.startPoint, data.sha!))) return finishNeedsHuman(ctx, 'Native commit must contain the current integration base. Take this task again by id, rebase/merge in the native client and resubmit.', runId);
   await warmStart(ctx.repoPath, wt, config, { candidates: siblingWorktrees(wt) });
   for (const command of config.worktree.setup) {
     await api['run.update']({ runId, patch: { phase: 'setup:spawning' } });
@@ -959,7 +963,7 @@ async function acceptArtifact(ctx: RunContext, wt: string, baseSha: string, file
   }
 
   if (native) {
-    await assertNativeSource(ctx.repoPath, native);
+    if (await revParse(ctx.repoPath, nativeArtifactRef(task.id, native.sessionGeneration)) !== native.sha) return finishNeedsHuman(ctx, 'The captured native ref changed; take this task again by id and resubmit.', runId);
     if (await revParse(wt, 'HEAD') !== native.sha || !(await isClean(wt))) return finishNeedsHuman(ctx, 'Native accepted artifact changed after checks/review.', runId);
   }
   await finishRun('succeeded');

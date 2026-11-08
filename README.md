@@ -63,7 +63,7 @@ Want to see it first without spending tokens? `ym demo` starts an isolated sandb
 | `ym retry`, `stop`, `cancel`, `approve` `<id>` | Control a task |
 | `ym land` | Fast-forward your branch to the finished work |
 | `ym tell <id> "use the existing date helper"` | Redirect a running agent; it restarts with your guidance and keeps its work |
-| `ym pause [--now]` / `ym resume` | Stop new work from starting (`--now` also parks running agents, saving their work) |
+| `ym pause [--now]` / `ym resume` | Stop new work from starting (`--now` parks coding agents and saves their work; checks/reviews already running finish) |
 | `ym disk` | What uses disk space and what can be freed safely |
 | `ym service install` | Keep the hub running across crashes and reboots (launchd on macOS, systemd on Linux) |
 | `ym clean` | Show what can be cleaned up; `--yes` to do it |

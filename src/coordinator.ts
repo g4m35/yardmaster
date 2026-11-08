@@ -552,6 +552,7 @@ export class Coordinator {
         });
       }
       case 'redirect': {
+        if (t.native_handoff) throw new Error('This task holds a native artifact. Make the change in your native client, then take this task again by id and resubmit.');
         const text = note?.trim();
         if (!text) throw new Error('Say what the agent should do differently.');
         if (this.configFor(t.project_id).learning.lessons) addLesson(this, t.project_id, text, 'you', widenScope(t.scope), t.id);
@@ -568,13 +569,18 @@ export class Coordinator {
       }
       case 'retry': {
         if (!['needs_human', 'failed', 'canceled', 'queued'].includes(t.status)) throw new Error(`${id} is ${t.status}; only stopped tasks can be retried.`);
+        return tx(this.db, () => {
+        const native = parseHandoff(t.native_handoff);
+        if (native) this.db.prepare('UPDATE tasks SET native_handoff = ? WHERE id = ?').run(JSON.stringify({ ...native, sha: null }), id);
         const fresh = this.updateTask(id, {
           status: 'queued', attention: null, not_before: null, same_error_count: 0, error_fp: null, control: null,
           assignee: null, machine_id: null, lease_until: null,
           max_attempts: Math.max(t.max_attempts, t.attempts + 1), wait_for: null, conflict_rounds: 0,
+          ...(native ? { attention: 'Take this task again by id in your native client, then resubmit the intended commit.' } : {}),
         });
         this.event(t.project_id, id, 'info', 'task.retry', `${by} asked to retry "${t.title}"`);
         return fresh;
+        });
       }
       case 'cancel': {
         if (TERMINAL_STATUSES.includes(t.status)) return t;
@@ -740,6 +746,7 @@ export class Coordinator {
     const hold = this.processHold(task.id);
     if (hold === 'process') return 'An earlier owned process has not been confirmed stopped. Worktree is held for recovery.';
     if (hold === 'utility') return 'An earlier Git or copy utility has not confirmed exit. Work is held for recovery.';
+    if (task.native_handoff && !parseHandoff(task.native_handoff)?.sha && !reservationHolder) return 'Waiting for the native client to take this task again by id and resubmit.';
     const pause = this.pausedState(task.project_id);
     if (pause.paused) return `Paused by ${pause.by ?? 'you'}. Resume to start new work.`;
     if (task.not_before && task.not_before > now) return `Retrying in ${Math.ceil((task.not_before - now) / 1000)}s`;
@@ -795,7 +802,7 @@ export class Coordinator {
       for (const task of queued) {
         if (!req.repos[task.project_id]) continue;
         const native = parseHandoff(task.native_handoff);
-        if (native && !native.sha) { this.updateTask(task.id, { status: 'needs_human', attention: 'Native capture was interrupted; retry and reclaim in the native client to resubmit.' }); continue; }
+        if (native && !native.sha) continue;
         if (native && native.machineId !== req.machineId) continue;
         if (req.activeTaskIds?.includes(task.id) || this.blocker(task, now)) continue;
         // Retries go back to the machine that has the task's worktree (and its partial work), while it is online.
@@ -1238,7 +1245,8 @@ export class Coordinator {
       for (const t of candidates) {
         if (t.project_id !== projectId) throw new Error(`${t.id} belongs to a different project.`);
         if (t.native_handoff && !taskId) continue;
-        if (t.status !== 'queued') {
+        const nativeReclaim = !!taskId && !!t.native_handoff && t.status === 'needs_human';
+        if (t.status !== 'queued' && !nativeReclaim) {
           if (taskId) throw new Error(`${t.id} is ${t.status}, not available.`);
           continue;
         }
@@ -1252,7 +1260,7 @@ export class Coordinator {
           this.db.prepare('UPDATE tasks SET native_handoff = NULL WHERE id = ?').run(t.id);
         }
         this.advanceGeneration(t.id);
-        const claimed = this.updateTask(t.id, { status: 'running', assignee: sessionId, machine_id: null, attempts: t.attempts + 1, started_at: Date.now(), lease_until: Date.now() + 60 * 60_000 });
+        const claimed = this.updateTask(t.id, { status: 'running', assignee: sessionId, machine_id: null, attempts: t.attempts + 1, control: null, attention: null, not_before: null, started_at: Date.now(), lease_until: Date.now() + 60 * 60_000 });
         this.event(projectId, t.id, 'info', 'task.claimed', `${sessionId.replace('session:', '')} is working on "${t.title}" in its own session`);
         return claimed;
       }
@@ -1265,7 +1273,11 @@ export class Coordinator {
     return tx(this.db, () => {
       const previous = this.getTask(taskId);
       const replay = parseHandoff(previous?.native_handoff);
-      if (previous && replay?.sessionId === sessionId && replay.sessionGeneration === generation && replay.branch === branch) return { task: previous, run: null };
+      if (previous && replay?.sessionId === sessionId && replay.sessionGeneration === generation && replay.branch === branch) {
+        if (!replay.sha) throw new Error(previous.status === 'running' ? 'Native capture is still in progress; inspect this task before retrying.' : 'Native capture did not complete. Take this task again by id in your native client and resubmit.');
+        if (['needs_human', 'failed', 'canceled'].includes(previous.status)) throw new Error(`Native handoff is ${previous.status}. Take this task again by id after resolving it; no new artifact was submitted.`);
+        return { task: previous, run: null };
+      }
       const task = this.assertTaskOwner(taskId, { generation, assignee: sessionId, statuses: ['running'] });
       if (task.control) throw new Error(`Task control pending: ${task.control}`);
       const session = this.db.prepare('SELECT cwd, machine_id, agent, project_id FROM sessions WHERE id = ?').get(sessionId) as { cwd: string | null; machine_id: string | null; agent: string | null; project_id: string | null } | undefined;

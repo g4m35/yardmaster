@@ -32,6 +32,7 @@ export interface HubHooks {
   adoptIntegration?: (projectId: string, head: string, by: string, note: string) => Promise<void>;
   cleanPlan?: (projectId?: string) => Promise<unknown>;
   cleanRun?: (projectId?: string) => Promise<unknown>;
+  captureNative?: (params: Parameters<typeof submitSessionHandoff>[2]) => Promise<Task>;
 }
 
 const Id = z.string().min(1);
@@ -293,7 +294,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       coord.setPaused(p.projectId ?? null, true, p.by);
       if (p.stopRunning) {
         // Running agents save their partial work and go back to the queue; they continue on resume.
-        for (const t of coord.listTasks(p.projectId ?? null, ['running', 'verifying'])) if (!t.assignee?.startsWith('session:')) coord.updateTask(t.id, { control: 'stop-pause' });
+        for (const t of coord.listTasks(p.projectId ?? null, ['running'])) if (!t.assignee?.startsWith('session:')) coord.updateTask(t.id, { control: 'stop-pause' });
         hooks.stopRunning?.(p.projectId);
       }
       return coord.pausedState(p.projectId);
@@ -323,7 +324,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
     ),
     'session.claim': method(z.object({ sessionId: Id, projectId: Id, taskId: z.string().optional() }), (p) => coord.claimForSession(p.sessionId, p.projectId, p.taskId)),
     'session.finish': method(z.object({ sessionId: Id, taskId: Id, summary: z.string(), outcome: z.enum(['done', 'failed']).default('done'), branch: z.string().optional(), generation: Generation.optional() }), (p) =>
-      p.branch ? submitSessionHandoff(coord, hooks.machineId, { ...p, branch: p.branch }) : coord.finishForSession(p.sessionId, p.taskId, p.summary, p.outcome, undefined, p.generation),
+      p.branch ? (hooks.captureNative ? hooks.captureNative({ ...p, branch: p.branch }) : submitSessionHandoff(coord, hooks.machineId, { ...p, branch: p.branch })) : coord.finishForSession(p.sessionId, p.taskId, p.summary, p.outcome, undefined, p.generation),
     ),
 
     'msg.send': method(z.object({ projectId: Id, from: Id, to: Id, body: z.string().min(1).max(4000), taskId: z.string().nullish() }), (p) => coord.sendMessage(p.projectId, p.from, p.to, p.body, p.taskId)),

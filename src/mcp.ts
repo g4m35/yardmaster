@@ -114,7 +114,7 @@ export function buildMcpServer(ctx: Ctx): McpServer {
     return r.length ? r.map((h) => `${h.path}: ${h.holder} (${h.detail})`).join('\n') : 'Nobody. Free to edit.';
   });
 
-  tool('yard_take_task', 'Take a queued task to do yourself in this session (next best one if no id).', z.object({ id: z.string().optional(), ...repoArg }), async (a) => {
+  tool('yard_take_task', 'Take a queued task to do yourself, or take a native task needing changes again by its id (next best queued task if no id).', z.object({ id: z.string().optional(), ...repoArg }), async (a) => {
     const p = await projectId(ctx, a.repo);
     const t = await ctx.client['session.claim']({ sessionId: ctx.identity, projectId: p.id, taskId: a.id });
     if (!t) return 'Nothing is ready to take right now.';
@@ -133,7 +133,8 @@ export function buildMcpServer(ctx: Ctx): McpServer {
       throw error;
     });
     claims.delete(a.id);
-    return `${t.id} is now ${t.status}.${a.branch ? ' Native artifact submitted; checks/review and integration are still pending. Source branch/worktree are preserved.' : ' Reported outcome only; no automated verification claimed.'}`;
+    const artifact = ['ready', 'merging'].includes(t.status) ? 'Native artifact passed checks; integration is pending.' : t.status === 'done' ? 'Native artifact completed integration.' : 'Native artifact captured; checks/review and integration are pending.';
+    return `${t.id} is now ${t.status}.${a.branch ? ` ${artifact} Source branch/worktree are preserved.` : ' Reported outcome only; no automated verification claimed.'}`;
   });
 
   tool('yard_send', 'Leave a short note for a task id, a session, or "*" for everyone (handoffs, warnings about shared APIs).', z.object({ to: z.string(), body: z.string().max(2000), taskId: z.string().optional(), ...repoArg }), async (a) => {
