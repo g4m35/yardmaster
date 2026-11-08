@@ -19,6 +19,29 @@ const usage = { costUsd: .3, tokensIn: 30, tokensOut: 3, provenance: 'actual' as
 function clientFor(coord: Coordinator): Client { return localClient(buildMethods(coord, { machineId: 'm1', integrationHead: async () => 'a'.repeat(40) })); }
 function receipts(home: string) { return readdirSync(join(home, 'planning-receipts')).filter(name => name.endsWith('.json')); }
 
+for (const hub of [undefined, '']) test(`local CLI recovery replays its receipt with ${hub === undefined ? 'unset' : 'empty'} hub configuration`, async () => {
+  const box = sandbox();
+  writeFileSync(join(box.home, 'machine-id'), 'm1\n');
+  const dbPath = join(box.home, 'yardmaster.db');
+  const coord = new Coordinator(openDb(dbPath));
+  try {
+    const project = await coord.registerProject(box.repo);
+    const owner = { pid: process.pid, startedAt: (await processStartTime(process.pid))! - 60_000 };
+    const admitted = await clientFor(coord)['plan.start']({ projectId: project.id, machineId: 'm1', agent: 'mock', model: null, owner });
+    new PlanningJournal({ hub: `local:${dbPath}`, machineId: 'm1', projectId: project.id, runId: admitted.runId, owner });
+    const env = { ...process.env, YARDMASTER_HUB: hub, YARDMASTER_TOKEN: '' };
+    if (hub === undefined) delete env.YARDMASTER_HUB;
+    const child = spawn(process.execPath, [join(import.meta.dirname, '../src/cli.ts'), 'recover', '--json'],
+      { cwd: box.repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = ''; let errors = '';
+    child.stdout!.on('data', data => { output += data; }); child.stderr!.on('data', data => { errors += data; });
+    const [code] = await once(child, 'exit'); assert.equal(code, 0, errors);
+    assert.deepEqual(JSON.parse(output), { replayed: [admitted.runId], pending: [], skippedLive: [] });
+    assert.equal(listHeld(coord.db).length, 0);
+    assert.equal(receipts(box.home).length, 0);
+  } finally { coord.db.close(); }
+});
+
 for (const outage of ['final-unavailable', 'usage-ack-lost', 'finish-ack-lost'] as const) test(`planning receipt survives ${outage} and restart accounts before release exactly once`, async () => {
   const box = sandbox({ budget: { dailyUsd: 5, perTaskUsd: 3 } });
   const dbPath = join(box.home, 'outage.sqlite');

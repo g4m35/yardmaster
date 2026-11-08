@@ -27,6 +27,7 @@ try {
   const doctor = command(node, [cli, 'doctor'], install, env);
   assert.match(doctor, /Node.js 22.16\+/);
   assert.match(doctor, /Cost coverage:/);
+  assert.deepEqual(JSON.parse(command(node, [cli, 'recover', '--json'], install, env)), { replayed: [], pending: [], skippedLive: [] });
   console.log(JSON.stringify({ kind: 'package-smoke', version, node: command(node, ['--version'], install).trim(),
-    checks: ['tarball install', 'version', 'help', 'dashboard asset', 'doctor without personal hub'], result: 'pass' }));
+    checks: ['tarball install', 'version', 'help', 'dashboard asset', 'doctor without personal hub', 'local recovery'], result: 'pass' }));
 } finally { rmSync(root, { recursive: true, force: true }); }

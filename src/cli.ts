@@ -266,7 +266,7 @@ async function cmdPlan(a: Args) {
   const project = await currentProject(client, root);
   console.log(dim(`Asking ${getAdapter(agent, config)?.label ?? agent} to plan (read-only; admission and reactive budget limits apply)...`));
   const { planGoalManaged } = await import('./planner.ts');
-  const plan = await planGoalManaged(goal, { hub: flag(a, 'hub') ?? process.env.YARDMASTER_HUB ?? `local:${resolve(paths.db())}`, cwd: root, agent, config, client, projectId: project.id, machineId: machineId() });
+  const plan = await planGoalManaged(goal, { hub: (flag(a, 'hub') ?? process.env.YARDMASTER_HUB) || `local:${resolve(paths.db())}`, cwd: root, agent, config, client, projectId: project.id, machineId: machineId() });
   const { tasks, costUsd } = plan;
   console.log(bold(`\nPlan (${tasks.length} tasks, planning cost ${formatUsd(costUsd)}):`));
   for (const t of tasks) console.log(`  ${cyan(t.key ?? '-')} ${t.title} ${dim(`[${t.tier ?? 'auto'}${t.files?.length ? `; ${t.files.join(', ')}` : ''}${t.after?.length ? `; after ${t.after.join(', ')}` : ''}]`)}`);
@@ -372,7 +372,7 @@ async function cmdLogs(a: Args) {
 async function cmdRecover(a: Args) {
   const client = await getClient(a);
   const { recoverPlanningReceipts } = await import('./planning-journal.ts');
-  const receipts = await recoverPlanningReceipts(client, { hub: flag(a, 'hub') ?? process.env.YARDMASTER_HUB ?? `local:${resolve(paths.db())}`, machineId: machineId() });
+  const receipts = await recoverPlanningReceipts(client, { hub: (flag(a, 'hub') ?? process.env.YARDMASTER_HUB) || `local:${resolve(paths.db())}`, machineId: machineId() });
   if (!a._[1] && a.flags['confirm-stopped'] !== true) {
     if (a.flags.json) return console.log(JSON.stringify(receipts));
     console.log(green(`Planning receipts recovered: ${receipts.replayed.length}.`));
