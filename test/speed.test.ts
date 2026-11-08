@@ -107,7 +107,7 @@ test('Claude Code runs lean by default: no MCP, skills or optional tools; effort
   const settings = defaultAgentSettings({ models: { cheap: 'haiku' } });
   const spec = claude.build({ prompt: 'x', cwd: '/w', model: 'haiku', settings, tier: 'cheap', budgetUsd: 2.5, session: { pin: 'abc' } });
   const a = spec.args.join(' ');
-  for (const f of ['--strict-mcp-config', '--disable-slash-commands', '--exclude-dynamic-system-prompt-sections', '--session-id abc', '--effort low', '--max-budget-usd 2.50']) assert.ok(a.includes(f), `missing ${f} in ${a}`);
+  for (const f of ['--strict-mcp-config', '--disable-slash-commands', '--exclude-dynamic-system-prompt-sections', '--session-id abc', '--effort low', '--max-budget-usd 2.5']) assert.ok(a.includes(f), `missing ${f} in ${a}`);
   assert.ok(a.includes(`--tools ${CLAUDE_CODING_TOOLS.join(',')}`));
   assert.equal(spec.env?.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, '1');
   const full = claude.build({ prompt: 'x', cwd: '/w', model: null, settings: defaultAgentSettings({ context: 'full', effort: { strong: '' } }), tier: 'strong', session: { resume: 'prev' } });
@@ -230,8 +230,8 @@ test('a redirected run is resumed and its spend becomes the new session baseline
     const impl = s.hub.coord.runsFor(t!.id).filter((r) => r.role === 'implement').sort((a, b) => a.started_at - b.started_at);
     assert.equal(impl[0]!.stop_reason, 'redirected');
     assert.equal(impl[1]!.resumed, true, 'the redirect continued the session');
-    assert.ok(Math.abs(done!.session_cost - 0.2) < 1e-9, `baseline covers both runs, got ${done!.session_cost}`);
-    assert.ok(Math.abs(done!.cost_usd - 0.2) < 1e-9, `each run charged once, got ${done!.cost_usd}`);
+    assert.ok(Math.abs(done!.session_cost - (0.2 + 0.00225)) < 1e-9, `baseline covers both runs, got ${done!.session_cost}`);
+    assert.ok(Math.abs(done!.cost_usd - (0.2 + 0.00225)) < 1e-9, `each run charged once including estimated usage, got ${done!.cost_usd}`);
   } finally {
     delete process.env.YARDMASTER_MOCK_RESUMABLE;
   }

@@ -72,6 +72,7 @@ test('parallel work, file-scope waits, dependencies, and safe integration', asyn
   assert.equal(sh(s.repo, 'git', ['rev-parse', 'main']), mainBefore, "the user's branch was never touched");
   assert.equal(sh(s.repo, 'git', ['status', '--porcelain']), '', "the user's working tree is clean");
   assert.equal(sh(s.repo, 'git', ['branch', '--show-current']), 'main');
+  await until(() => [a, b, c, d].every((id) => s.get(id).worktree === null), Boolean, 10_000, 'post-completion cleanup');
   for (const id of [a, b, c, d]) assert.equal(s.get(id).worktree, null, 'merged worktrees are cleaned up');
 });
 
@@ -302,8 +303,9 @@ test('a worker can still report a failed upload on a task it owns that is alread
   const s = await startHub();
   const { created } = s.add([{ title: 'Owned task', prompt: '@mock write x.txt x', agent: 'mock' }]);
   const id = created[0]!.id;
-  s.hub.coord.updateTask(id, { status: 'ready', assignee: 'machine:m-laptop', attempts: 1 });
-  const owner = { attempt: 1, assignee: 'machine:m-laptop' };
+  const claim = s.hub.coord.claimNext({ machineId: 'm-laptop', agents: ['mock'], repos: { [s.project.id]: s.repo }, runningByAgent: {} })!;
+  s.hub.coord.updateTask(id, { status: 'ready' });
+  const owner = { generation: claim.task.generation, attempt: claim.task.attempts, assignee: 'machine:m-laptop' };
   assert.throws(() => s.hub.coord.updateTaskIfOwner(id, owner, { attention: 'x' }), /stale|superseded|no longer/i);
   assert.equal(s.hub.coord.updateTaskIfOwner(id, { ...owner, statuses: ['running', 'verifying', 'ready'] }, { status: 'needs_human', attention: 'upload failed' }).status, 'needs_human');
   s.hub.coord.updateTask(id, { status: 'running', assignee: 'machine:other', attempts: 2 });

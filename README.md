@@ -1,12 +1,12 @@
 # Yardmaster
 
-Run several coding agents at once (Claude Code, Codex, Cursor, OpenCode, Gemini CLI, or anything with a CLI) without them colliding, looping, or leaving a mess. It works from inside the agent you already use, on as many machines as you have, and shows everything on one dashboard.
+Run several coding agents at once (Claude Code, Codex, Cursor, OpenCode, Gemini CLI, or anything with a CLI) without them colliding, looping, or leaving a mess. It works from inside the agent you already use, on as many machines as you have, and shows connected work on one dashboard. It is one owner’s private hub, with project-scoped worker credentials.
 
 - **Stay where you work.** Yardmaster adds a few tools to your agent over MCP. In Claude Code, Codex, Cursor, OpenCode, Gemini CLI, or T3 Code, say *"split this into parallel tasks with yardmaster"* and keep working.
 - **No collisions.** Tasks that touch the same files never run at the same time. If two agents start editing the same file anyway, the later one pauses and resumes after the first merges. Your own branch and checkout are never touched.
 - **No runaway agents.** Repeated actions, back-and-forth loops, repeated errors, silence, questions nobody will answer, and budget overruns are caught by plain code (no AI babysitter burning tokens) and stopped with an explanation.
 - **"Done" means tested.** Work only counts once your own checks pass. The same failure twice stops early instead of using every retry.
-- **Cheaper by default.** Small jobs go to small models, retries escalate only when needed, and per-task and per-day budgets are enforced.
+- **Cheaper by default.** Small jobs go to small models, retries escalate only when needed, and per-task and per-day budgets guide admission and reactive stops. CLI-provided caps are passed when supported; missing usage remains unknown.
 - **Cleans up after itself.** Finished worktrees, merged branches, stale reservations and orphaned processes are removed. Anything unmerged or yours is kept and listed.
 - **You stay in charge.** Pause new work (or park running agents with their work saved), redirect a running agent with one sentence, and see "heads up" notes when something is slow, stuck in the queue, or about to blow the budget.
 - **Disk-aware.** New worktrees wait when the disk is low or Yardmaster's quota is used. Finished worktrees, old logs, and rebuildable build output (`node_modules`, `dist`, `target`, ...) in kept worktrees are cleaned automatically.
@@ -39,12 +39,14 @@ Then try it with a fake agent, spending no tokens: `ym demo`.
 
 ```sh
 cd your-project
-ym init                 # finds your agents and test command, writes yardmaster.json (commit it)
-ym connect all          # adds the yard_* tools to Claude Code, Codex, Cursor, OpenCode, Gemini
+ym setup --dry-run      # preview repo setup; no native config changes
+ym setup --agent codex  # initialize this repo and explicitly connect your chosen client
 ym add "Fix the typo in README.md"
 ym add "Add CSV export to the reports page with tests" --files "src/reports/**"
 ym dashboard            # live view in your browser
 ```
+
+`ym setup` without an agent choice in a noninteractive shell initializes the repo and prints explicit connection commands; it does not edit native client settings. Use `--agent claude`, `cursor`, `opencode`, `gemini`, or explicitly `all` instead. Restart the selected native client to load its tools. `ym init` and `ym connect AGENT` remain available separately.
 
 Or let an agent plan it: `ym plan "add dark mode across the app" --yes`.
 
@@ -61,7 +63,7 @@ Want to see it first without spending tokens? `ym demo` starts an isolated sandb
 | `ym retry`, `stop`, `cancel`, `approve` `<id>` | Control a task |
 | `ym land` | Fast-forward your branch to the finished work |
 | `ym tell <id> "use the existing date helper"` | Redirect a running agent; it restarts with your guidance and keeps its work |
-| `ym pause [--now]` / `ym resume` | Stop new work from starting (`--now` also parks running agents, saving their work) |
+| `ym pause [--now]` / `ym resume` | Stop new work from starting (`--now` parks coding agents and saves their work; checks/reviews already running finish) |
 | `ym disk` | What uses disk space and what can be freed safely |
 | `ym service install` | Keep the hub running across crashes and reboots (launchd on macOS, systemd on Linux) |
 | `ym clean` | Show what can be cleaned up; `--yes` to do it |
@@ -113,20 +115,26 @@ After `ym connect`, your agent has these tools:
 
 ## More machines
 
-On the hub machine:
+On the owner hub machine, initialize the project and create a short-lived invitation:
 
 ```sh
-ym hub restart --host 0.0.0.0     # or bind to your Tailscale IP
-ym token                          # prints the join command
+ym init
+ym pair invite                 # this repo; or --project ID
+ym pair list                   # metadata only
 ```
 
-On each other machine, inside its clone of the repo:
+Make the hub reachable through HTTPS (a separately configured TLS proxy) or an existing encrypted private overlay. The built-in server uses HTTP; Yardmaster does not configure DNS, certificates, tunnels, firewall rules or overlays. Keep the default loopback listener for local use; bind a private interface explicitly only when your private access is ready.
+
+On the worker, inside a clone sharing the same root commit:
 
 ```sh
-ym worker --hub http://hub-host:7777 --token <token>
+ym pair join CODE --hub https://hub.example
+ym worker --hub https://hub.example --repo .
 ```
 
-Each machine uses its own installed agents and logins. Prefer a private network such as Tailscale. The token is the only thing protecting the hub, and anyone holding it can queue work that runs commands on your machines (that is what agents and checks do), so treat it like an SSH key.
+For non-loopback HTTP over an already encrypted overlay, append `--private-network` to **both** commands. HTTP on a plain LAN is not encrypted. Codes are one-use and expire after 10 minutes by default; worker credentials expire after 90 days by default. They bind the declared machine ID to one project, are stored with owner-only permissions under `YARDMASTER_HOME/worker-credentials`, and never contain the hub owner token. Run one worker channel per project. Revoke with `ym pair revoke CREDENTIAL_ID`; revoke an unused invitation with `ym pair revoke INVITATION_ID --invitation`.
+
+Each worker keeps its own provider logins and local configuration. `ym token` deliberately displays the full owner secret for owner administration; do not share it to onboard workers. Explicit `--token` / `YARDMASTER_TOKEN` retains the privileged legacy owner path. The owner dashboard controls connected work; native clients without a bridge/hook are not automatically discovered. See [private fleet setup, scope and recovery](docs/FLEET.md).
 
 ## Supervision
 
@@ -180,7 +188,22 @@ On agent-heavy private repos, 15 to 20% of billed minutes typically go to re-tes
 
 Background agents run lean by default: your CLAUDE.md, AGENTS.md, hooks and permission rules apply, but your MCP servers, skills and the tools no unattended coding run needs don't load, which cuts the context every turn re-reads by about three quarters (`agents.<name>.context: "full"` turns that off; `mcpConfig` keeps chosen MCP servers). `autonomy: "workspace"` (default) keeps unattended agents inside their task. Claude Code runs in its sandbox: shell commands can write only inside the task's worktree and temp folders (not your checkout, the repo's `.git` folder or `~/.yardmaster`) and reach only common package registries and GitHub; any other host is refused. Add hosts or writable folders with `agents.claude.sandbox.allowedDomains` / `allowWrite` (the list replaces the defaults), or turn it off with `"sandbox": { "enabled": false }`. On Linux the sandbox needs bubblewrap; without it commands run unsandboxed. Codex uses its workspace-write sandbox. `"full"` uses each agent's bypass mode, with no sandbox.
 
-Costs are what the agent reports (Claude Code, OpenCode). For agents that only report tokens (Codex, Gemini) they are estimates from list prices, shown as "est.". Override them in `pricing`.
+Usage has actual, estimated, mixed or unknown provenance. Provider-reported dollar amounts are actual; token-only usage uses list-price estimates where pricing is available. Missing usage is unknown, not a measured zero-cost run. Override prices in `pricing`.
+
+Claude Code’s adapter passes its native `--max-budget-usd` option when a positive allowance is available (rounded to cents with a $0.05 minimum). Other adapters and unsupported/custom clients depend on reported/estimated usage and reactive stops. Daily admission uses recorded spend; concurrent work and delayed/absent usage can overshoot. This is not a universal provider billing cap. Concurrent budget reservations are not certified by this onboarding batch. Optional JEV classifier charges are excluded from task totals and must be accounted for separately.
+
+To preserve manual effort and enforce a configured floor, set policy per agent, for example:
+
+```json
+{
+  "agents": {
+    "claude": { "minimumEffort": "high" },
+    "codex": { "minimumEffort": "high" }
+  }
+}
+```
+
+Generated/routed defaults rise to the floor. An explicit lower manual effort causes a launch error instead of being silently changed. `effortOwnership: "native"` leaves effort to native configuration; with a floor, set `attestedEffort` to the effort you independently verified. This attestation is an operator statement, not telemetry. `ym doctor` reports configured policy and conflicts without claiming model-level enforcement. See [native effort policy](docs/JEV.md).
 
 An optional, separately installed **JEV effort router** can lower reasoning effort for first-attempt Claude Code/Codex tasks after Yardmaster selects the agent and model. It is off by default, starts in shadow mode when enabled, preserves manual settings and retries, and falls back to normal effort on failure. Configuration is local to each worker; no router keys or private source are bundled. See [setup and limits](docs/JEV.md), including separate classification costs.
 

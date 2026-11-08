@@ -58,7 +58,9 @@ test('a stale attempt cannot write over a newer one', async () => {
   const s = await startHub({}, {}, { autostart: false });
   const [t] = s.add([{ title: 'Refactor the logger', prompt: 'x', agent: 'mock' }]);
   const claim = s.hub.coord.claimNext({ machineId: 'm-laptop', agents: ['mock'], repos: { [s.project.id]: s.repo }, runningByAgent: {} })!;
-  const owner = { attempt: claim.task.attempts, assignee: claim.task.assignee! };
+  const owner = { generation: claim.task.generation, attempt: claim.task.attempts, assignee: claim.task.assignee! };
+  // This fixture never attached/launched a run. Its machine can explicitly return that allowance.
+  s.hub.coord.abandonUnlaunchedClaim(t!.id, claim.task.generation, 'm-laptop');
   // The laptop goes to sleep; its lease expires and another machine takes the task.
   s.hub.coord.updateTask(t!.id, { status: 'queued', assignee: null, machine_id: null, lease_until: null, attempts: 0 });
   s.hub.coord.claimNext({ machineId: 'm-desktop', agents: ['mock'], repos: { [s.project.id]: s.repo }, runningByAgent: {} });
@@ -105,7 +107,7 @@ test('pause stops new work; pause --now parks running agents with their work sav
   await s.hub.client['fleet.pause']({ projectId: null, stopRunning: true, by: 'test' });
   const parked = await s.wait(t!.id, (x) => x.status === 'queued', 'parked');
   assert.equal(parked.attempts, 0, 'pausing does not use up an attempt');
-  assert.ok(sh(s.repo, 'git', ['log', '--oneline', `yardmaster/${t!.id}`]).includes('partial work'), 'partial work was committed');
+  assert.ok(sh(s.repo, 'git', ['log', '--oneline', `yardmaster/${t!.id}`]).includes('partial work'), `partial work was committed: ${JSON.stringify(s.hub.coord.eventsSince(0, s.project.id, 100).filter(event => event.task_id === t!.id))}`);
   // Resume with guidance so the mock skips the long sleep this time.
   s.hub.coord.control(t!.id, 'redirect', 'test', 'RESUMEDNOTE: finish up');
   await s.hub.client['fleet.resume']({ projectId: null, by: 'test' });
@@ -127,11 +129,11 @@ test('redirecting a running agent restarts it with the guidance and keeps its wo
 });
 
 test('the supervisor explains stalls, frees abandoned reservations, flags slow agents and budget burn', async () => {
-  const s = await startHub({ supervision: { queueStallMinutes: 0.001, slowProgressMinutes: 0.01, idleLockMinutes: 0.001 }, budget: { perTaskUsd: 5, dailyUsd: 1 } });
+  const s = await startHub({ supervision: { queueStallMinutes: 0.001, slowProgressMinutes: 0.01, idleLockMinutes: 0.001 }, budget: { perTaskUsd: 0.7, dailyUsd: 1 } });
   const [noAgent] = s.add([{ title: 'Port to the new framework', prompt: 'x', agent: 'aider' }]);
   // A session reserved a file and vanished; a task needs that file.
   s.hub.coord.claimLocks(s.project.id, 'session:ghost', ['shared/config.js'], 'editing', 30);
-  const [blocked] = s.add([{ title: 'Tune the shared config', prompt: '@mock write shared/config.js tuned', files: ['shared/config.js'], agent: 'mock' }]);
+  const [blocked] = s.add([{ title: 'Tune the shared config', prompt: '@mock write shared/config.js tuned', files: ['shared/config.js'], agent: 'mock', budgetUsd: 0.1 }]);
   const [slow] = s.add([{ title: 'Investigate memory usage', prompt: '@mock cost 0.6\n@mock sleep 8000\n@mock write mem.js x', agent: 'mock' }]);
   // Wait for each condition rather than a fixed delay: CI machines vary a lot in speed.
   const warnings = await until(
@@ -179,7 +181,8 @@ test('cleanup trims build output from kept worktrees but never their real work',
 test('hardening: run columns are whitelisted, ids validated, dangerous pids refused', async () => {
   const s = await startHub({}, {}, { autostart: false });
   const [t] = s.add([{ title: 'Some task here', prompt: 'x', agent: 'mock' }]);
-  const run = s.hub.coord.startRun(t!, 'm', 'mock', null, '/tmp/x');
+  const claim = s.hub.coord.claimNext({ machineId: 'm', agents: ['mock'], repos: { [s.project.id]: s.repo }, runningByAgent: {} })!;
+  const run = s.hub.coord.startRun(claim.task, 'm', 'mock', null, '/tmp/x');
   assert.throws(() => s.hub.coord.updateRun(run.id, { ['status = 1, pid' as 'pid']: 1 }), /Cannot update run column/);
   assert.throws(() => activityLogPath('../../etc/passwd'), /bad run id/);
   assert.equal(killGroup(1), false);

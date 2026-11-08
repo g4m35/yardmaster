@@ -34,6 +34,10 @@ export interface Task {
   scope_inferred: boolean;
   verify: string[] | null;
   allow_no_changes: boolean;
+  /** Durable native artifact capture; internal JSON, never a worker-writable field. */
+  native_handoff: string | null;
+  /** Durable claim identity; never decremented with retry accounting. */
+  generation: number;
   attempts: number;
   max_attempts: number;
   budget_usd: number | null;
@@ -77,6 +81,7 @@ export interface Task {
   /** Spend already reported by that session; resumed runs report totals that include it. */
   session_cost: number;
   session_at: number | null;
+  session_fingerprint: string | null;
   /** Tier the task was created with (escalation on retries raises `tier`, not this). */
   created_tier: Tier | null;
 }
@@ -92,6 +97,7 @@ export interface Project {
 export interface Run {
   id: string;
   task_id: string;
+  generation: number;
   attempt: number;
   machine_id: string;
   agent: string;
@@ -110,13 +116,21 @@ export interface Run {
   touched: string[];
   started_at: number;
   ended_at: number | null;
-  role: 'implement' | 'review';
+  role: 'implement' | 'review' | 'plan';
   tier: string | null;
   lessons: string[];
   verdict: string | null;
   /** Milliseconds per phase: prepare, agent, verify, review. */
   phases: Record<string, number>;
   resumed: boolean;
+  phase: string | null;
+  effort: string | null;
+  effort_source: string | null;
+  launch_fingerprint: string | null;
+  verdict_sha: string | null;
+  usage_provenance: 'actual' | 'estimated' | 'mixed' | 'unknown';
+  cache_read_tokens: number | null;
+  cache_write_tokens: number | null;
 }
 
 export interface YardEvent {

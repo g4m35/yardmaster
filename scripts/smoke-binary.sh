@@ -4,6 +4,7 @@ set -eu
 bin="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 home="$(mktemp -d)"
 export YARDMASTER_HOME="$home"
+export YARDMASTER_HUB="" YARDMASTER_TOKEN=""
 demo=""
 cleanup() {
   if [ -n "$demo" ]; then kill "$demo" 2>/dev/null || true; for i in $(seq 1 20); do kill -0 "$demo" 2>/dev/null || break; sleep 1; done; fi
@@ -12,6 +13,8 @@ cleanup() {
 trap cleanup EXIT
 "$bin" --version
 "$bin" help > /dev/null
+test "$("$bin" recover --json)" = '{"replayed":[],"pending":[],"skippedLive":[]}'
+echo "local recovery ok"
 mkdir -p "$home/plugins/smoke"
 printf "export default { kind: 'notifier', name: 'smoke', onEvent() {} };\n" > "$home/plugins/smoke/index.mjs"
 "$bin" plugin test smoke

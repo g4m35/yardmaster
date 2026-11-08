@@ -1,3 +1,4 @@
+import { parseHandoff, type NativeHandoff } from './handoff.ts';
 import { tx, type Db } from './db.ts';
 import { loadConfig, routingFor, type Config, type Tier } from './config.ts';
 import { findCycle } from './graph.ts';
@@ -24,11 +25,16 @@ import { defaultBranch, mainRepoRoot, projectIdFor } from './git.ts';
 import { basename } from 'node:path';
 import { writeFileSync } from 'node:fs';
 import { paths } from './paths.ts';
+import { controllerLastSeen } from './controller-activity.ts';
+import type { TerminateResult } from './proc.ts';
+import type { UsageSnapshot } from './usage.ts';
+import { utilitiesStopped, utilities, recordUtility, runUtilityKey, forgetStoppedUtilities, taskHasPendingUtilities, PENDING_UTILITY_SQL, hasUnregisteredUtilities, attestUtilitiesStopped } from './utility-records.ts';
+import { attachRun, createAllowanceReader, describeBudgetHold, enforcementFor, listHeld, observedSpendUsd, readAllowance, recordUsageDelta, release, requireHeld, reserve, type AllowanceQuery, type Reservation } from './budgets.ts';
 
 type Row = Record<string, unknown>;
 
 const DUPLICATE_THRESHOLD = 0.85;
-const LEASE_MS = 90_000;
+export const LEASE_MS = 90_000;
 
 function toTask(r: Row): Task {
   return {
@@ -61,16 +67,24 @@ const TASK_COLUMNS = new Set([
   'not_before', 'wait_for', 'pending_rebase', 'control', 'summary', 'last_error', 'retry_note', 'error_fp',
   'same_error_count', 'conflict_rounds', 'attention', 'approved', 'started_at', 'finished_at', 'ready_at', 'prompt', 'title',
   'review', 'review_rounds', 'race_group', 'guidance', 'needs_approval', 'policies', 'scope_inferred',
-  'agent_session', 'session_agent', 'session_cost', 'session_at',
+  'agent_session', 'session_agent', 'session_cost', 'session_at', 'session_fingerprint',
 ]);
 
 const RUN_COLUMNS = new Set(['pid', 'proc_started', 'status', 'stop_reason', 'exit_code', 'cost_usd', 'tokens_in', 'tokens_out', 'cost_estimated', 'last_activity', 'touched', 'ended_at', 'lessons', 'verdict', 'phases', 'resumed']);
+for (const field of ['phase', 'effort', 'effort_source', 'launch_fingerprint', 'verdict_sha']) RUN_COLUMNS.add(field);
 
 export class StaleAttemptError extends Error {
   constructor(id: string, status: string) {
     super(`${id} is no longer owned by this attempt (it is now ${status}).`);
     this.name = 'StaleAttemptError';
   }
+}
+
+export interface ClaimOwner {
+  generation?: number;
+  attempt?: number;
+  assignee: string;
+  statuses?: string[];
 }
 
 export type TaskPatch = Partial<Omit<Task, 'id' | 'project_id' | 'created_at' | 'created_by' | 'fingerprint'>>;
@@ -80,12 +94,14 @@ export interface ClaimRequest {
   agents: string[];
   repos: Record<string, string>;
   runningByAgent: Record<string, number>;
+  activeTaskIds?: string[];
 }
 
 export interface Claim {
   task: Task;
   project: Project;
   route: RouteChoice;
+  reservation: Reservation;
 }
 
 export interface AddResult {
@@ -98,6 +114,9 @@ const OPEN_STATUSES: TaskStatus[] = TASK_STATUSES.filter((s: TaskStatus) => !TER
 
 export class Coordinator {
   readonly db: Db;
+  private readonly processHoldQuery: ReturnType<Db['prepare']>;
+  private taskByIdQuery?: ReturnType<Db['prepare']>;
+  private latestImplementationRunQuery?: ReturnType<Db['prepare']>;
   private readonly configCache = new Map<string, { at: number; cfg: Config }>();
   /** Import graphs per project, refreshed by the hub in the background (see Hub.refreshGraphs). */
   readonly graphs = new Map<string, ImportGraph>();
@@ -105,6 +124,10 @@ export class Coordinator {
 
   constructor(db: Db) {
     this.db = db;
+    this.processHoldQuery = db.prepare(`SELECT CASE WHEN r.status = 'cleanup_failed' THEN 'process' ELSE 'utility' END AS kind
+      FROM runs r LEFT JOIN meta m ON m.key = 'utility:run:' || r.id WHERE r.task_id = ? AND
+      (r.status = 'cleanup_failed' OR (m.key IS NOT NULL AND ${PENDING_UTILITY_SQL}))
+      ORDER BY r.status = 'cleanup_failed' DESC LIMIT 1`);
   }
 
   /**
@@ -346,7 +369,8 @@ export class Coordinator {
   }
 
   getTask(id: string): Task | null {
-    const r = this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as Row | undefined;
+    const query = this.taskByIdQuery ??= this.db.prepare('SELECT * FROM tasks WHERE id = ?');
+    const r = query.get(id) as Row | undefined;
     return r ? toTask(r) : null;
   }
 
@@ -409,18 +433,39 @@ export class Coordinator {
     return rows.map(toTask);
   }
 
-  /**
-   * Fenced update for a runner. It only applies while the caller still owns the attempt (same attempt number and
-   * assignee, still running or verifying), so a canceled task, or one re-claimed after its lease expired, can never
-   * be overwritten by the old attempt.
-   */
-  updateTaskIfOwner(id: string, owner: { attempt: number; assignee: string; statuses?: string[] }, patch: TaskPatch): Task {
+  /** Reject legacy callers rather than borrowing the current claim's identity. */
+  assertTaskOwner(id: string, owner: ClaimOwner | undefined): Task {
+    if (!owner || !Number.isSafeInteger(owner.generation) || (owner.generation ?? 0) < 1) {
+      throw new Error('A valid claim generation is required. Upgrade the worker/client and claim the task again.');
+    }
     const t = this.getTask(id);
     if (!t) throw new Error(`Unknown task ${id}`);
-    if (t.attempts !== owner.attempt || t.assignee !== owner.assignee || !(owner.statuses ?? ['running', 'verifying']).includes(t.status)) {
+    if (t.generation !== owner.generation || t.assignee !== owner.assignee ||
+        !(owner.statuses ?? ['running', 'verifying']).includes(t.status) ||
+        (['running', 'verifying'].includes(t.status) && (t.lease_until === null || t.lease_until <= Date.now()))) {
       throw new StaleAttemptError(id, t.status);
     }
-    return this.updateTask(id, patch);
+    return t;
+  }
+
+  /** A claim generation is allocated under the claim transaction, independently of charged retries. */
+  private advanceGeneration(id: string): void {
+    this.db.prepare('UPDATE tasks SET generation = generation + 1 WHERE id = ?').run(id);
+    this.invalidate();
+  }
+
+  updateTaskIfOwner(id: string, owner: ClaimOwner, patch: TaskPatch): Task {
+    return tx(this.db, () => {
+      const task = this.assertTaskOwner(id, owner);
+      if (patch.status === 'ready' && task.control) throw new Error(`Task control pending: ${task.control}`);
+      const updated = this.updateTask(id, patch);
+      if (patch.status && !['running', 'verifying'].includes(patch.status)) {
+        // An explicit owner handback with no attached run is conclusive no-launch proof. Lease recovery uses
+        // updateTask directly and must not take this path.
+        this.abandonUnlaunchedClaim(id, task.generation, task.machine_id);
+      }
+      return updated;
+    });
   }
 
   updateTask(id: string, patch: TaskPatch): Task {
@@ -445,21 +490,83 @@ export class Coordinator {
   }
 
   addUsage(id: string, costUsd: number, tokensIn: number, tokensOut: number): void {
-    this.db.prepare('UPDATE tasks SET cost_usd = cost_usd + ?, tokens_in = tokens_in + ?, tokens_out = tokens_out + ?, updated_at = ? WHERE id = ?').run(costUsd, tokensIn, tokensOut, Date.now(), id);
+    this.db.prepare('UPDATE tasks SET cost_usd = ROUND(cost_usd + ?, 6), tokens_in = tokens_in + ?, tokens_out = tokens_out + ?, updated_at = ? WHERE id = ?').run(costUsd, tokensIn, tokensOut, Date.now(), id);
+    this.invalidate();
+  }
+
+  /** Accounting is bound to the immutable run, not its now-current task claim. Late spend still happened.
+   * Sequence numbers make retries idempotent and reject reordered snapshots without granting lifecycle access. */
+  recordRunUsage(runId: string, taskId: string, owner: ClaimOwner | undefined, sequence: number,
+    usage: Pick<UsageSnapshot, 'costUsd' | 'tokensIn' | 'tokensOut' | 'provenance' | 'cacheReadTokens' | 'cacheWriteTokens'>): void {
+    tx(this.db, () => {
+      const run = this.db.prepare('SELECT * FROM runs WHERE id = ?').get(runId) as Row | undefined;
+      if (!run || run.task_id !== taskId || !owner || owner.generation !== run.generation || owner.assignee !== `machine:${run.machine_id}` || (owner.generation ?? 0) < 1) throw new Error('Usage does not belong to this recorded run identity.');
+      if (sequence <= Number(run.usage_seq)) return;
+      const planning = run.role === 'plan';
+      const projectId = planning ? String(run.task_id).slice(5) : this.getTask(taskId)?.project_id ?? null;
+      const delta = recordUsageDelta(this.db, { runId, sequence, taskId: planning ? null : taskId, projectId, ...usage });
+      if (!delta.applied) return;
+      if (!planning) this.addUsage(taskId, delta.costDeltaUsd, delta.tokensInDelta, delta.tokensOutDelta);
+      this.db.prepare(`UPDATE runs SET cost_usd = ?, tokens_in = ?, tokens_out = ?, cost_estimated = ?,
+        usage_provenance = ?, cache_read_tokens = ?, cache_write_tokens = ?, usage_seq = ?,
+        accounted_cost = ?, accounted_in = ?, accounted_out = ? WHERE id = ?`)
+        .run(delta.totalCostUsd, delta.totalTokensIn, delta.totalTokensOut, usage.provenance === 'actual' ? 0 : 1, usage.provenance,
+          usage.provenance === 'unknown' ? run.cache_read_tokens as number | null : usage.cacheReadTokens,
+          usage.provenance === 'unknown' ? run.cache_write_tokens as number | null : usage.cacheWriteTokens,
+          sequence, delta.totalCostUsd, delta.totalTokensIn, delta.totalTokensOut, runId);
+      this.invalidate();
+      this.changed();
+    });
   }
 
   /** User and agent controls. All are safe to repeat. */
-  control(id: string, action: 'retry' | 'cancel' | 'stop' | 'approve' | 'prioritize' | 'redirect', by: string, note?: string): Task {
+  control(id: string, action: 'retry' | 'cancel' | 'stop' | 'approve' | 'prioritize' | 'redirect' | 'confirm-stopped', by: string, note?: string, options: { remote?: boolean } = {}): Task {
     const t = this.getTask(id);
     if (!t) throw new Error(`No task ${id}`);
     switch (action) {
+      case 'confirm-stopped': {
+        if (!note || note.trim().length < 12) throw new Error('Describe how you confirmed every process from this run has stopped (at least 12 characters).');
+        return tx(this.db, () => {
+          const current = this.getTask(id)!;
+          if (['running', 'verifying', 'merging'].includes(current.status)) throw new Error('Stop the active task before confirming recovered process exit.');
+          const holds = this.runsFor(id).filter(r => {
+            if (r.status !== 'cleanup_failed') return false;
+            if (options.remote) {
+              if (this.getMeta(`recovery:${r.id}`) !== 'remote_lease_expired') return false;
+              const machine = this.getMachine(r.machine_id);
+              const credential = this.db.prepare('SELECT COUNT(*) AS total, SUM(revoked_at IS NULL AND expires_at > ?) AS live FROM fleet_credentials WHERE machine_id = ?').get(Date.now(), r.machine_id) as { total: number; live: number | null };
+              const externalOnHub = machine?.is_hub && this.getMeta(`http_run:${r.id}`) === '1';
+              const controllerSeen = controllerLastSeen(this.db, r.task_id, r.machine_id, r.generation);
+              if (credential.total > 0 && !credential.live) return true;
+              if (controllerSeen !== null) return Date.now() - controllerSeen > LEASE_MS;
+              return externalOnHub || !machine || Date.now() - machine.last_seen > LEASE_MS;
+            }
+            return r.pid === null && (r.phase?.endsWith(':spawning') || this.getMeta(`recovery:${r.id}`) === 'local_exit_unacknowledged' ||
+              hasUnregisteredUtilities(this.db, runUtilityKey(r.id)));
+          });
+          if (!holds.length) throw new Error('No PID-less process-recovery hold exists for this task.');
+          const unreadableUtilities: string[] = [];
+          for (const run of holds) {
+            if (attestUtilitiesStopped(this.db, runUtilityKey(run.id))) unreadableUtilities.push(run.id);
+            this.setMeta(`recovery:${run.id}`, null);
+            this.updateRun(run.id, { status: 'stopped', phase: null, pid: null, proc_started: null, ended_at: Date.now(), stop_reason: `Owner ${by} attested stopped: ${clip(note, 1000)}` });
+            const budget = listHeld(this.db).find(r => r.runId === run.id);
+            if (budget) release(this.db, budget.id, { kind: 'exited', runId: run.id });
+          }
+          this.event(current.project_id, id, 'warn', 'process.owner_confirmed_stopped', `${by} attested that run processes have stopped: ${clip(note, 1000)}`,
+            { runs: holds.map(r => ({ id: r.id, generation: r.generation, machineId: r.machine_id, phase: r.phase })),
+              ...(unreadableUtilities.length ? { unreadableUtilities } : {}) });
+          return this.updateTask(id, { attention: 'Process exit was explicitly attested by the owner. Work is preserved; retry when ready.' });
+        });
+      }
       case 'redirect': {
+        if (t.native_handoff) throw new Error('This task holds a native artifact. Make the change in your native client, then take this task again by id and resubmit.');
         const text = note?.trim();
         if (!text) throw new Error('Say what the agent should do differently.');
         if (this.configFor(t.project_id).learning.lessons) addLesson(this, t.project_id, text, 'you', widenScope(t.scope), t.id);
         if (TERMINAL_STATUSES.includes(t.status)) throw new Error(`${id} is ${t.status}; retry it instead.`);
         const guidance = clip(`${by} says: ${text}`, 2000);
-        const running = t.status === 'running';
+        const running = ['running', 'verifying'].includes(t.status);
         const next = this.updateTask(id, {
           retry_note: guidance,
           control: running ? 'redirect' : t.control,
@@ -470,16 +577,23 @@ export class Coordinator {
       }
       case 'retry': {
         if (!['needs_human', 'failed', 'canceled', 'queued'].includes(t.status)) throw new Error(`${id} is ${t.status}; only stopped tasks can be retried.`);
+        return tx(this.db, () => {
+        const native = parseHandoff(t.native_handoff);
+        if (native) this.db.prepare('UPDATE tasks SET native_handoff = ? WHERE id = ?').run(JSON.stringify({ ...native, sha: null }), id);
         const fresh = this.updateTask(id, {
           status: 'queued', attention: null, not_before: null, same_error_count: 0, error_fp: null, control: null,
+          assignee: null, machine_id: null, lease_until: null,
           max_attempts: Math.max(t.max_attempts, t.attempts + 1), wait_for: null, conflict_rounds: 0,
+          ...(native ? { attention: 'Take this task again by id in your native client, then resubmit the intended commit.' } : {}),
         });
         this.event(t.project_id, id, 'info', 'task.retry', `${by} asked to retry "${t.title}"`);
         return fresh;
+        });
       }
       case 'cancel': {
         if (TERMINAL_STATUSES.includes(t.status)) return t;
         const next = this.updateTask(id, { status: 'canceled', control: ACTIVE_STATUSES.includes(t.status) ? 'stop' : null, finished_at: Date.now(), attention: null });
+        this.abandonUnlaunchedClaim(t.id);
         this.releaseLocks(t.project_id, id);
         this.event(t.project_id, id, 'warn', 'task.canceled', `${by} canceled "${t.title}". Its branch and worktree are kept until cleanup confirms nothing is lost.`);
         return next;
@@ -572,23 +686,27 @@ export class Coordinator {
 
   /** Records spend outside any task (planning), so the daily budget sees it. */
   recordSpend(s: { projectId: string | null; agent: string; model: string | null; costUsd: number; tokensIn: number; tokensOut: number; role: string; machineId: string }): void {
-    const now = Date.now();
-    this.db
-      .prepare(`INSERT INTO runs (id, task_id, attempt, machine_id, agent, model, status, cost_usd, tokens_in, tokens_out, cost_estimated, started_at, ended_at, role)
-                VALUES (?, ?, 0, ?, ?, ?, 'succeeded', ?, ?, ?, 0, ?, ?, ?)`)
-      .run(shortId('r'), `${s.role}:${s.projectId ?? 'none'}`, s.machineId, s.agent, s.model, s.costUsd, s.tokensIn, s.tokensOut, now, now, s.role);
-    this.invalidate();
+    tx(this.db, () => {
+      const now = Date.now();
+      const id = shortId('r');
+      this.db
+        .prepare(`INSERT INTO runs (id, task_id, attempt, machine_id, agent, model, status, cost_usd, tokens_in, tokens_out, cost_estimated, started_at, ended_at, role)
+                  VALUES (?, ?, 0, ?, ?, ?, 'succeeded', ?, ?, ?, 0, ?, ?, ?)`)
+        .run(id, `${s.role}:${s.projectId ?? 'none'}`, s.machineId, s.agent, s.model, s.costUsd, s.tokensIn, s.tokensOut, now, now, s.role);
+      recordUsageDelta(this.db, { runId: id, sequence: 1, taskId: null, ...s, provenance: 'actual' });
+      this.db.prepare('UPDATE runs SET usage_seq = 1, accounted_cost = cost_usd, accounted_in = tokens_in, accounted_out = tokens_out WHERE id = ?').run(id);
+      this.invalidate();
+    });
   }
 
   spentToday(): number {
-    return this.memo('spent', () => this.spentTodayUncached());
+    return this.passMemo
+      ? this.displayAllowance({ taskId: null, taskCapUsd: null, dailyCapUsd: null }).observedTodayUsd
+      : this.spentTodayUncached();
   }
 
   private spentTodayUncached(): number {
-    const start = new Date();
-    start.setHours(0, 0, 0, 0);
-    const r = this.db.prepare('SELECT COALESCE(SUM(cost_usd), 0) AS s FROM runs WHERE started_at >= ?').get(start.getTime()) as { s: number };
-    return r.s;
+    return observedSpendUsd(this.db);
   }
 
   /** Verified track record per agent on this project (overall and per tier), used by the learned router. */
@@ -619,8 +737,24 @@ export class Coordinator {
     return out;
   }
 
+  private displayAllowance(query: AllowanceQuery) {
+    if (!this.passMemo) return readAllowance(this.db, query);
+    return this.memo('budget-display', () => createAllowanceReader(this.db))(query);
+  }
+
+  private processHold(taskId: string): 'process' | 'utility' | null {
+    // Reuse the prepared query, never its result: holds remain fresh through external
+    // connections, direct journal writes and transaction/savepoint rollbacks.
+    const row = this.processHoldQuery.get(taskId) as { kind: 'process' | 'utility' } | undefined;
+    return row?.kind ?? null;
+  }
+
   /** Why a queued task is not running yet, in plain language. Null means it can start now. */
-  blocker(task: Task, now = Date.now()): string | null {
+  blocker(task: Task, now = Date.now(), reservationHolder?: string): string | null {
+    const hold = this.processHold(task.id);
+    if (hold === 'process') return 'An earlier owned process has not been confirmed stopped. Worktree is held for recovery.';
+    if (hold === 'utility') return 'An earlier Git or copy utility has not confirmed exit. Work is held for recovery.';
+    if (task.native_handoff && !parseHandoff(task.native_handoff)?.sha && !reservationHolder) return 'Waiting for the native client to take this task again by id and resubmit.';
     const pause = this.pausedState(task.project_id);
     if (pause.paused) return `Paused by ${pause.by ?? 'you'}. Resume to start new work.`;
     if (task.not_before && task.not_before > now) return `Retrying in ${Math.ceil((task.not_before - now) / 1000)}s`;
@@ -646,13 +780,14 @@ export class Coordinator {
         if (tied) return `Waiting: ${other.id} "${clip(other.title, 40)}" is changing ${tied.theirs}, which ${tied.mine} ${tied.direction === 'imports' ? 'imports' : 'is imported by'}`;
       }
       for (const lock of this.activeLocks(task.project_id)) {
-        if (lock.holder === task.id) continue;
+        if (lock.holder === task.id || lock.holder === reservationHolder) continue;
         const hits = scopesOverlap(mine, [lock.pattern]);
         if (hits.length) return `Waiting: ${lock.holder} has reserved ${lock.pattern}${lock.reason ? ` (${clip(lock.reason, 40)})` : ''}`;
       }
     }
-    const daily = this.configFor(task.project_id).budget.dailyUsd;
-    if (daily !== null && this.spentToday() >= daily) return `Paused: today's budget of $${daily} is used up`;
+    const allowance = this.displayAllowance({ taskId: task.id, taskCapUsd: task.budget_usd,
+      dailyCapUsd: this.configFor(task.project_id).budget.dailyUsd });
+    if (allowance.availableUsd !== null && allowance.availableUsd < .01) return describeBudgetHold(allowance);
     return null;
   }
 
@@ -674,7 +809,10 @@ export class Coordinator {
       queued.sort((a, b) => b.priority - a.priority || cp(b) - cp(a) || a.created_at - b.created_at);
       for (const task of queued) {
         if (!req.repos[task.project_id]) continue;
-        if (this.blocker(task, now)) continue;
+        const native = parseHandoff(task.native_handoff);
+        if (native && !native.sha) continue;
+        if (native && native.machineId !== req.machineId) continue;
+        if (req.activeTaskIds?.includes(task.id) || this.blocker(task, now)) continue;
         // Retries go back to the machine that has the task's worktree (and its partial work), while it is online.
         const prev = this.latestRun(task.id);
         if (prev && prev.machine_id !== req.machineId) {
@@ -686,12 +824,18 @@ export class Coordinator {
           if (homeCanRun) continue;
         }
         const cfg = this.configFor(task.project_id);
-        const route = chooseAgent({
+        const route = native ? { agent: 'native', model: null, reason: 'Verify the submitted native artifact without coding inference' } : chooseAgent({
           config: cfg, tier: task.tier, forced: task.agent, installed: req.agents,
           runningByAgent: req.runningByAgent, stats: this.agentStats(task.project_id),
         });
         if (!route) continue;
         const project = this.getProject(task.project_id)!;
+        const admission = reserve(this.db, { phase: 'implement', projectId: task.project_id, taskId: task.id,
+          taskCapUsd: task.budget_usd, dailyCapUsd: cfg.budget.dailyUsd, enforcement: enforcementFor(route.agent) });
+        if (!admission.ok) continue;
+        this.db.prepare('UPDATE budget_reservations SET claim_generation = ?, claim_machine = ? WHERE id = ?')
+          .run(task.generation + 1, req.machineId, admission.reservation.id);
+        this.advanceGeneration(task.id);
         const claimed = this.updateTask(task.id, {
           status: 'running', machine_id: req.machineId, assignee: `machine:${req.machineId}`, attempts: task.attempts + 1,
           started_at: task.started_at ?? now, lease_until: now + LEASE_MS, model: route.model, control: null, attention: null,
@@ -701,7 +845,7 @@ export class Coordinator {
         this.event(task.project_id, task.id, 'info', 'task.started',
           `${route.agent}${route.model ? ` (${route.model})` : ''} started "${task.title}" on ${machine?.name ?? req.machineId}${claimed.attempts > 1 ? ` (attempt ${claimed.attempts})` : ''}`,
           { agent: route.agent, reason: route.reason });
-        return { task: claimed, project, route };
+        return { task: claimed, project, route, reservation: admission.reservation };
       }
       const daily = queued[0] ? this.configFor(queued[0].project_id).budget.dailyUsd : null;
       const day = new Date().toDateString();
@@ -713,18 +857,284 @@ export class Coordinator {
     });
   }
 
-  renewLease(taskId: string, machineId: string): boolean {
-    const r = this.db.prepare('UPDATE tasks SET lease_until = ? WHERE id = ? AND machine_id = ? AND status IN (\'running\', \'verifying\')').run(Date.now() + LEASE_MS, taskId, machineId);
+  renewLease(taskId: string, machineId: string, generation?: number): boolean {
+    // Missing/legacy generations never extend the current owner's lease.
+    if (!Number.isSafeInteger(generation) || (generation ?? 0) < 1) return false;
+    const now = Date.now();
+    const r = this.db.prepare(`UPDATE tasks SET lease_until = ? WHERE id = ? AND machine_id = ?
+      AND assignee = ? AND generation = ? AND lease_until > ? AND status IN ('running', 'verifying')`)
+      .run(now + LEASE_MS, taskId, machineId, `machine:${machineId}`, generation!, now);
+    return Number(r.changes) > 0;
+  }
+
+  renewSessionLease(taskId: string, sessionId: string, generation: number): boolean {
+    if (!Number.isSafeInteger(generation) || generation < 1) return false;
+    const now = Date.now();
+    const r = this.db.prepare(`UPDATE tasks SET lease_until = ? WHERE id = ? AND assignee = ?
+      AND generation = ? AND lease_until > ? AND status = 'running'`)
+      .run(now + 60 * 60_000, taskId, sessionId, generation, now);
     return Number(r.changes) > 0;
   }
 
   // ---------- runs ----------
 
-  startRun(task: Task, machineId: string, agent: string, model: string | null, logPath: string, role: 'implement' | 'review' = 'implement'): Run {
-    const id = shortId('r');
-    this.db.prepare('INSERT INTO runs (id, task_id, attempt, machine_id, agent, model, log_path, status, started_at, role, tier) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(id, task.id, task.attempts, machineId, agent, model, logPath, 'running', Date.now(), role, task.tier);
-    return this.getRun(id)!;
+  startRun(task: Task, machineId: string, agent: string, model: string | null, logPath: string, role: 'implement' | 'review' = 'implement', implementationExited?: string): Run {
+    return tx(this.db, () => {
+      const current = this.assertTaskOwner(task.id, { generation: task.generation, assignee: `machine:${machineId}` });
+      if (current.control) throw new Error(`Task control pending: ${current.control}`);
+      if (implementationExited) {
+        const previous = this.getRun(implementationExited);
+        if (role !== 'review' || previous?.role !== 'implement' || previous.task_id !== current.id || previous.generation !== current.generation) throw new Error('Review exit proof must name this claim’s implementation run.');
+        this.confirmRunExit(previous.id, current.id, { generation: current.generation, assignee: `machine:${machineId}` });
+      }
+      let reservation: Reservation;
+      if (role === 'implement') {
+        const held = this.db.prepare(`SELECT id, run_id FROM budget_reservations WHERE task_id = ? AND phase = 'implement'
+          AND state = 'held' AND claim_generation = ? AND claim_machine = ?`).get(task.id, current.generation, machineId) as { id: string; run_id: string | null } | undefined;
+        if (held?.run_id) throw new Error('This claim already has an implementation run.');
+        if (held) reservation = listHeld(this.db).find(r => r.id === held.id)!;
+        else reservation = this.admitTaskPhase(current, agent, role);
+      } else {
+        // Exit proof must already have released the implementation hold. Status alone is insufficient.
+        if (listHeld(this.db).some(r => r.taskId === task.id && r.phase === 'implement')) throw new Error('Review waits for confirmed implementation exit.');
+        reservation = this.admitTaskPhase(current, agent, role);
+      }
+      const id = shortId('r');
+      this.db.prepare('INSERT INTO runs (id, task_id, generation, attempt, machine_id, agent, model, log_path, status, started_at, role, tier, phase) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(id, task.id, current.generation, current.attempts, machineId, agent, model, logPath, 'running', Date.now(), role, current.tier, role === 'review' ? 'review_wait' : 'prepare');
+      attachRun(this.db, reservation.id, id);
+      this.invalidate();
+      return this.getRun(id)!;
+    });
+  }
+
+  private admitTaskPhase(task: Task, agent: string, phase: 'implement' | 'review'): Reservation {
+    const cfg = this.configFor(task.project_id);
+    const admission = reserve(this.db, { phase, projectId: task.project_id, taskId: task.id,
+      taskCapUsd: task.budget_usd, dailyCapUsd: cfg.budget.dailyUsd,
+      phaseCapUsd: phase === 'review' ? cfg.review.budgetUsd : null, enforcement: enforcementFor(agent) });
+    if (!admission.ok) throw new Error(`Budget admission denied: ${admission.reason}`);
+    if (phase === 'implement') this.db.prepare('UPDATE budget_reservations SET claim_generation = ?, claim_machine = ? WHERE id = ?').run(task.generation, task.machine_id, admission.reservation.id);
+    return admission.reservation;
+  }
+
+  /** Only for a claim that failed before a run could attach. Never called by lease expiry/reclaim. */
+  abandonUnlaunchedClaim(taskId: string, generation: number | null = null, machineId: string | null = null): void {
+    tx(this.db, () => {
+      const rows = this.db.prepare(`SELECT id FROM budget_reservations WHERE task_id = ? AND (? IS NULL OR claim_generation = ?)
+        AND (? IS NULL OR claim_machine = ?) AND run_id IS NULL AND state = 'held'`).all(taskId, generation, generation, machineId, machineId) as { id: string }[];
+      for (const row of rows) release(this.db, row.id, { kind: 'no_launch' });
+      this.invalidate();
+    });
+  }
+
+  /** Requires the current claim for launch, but historical identity for exit/accounting. */
+  launchBudget(runId: string, owner: ClaimOwner | undefined): Reservation {
+    return this.withRunOwner(runId, owner, () => {
+      const run = this.getRun(runId)!;
+      const task = this.getTask(run.task_id)!;
+      if (run.status !== 'running' || task.control) throw new Error('Run is no longer launchable.');
+      return requireHeld(this.db, runId);
+    });
+  }
+
+  confirmRunExit(runId: string, taskId: string, owner: ClaimOwner, process?: { pid: number; startedAt: number }, noLaunchPhase?: string): void {
+    tx(this.db, () => {
+      const run = this.getRun(runId);
+      if (!run || run.task_id !== taskId || !owner.generation || run.generation !== owner.generation || owner.assignee !== `machine:${run.machine_id}`) throw new Error('Exit acknowledgment does not belong to this run.');
+      const held = listHeld(this.db).find(r => r.runId === runId);
+      if (!utilitiesStopped(this.db, runUtilityKey(runId))) throw new Error('Owned utilities have not all confirmed exit.');
+      if (!held && !['running', 'lost', 'cleanup_failed'].includes(run.status)) {
+        forgetStoppedUtilities(this.db, runUtilityKey(runId));
+        return; // An acknowledged exit is replay-safe.
+      }
+      const matchedNoLaunch = noLaunchPhase !== undefined && run.pid === null && run.phase === noLaunchPhase && !noLaunchPhase.endsWith(':spawning');
+      // The model phase can already have acknowledged exit before a later utility is orphaned.
+      // Its released reservation is durable evidence of that earlier acknowledgment; every utility
+      // must still confirm exit above, and a recorded/spawning main child can never take this path.
+      const phaseAlreadyExited = !held && run.status === 'cleanup_failed' && run.pid === null && !run.phase?.endsWith(':spawning') &&
+        this.getMeta(`recovery:${runId}`) === 'remote_lease_expired' &&
+        !!this.db.prepare("SELECT 1 FROM budget_reservations WHERE run_id = ? AND state = 'released'").get(runId);
+      if (noLaunchPhase !== undefined && !matchedNoLaunch && !phaseAlreadyExited) throw new Error('No-launch phase does not match this recorded run.');
+      const matchedProcess = process !== undefined && run.pid === process.pid && run.proc_started !== null && run.proc_started === process.startedAt;
+      if (process && !matchedProcess) throw new Error('Exit process identity does not match this recorded run.');
+      if (run.status === 'cleanup_failed' && !matchedProcess && !matchedNoLaunch && !phaseAlreadyExited) throw new Error('Process cleanup failed; identity-proven recovery must confirm exit before releasing its budget.');
+      const remoteRecovery = run.status === 'cleanup_failed' && this.getMeta(`recovery:${run.id}`) === 'remote_lease_expired';
+      if (['running', 'lost', 'cleanup_failed'].includes(run.status)) this.updateRun(run.id, { status: 'stopped', ended_at: Date.now(), phase: null, pid: null, proc_started: null });
+      if (held) release(this.db, held.id, { kind: 'exited', runId });
+      forgetStoppedUtilities(this.db, runUtilityKey(runId));
+      this.setMeta(`recovery:${runId}`, null);
+      if (remoteRecovery) {
+        const task = this.getTask(taskId);
+        const otherLive = this.runsFor(taskId).some(r => r.id !== runId && r.generation === run.generation && ['running', 'lost', 'cleanup_failed'].includes(r.status));
+        if (task?.generation === run.generation && task.assignee === owner.assignee && task.status === 'needs_human' && task.attention?.startsWith('Remote recovery') && !task.control && !otherLive) {
+          this.updateTask(task.id, { status: 'queued', assignee: null, machine_id: null, lease_until: null, attention: null, attempts: Math.max(0, task.attempts - 1) });
+          this.event(task.project_id, task.id, 'info', 'task.remote_recovered', 'Worker confirmed its recorded process-group exit; this generation can safely retry.');
+        }
+      }
+      this.invalidate();
+      this.changed();
+    });
+  }
+
+  /** Trusted local recovery only. Pass the actual identity-checked supervisor result, never a task/lease status.
+   * Also handles generation-0 runs upgraded from released schema 5, which no modern worker can own. */
+  confirmRecoveredRunExit(runId: string, proof: TerminateResult): void {
+    if (!['exited', 'terminated'].includes(proof.status)) throw new Error('Recovery did not confirm process-group exit.');
+    tx(this.db, () => {
+      const run = this.getRun(runId);
+      if (!run) throw new Error(`Unknown run ${runId}`);
+      if (!utilitiesStopped(this.db, runUtilityKey(runId))) throw new Error('Owned utilities still require recovery.');
+      const unfinished = ['running', 'lost', 'cleanup_failed'].includes(run.status);
+      this.updateRun(runId, { status: unfinished ? 'stopped' : run.status, pid: null, proc_started: null, phase: null,
+        ended_at: run.ended_at ?? Date.now(), stop_reason: unfinished ? 'process recovery confirmed group exit' : run.stop_reason });
+      const held = listHeld(this.db).find(r => r.runId === runId);
+      if (held) release(this.db, held.id, { kind: 'exited', runId });
+      this.setMeta(`recovery:${runId}`, null);
+      forgetStoppedUtilities(this.db, runUtilityKey(runId));
+      this.invalidate();
+      this.changed();
+    });
+  }
+
+  confirmPlanStopped(runId: string, by: string, note: string): void {
+    tx(this.db, () => {
+      const run = this.getRun(runId);
+      if (!run || String(run.role) !== 'plan' || run.status !== 'cleanup_failed') throw new Error('No planning process recovery hold exists.');
+      const invocation = this.getPlanInvocation(runId);
+      if (invocation && invocation.leaseUntil > Date.now()) throw new Error('Planning invocation still has an active lease.');
+      if (note.trim().length < 12) throw new Error('Describe how you verified all planning processes stopped (at least 12 characters).');
+      const held = listHeld(this.db).find(r => r.runId === runId);
+      this.updateRun(runId, { status: 'stopped', phase: null, pid: null, proc_started: null, ended_at: Date.now(), stop_reason: `Owner ${by} attested stopped: ${clip(note, 1000)}` });
+      this.setMeta(`plan_invocation:${runId}`, null);
+      if (held) release(this.db, held.id, { kind: 'exited', runId });
+      this.event(held?.projectId ?? null, null, 'warn', 'process.owner_confirmed_stopped', `${by} attested the planning process stopped: ${clip(note, 1000)}`,
+        { runId, generation: run.generation, machineId: run.machine_id, phase: run.phase, pid: run.pid, startedAt: run.proc_started });
+      this.invalidate();
+      this.changed();
+    });
+  }
+
+  confirmIntegrationStopped(projectId: string, by: string, note: string): void {
+    tx(this.db, () => {
+      if (!this.getProject(projectId)) throw new Error('Unknown integration project.');
+      if (note.trim().length < 12) throw new Error('Describe how every integration process was confirmed stopped (at least 12 characters).');
+      const key = `integration_process:${projectId}`;
+      const raw = this.getMeta(key);
+      const held = raw ? JSON.parse(raw) as { phase?: string; pid?: number | null } : null;
+      if (!held || held.pid !== null || !held.phase?.endsWith(':spawning')) throw new Error('No PID-less integration spawning-window hold exists. Recorded processes require identity-proven recovery.');
+      this.setMeta(key, null);
+      this.event(projectId, null, 'warn', 'process.owner_confirmed_stopped', `${by} attested integration processes stopped: ${clip(note, 1000)}`, { phase: held.phase });
+      this.invalidate(); this.changed();
+    });
+  }
+
+  startPlan(projectId: string, machineId: string, agent: string, model: string | null, owner?: { pid: number; startedAt: number }): { runId: string; budget: Reservation; leaseMs: number; heartbeatMs: number } {
+    return tx(this.db, () => {
+      if (!this.getProject(projectId)) throw new Error(`Unknown project ${projectId}`);
+      const cfg = this.configFor(projectId);
+      const admission = reserve(this.db, { phase: 'plan', projectId, taskId: null, taskCapUsd: null,
+        dailyCapUsd: cfg.budget.dailyUsd, phaseCapUsd: cfg.budget.perTaskUsd, enforcement: enforcementFor(agent) });
+      if (!admission.ok) throw new Error(`Budget admission denied: ${admission.reason}`);
+      const runId = shortId('r');
+      this.db.prepare(`INSERT INTO runs (id, task_id, generation, attempt, machine_id, agent, model, status, started_at, role, phase)
+        VALUES (?, ?, 1, 0, ?, ?, ?, 'running', ?, 'plan', 'plan')`).run(runId, `plan:${projectId}`, machineId, agent, model, Date.now());
+      attachRun(this.db, admission.reservation.id, runId);
+      const leaseMs = 30_000;
+      this.setMeta(`plan_invocation:${runId}`, JSON.stringify({ owner: owner ?? null, leaseUntil: Date.now() + leaseMs, leaseMs, accountingPending: true }));
+      this.invalidate();
+      return { runId, budget: requireHeld(this.db, runId), leaseMs, heartbeatMs: 5_000 };
+    });
+  }
+
+  /** A CLI invocation lease is independent of the machine heartbeat (MCP owners may stay alive forever). */
+  getPlanInvocation(runId: string): { owner: { pid: number; startedAt: number } | null; leaseUntil: number; leaseMs: number; accountingPending?: boolean } | null {
+    const raw = this.getMeta(`plan_invocation:${runId}`);
+    return raw ? JSON.parse(raw) : null;
+  }
+
+  recordPlanUsage(runId: string, sequence: number, usage: Pick<UsageSnapshot, 'costUsd' | 'tokensIn' | 'tokensOut' | 'provenance' | 'cacheReadTokens' | 'cacheWriteTokens'>, final = false): void {
+    tx(this.db, () => {
+      const run = this.getRun(runId);
+      if (!run || String(run.role) !== 'plan') throw new Error('No planning run.');
+      this.recordRunUsage(run.id, run.task_id, { generation: run.generation, assignee: `machine:${run.machine_id}` }, sequence, usage);
+      if (final) {
+        if ((this.db.prepare('SELECT usage_seq FROM runs WHERE id = ?').get(runId) as { usage_seq: number }).usage_seq !== sequence) throw new Error('Final planning usage is older than the latest snapshot.');
+        const invocation = this.getPlanInvocation(runId);
+        if (invocation) this.setMeta(`plan_invocation:${runId}`, JSON.stringify({ ...invocation, accountingPending: false }));
+      }
+    });
+  }
+
+  heartbeatPlan(runId: string, owner: { pid: number; startedAt: number }): { leaseUntil: number } {
+    return tx(this.db, () => {
+      const run = this.getRun(runId);
+      const invocation = this.getPlanInvocation(runId);
+      if (!run || String(run.role) !== 'plan' || run.status !== 'running' || !invocation || invocation.leaseUntil <= Date.now()) throw new Error('Planning invocation lease is no longer active.');
+      if (invocation.owner?.pid !== owner.pid || invocation.owner.startedAt !== owner.startedAt) throw new Error('Planning invocation owner identity does not match.');
+      invocation.leaseUntil = Date.now() + invocation.leaseMs;
+      this.setMeta(`plan_invocation:${runId}`, JSON.stringify(invocation));
+      return { leaseUntil: invocation.leaseUntil };
+    });
+  }
+
+  finishPlan(runId: string, result: { reaped: boolean; succeeded: boolean; reason?: string; process?: { pid: number; startedAt: number }; noLaunchPhase?: string; spawnFailure?: { status: 'spawn_failed'; pid: null } }): void {
+    tx(this.db, () => {
+      const run = this.getRun(runId);
+      if (!run || String(run.role) !== 'plan') throw new Error('No planning run.');
+      if (!listHeld(this.db).some(r => r.runId === runId) && !['running', 'lost', 'cleanup_failed'].includes(run.status)) return;
+      if (result.reaped) {
+        const matchedProcess = result.process && run.pid === result.process.pid && run.proc_started === result.process.startedAt;
+        const matchedNoLaunch = result.noLaunchPhase !== undefined && run.pid === null && run.phase === result.noLaunchPhase && !result.noLaunchPhase.endsWith(':spawning');
+        if (result.process && !matchedProcess) throw new Error('Planning process identity does not match this recorded run.');
+        if (result.noLaunchPhase !== undefined && !matchedNoLaunch) throw new Error('Planning no-launch phase does not match this recorded run.');
+        const failedSpawn = result.spawnFailure?.status === 'spawn_failed' && result.spawnFailure.pid === null && run.pid === null && run.phase === 'plan:spawning';
+        if (!matchedProcess && !matchedNoLaunch && !failedSpawn) throw new Error('Planning exit requires matching recorded process identity, no-launch phase, or spawn-failure proof.');
+        if (!matchedNoLaunch && !failedSpawn && this.getPlanInvocation(runId)?.accountingPending) throw new Error('Final planning usage must be replayed before its budget can be released. Run ym recover on the planning machine.');
+      }
+      this.updateRun(run.id, { status: result.reaped ? result.succeeded ? 'succeeded' : 'failed' : 'cleanup_failed', ended_at: Date.now(), stop_reason: result.reason ?? null,
+        ...(result.reaped ? { pid: null, proc_started: null, phase: null } : {}) });
+      if (!result.reaped) {
+        const invocation = this.getPlanInvocation(runId);
+        if (invocation) this.setMeta(`plan_invocation:${runId}`, JSON.stringify({ ...invocation, leaseUntil: Date.now() }));
+      }
+      if (result.reaped) {
+        const held = listHeld(this.db).find(r => r.runId === runId);
+        if (held) release(this.db, held.id, { kind: 'exited', runId });
+        this.setMeta(`plan_invocation:${runId}`, null);
+      }
+      this.invalidate(); this.changed();
+    });
+  }
+
+  assertRunOwner(runId: string, owner: ClaimOwner | undefined, taskId?: string): Run {
+    if (!owner || !Number.isSafeInteger(owner.generation) || (owner.generation ?? 0) < 1) {
+      throw new Error('A valid claim generation is required. Upgrade the worker/client and claim the task again.');
+    }
+    const run = this.getRun(runId);
+    if (!run) throw new Error(`Unknown run ${runId}`);
+    if (taskId && run.task_id !== taskId) throw new Error('Run does not belong to this task.');
+    this.assertTaskOwner(run.task_id, owner);
+    if (run.generation !== owner!.generation || `machine:${run.machine_id}` !== owner!.assignee) {
+      throw new StaleAttemptError(run.task_id, 'superseded run');
+    }
+    return run;
+  }
+
+  withRunOwner<T>(runId: string, owner: ClaimOwner | undefined, fn: () => T, taskId?: string): T {
+    return tx(this.db, () => {
+      this.assertRunOwner(runId, owner, taskId);
+      return fn();
+    });
+  }
+
+  /** Validate an upload both before and after awaited receipt/import. The hub owns publication. */
+  assertBundleOwner(taskId: string, machineId: string, generation: number, head: string, branch: string): Task {
+    const task = this.assertTaskOwner(taskId, { generation, assignee: `machine:${machineId}`, statuses: ['ready', 'verifying'] });
+    if (task.branch !== branch || !/^[0-9a-f]{40,64}$/.test(head) || task.head_sha !== head) {
+      throw new Error('Bundle does not match the current claim’s accepted branch and commit.');
+    }
+    return task;
   }
 
   getRun(id: string): Run | null {
@@ -737,7 +1147,8 @@ export class Coordinator {
   }
 
   private latestRunUncached(taskId: string): Run | null {
-    const r = this.db.prepare("SELECT * FROM runs WHERE task_id = ? AND role = 'implement' ORDER BY started_at DESC, rowid DESC LIMIT 1").get(taskId) as Row | undefined;
+    const query = this.latestImplementationRunQuery ??= this.db.prepare("SELECT * FROM runs WHERE task_id = ? AND role = 'implement' ORDER BY started_at DESC, rowid DESC LIMIT 1");
+    const r = query.get(taskId) as Row | undefined;
     return r ? toRun(r) : null;
   }
 
@@ -762,6 +1173,7 @@ export class Coordinator {
     }
     if (!sets.length) return;
     this.db.prepare(`UPDATE runs SET ${sets.join(', ')} WHERE id = ?`).run(...vals, id);
+    this.invalidate();
   }
 
   // ---------- locks ----------
@@ -843,10 +1255,9 @@ export class Coordinator {
     const id = existing?.id ?? `session:${name}`;
     this.db.prepare(
       `INSERT INTO sessions (id, name, agent, project_id, cwd, machine_id, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen, cwd = excluded.cwd, agent = excluded.agent`,
+       ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen, cwd = excluded.cwd, agent = excluded.agent, machine_id = excluded.machine_id`,
     ).run(id, name, agent, projectId, cwd, machineId, Date.now());
-    // A live session keeps the tasks it took; the lease only lapses if the session goes away.
-    this.db.prepare("UPDATE tasks SET lease_until = ? WHERE assignee = ? AND status = 'running'").run(Date.now() + 60 * 60_000, id);
+    // Registration is identity discovery, not evidence that this caller holds any current task generation.
     return id;
   }
 
@@ -864,16 +1275,24 @@ export class Coordinator {
     return tx(this.db, () => {
       const candidates = taskId ? [this.getTask(taskId)].filter((t): t is Task => !!t) : this.listTasks(projectId, ['queued']).sort((a, b) => b.priority - a.priority);
       for (const t of candidates) {
-        if (t.status !== 'queued') {
+        if (t.project_id !== projectId) throw new Error(`${t.id} belongs to a different project.`);
+        if (t.native_handoff && !taskId) continue;
+        const nativeReclaim = !!taskId && !!t.native_handoff && t.status === 'needs_human';
+        if (t.status !== 'queued' && !nativeReclaim) {
           if (taskId) throw new Error(`${t.id} is ${t.status}, not available.`);
           continue;
         }
-        const why = this.blocker(t);
+        const why = this.blocker(t, Date.now(), sessionId);
         if (why) {
           if (taskId) throw new Error(`${t.id} cannot start yet: ${why}`);
           continue;
         }
-        const claimed = this.updateTask(t.id, { status: 'running', assignee: sessionId, machine_id: null, attempts: t.attempts + 1, started_at: Date.now(), lease_until: Date.now() + 60 * 60_000 });
+        if (t.native_handoff) {
+          // Only explicit native reclaim retires a prior submitted artifact. No files/refs are removed.
+          this.db.prepare('UPDATE tasks SET native_handoff = NULL WHERE id = ?').run(t.id);
+        }
+        this.advanceGeneration(t.id);
+        const claimed = this.updateTask(t.id, { status: 'running', assignee: sessionId, machine_id: null, attempts: t.attempts + 1, control: null, attention: null, not_before: null, started_at: Date.now(), lease_until: Date.now() + 60 * 60_000 });
         this.event(projectId, t.id, 'info', 'task.claimed', `${sessionId.replace('session:', '')} is working on "${t.title}" in its own session`);
         return claimed;
       }
@@ -881,18 +1300,60 @@ export class Coordinator {
     });
   }
 
-  finishForSession(sessionId: string, taskId: string, summary: string, outcome: 'done' | 'failed', branch?: string): Task {
-    const t = this.getTask(taskId);
-    if (!t) throw new Error(`No task ${taskId}`);
-    if (t.assignee !== sessionId) throw new Error(`${taskId} is assigned to ${t.assignee ?? 'nobody'}, not this session.`);
-    const now = Date.now();
-    const patch: TaskPatch = branch
-      ? { status: 'ready', branch, summary: clip(summary, 1200), ready_at: now, lease_until: null, base_sha: null }
-      : { status: outcome, summary: clip(summary, 1200), finished_at: now, lease_until: null, attention: null };
-    const next = this.updateTask(taskId, patch);
-    this.releaseLocks(t.project_id, sessionId);
-    this.event(t.project_id, taskId, outcome === 'done' ? 'success' : 'error', `task.${outcome}`, `${sessionId.replace('session:', '')} finished "${t.title}": ${clip(summary, 160)}`);
-    return next;
+  /** Atomic retirement of the captured native generation into ordinary hub run ownership. */
+  beginSessionHandoff(sessionId: string, taskId: string, generation: number | undefined, branch: string, machineId: string, summary: string): { task: Task; run: Run | null } {
+    return tx(this.db, () => {
+      const previous = this.getTask(taskId);
+      const replay = parseHandoff(previous?.native_handoff);
+      if (previous && replay?.sessionId === sessionId && replay.sessionGeneration === generation && replay.branch === branch) {
+        if (!replay.sha) throw new Error(previous.status === 'running' ? 'Native capture is still in progress; inspect this task before retrying.' : 'Native capture did not complete. Take this task again by id in your native client and resubmit.');
+        if (['needs_human', 'failed', 'canceled'].includes(previous.status)) throw new Error(`Native handoff is ${previous.status}. Take this task again by id after resolving it; no new artifact was submitted.`);
+        return { task: previous, run: null };
+      }
+      const task = this.assertTaskOwner(taskId, { generation, assignee: sessionId, statuses: ['running'] });
+      if (task.control) throw new Error(`Task control pending: ${task.control}`);
+      const session = this.db.prepare('SELECT cwd, machine_id, agent, project_id FROM sessions WHERE id = ?').get(sessionId) as { cwd: string | null; machine_id: string | null; agent: string | null; project_id: string | null } | undefined;
+      if (!session?.cwd || session.project_id !== task.project_id) throw new Error('Register this native session with its project and source checkout before branch handoff.');
+      if (session.machine_id !== machineId) throw new Error('Unsupported remote native handoff: source checkout must be on the hub/shared repository and registered with the hub machine ID. Native binary export is not implemented; scoped worker credentials cannot submit sessions. Managed remote workers remain supported.');
+      const data: NativeHandoff = { sessionId, sessionGeneration: task.generation, branch, cwd: session.cwd, machineId, agent: session.agent ?? 'native', sha: null };
+      this.advanceGeneration(taskId);
+      this.db.prepare('UPDATE tasks SET native_handoff = ? WHERE id = ?').run(JSON.stringify(data), taskId);
+      const owned = this.updateTask(taskId, { assignee: `machine:${machineId}`, machine_id: machineId, summary: clip(summary, 1200), lease_until: Date.now() + LEASE_MS, attention: 'Capturing native artifact; no checks accepted', head_sha: null, ready_at: null });
+      const run = this.startRun(owned, machineId, 'native', null, '');
+      this.releaseSessionTaskLocks(task, sessionId);
+      return { task: owned, run };
+    });
+  }
+
+  queueSessionHandoff(task: Task, data: NativeHandoff): Task {
+    return tx(this.db, () => {
+      this.assertTaskOwner(task.id, { generation: task.generation, assignee: task.assignee! });
+      if (!data.sha) throw new Error('Native handoff has no captured commit.');
+      this.db.prepare('UPDATE tasks SET native_handoff = ? WHERE id = ?').run(JSON.stringify(data), task.id);
+      const next = this.updateTask(task.id, { status: 'queued', assignee: null, machine_id: null, worktree: null, branch: null, base_sha: null, head_sha: data.sha, lease_until: null, attention: 'Native artifact queued for full checks and review' });
+      this.releaseSessionTaskLocks(task, data.sessionId);
+      this.event(task.project_id, task.id, 'info', 'session.handoff', `Native commit ${data.sha} queued for verification; source checkout preserved.`);
+      return next;
+    });
+  }
+
+  private releaseSessionTaskLocks(task: Task, sessionId: string): void {
+    const others = this.listTasks(task.project_id, ['running', 'verifying', 'ready', 'merging']).filter(other => other.id !== task.id && other.assignee === sessionId);
+    const releasable = task.scope.filter(pattern => !others.some(other => scopesOverlap([pattern], other.scope).length));
+    if (releasable.length) this.releaseLocks(task.project_id, sessionId, releasable);
+  }
+
+  finishForSession(sessionId: string, taskId: string, summary: string, outcome: 'done' | 'failed', branch?: string, generation?: number): Task {
+    return tx(this.db, () => {
+      const t = this.assertTaskOwner(taskId, { generation, assignee: sessionId, statuses: ['running'] });
+      if (branch) {
+        throw new Error('Branch submission requires the asynchronous session.finish API capture; no artifact accepted by direct finishForSession.');
+      }
+      const next = this.updateTask(taskId, { status: outcome, summary: clip(summary, 1200), finished_at: Date.now(), lease_until: null, attention: null });
+      this.releaseSessionTaskLocks(t, sessionId);
+      this.event(t.project_id, taskId, outcome === 'done' ? 'success' : 'error', `task.${outcome}`, `${sessionId.replace('session:', '')} finished "${t.title}": ${clip(summary, 160)}`);
+      return next;
+    });
   }
 
   // ---------- messages ----------
@@ -952,15 +1413,17 @@ export interface LiveOverlap {
  * Edit-time conflict detection. When two running tasks touch the same file, the one that started
  * later is paused and resumes after the other merges, instead of both finishing and colliding at merge time.
  */
-export function checkLiveOverlap(coord: Coordinator, taskId: string, runId: string, touched: string[]): LiveOverlap | null {
-  coord.updateRun(runId, { touched });
-  const me = coord.getTask(taskId);
-  if (!me || !touched.length || !coord.configFor(me.project_id).liveOverlapCheck) return null;
-  for (const { task: other, scope } of coord.activeScopes(me.project_id, me.id)) {
-    const hits = scopesOverlap(touched, scope);
-    if (!hits.length) continue;
-    const otherFirst = ['ready', 'merging', 'verifying'].includes(other.status) || (other.started_at ?? 0) <= (me.started_at ?? 0);
-    if (otherFirst) return { otherId: other.id, otherTitle: other.title, file: hits[0]!.split(' ~ ')[0]! };
-  }
-  return null;
+export function checkLiveOverlap(coord: Coordinator, taskId: string, runId: string, touched: string[], owner?: ClaimOwner): LiveOverlap | null {
+  return coord.withRunOwner(runId, owner, () => {
+    coord.updateRun(runId, { touched });
+    const me = coord.getTask(taskId);
+    if (!me || !touched.length || !coord.configFor(me.project_id).liveOverlapCheck) return null;
+    for (const { task: other, scope } of coord.activeScopes(me.project_id, me.id)) {
+      const hits = scopesOverlap(touched, scope);
+      if (!hits.length) continue;
+      const otherFirst = ['ready', 'merging', 'verifying'].includes(other.status) || (other.started_at ?? 0) <= (me.started_at ?? 0);
+      if (otherFirst) return { otherId: other.id, otherTitle: other.title, file: hits[0]!.split(' ~ ')[0]! };
+    }
+    return null;
+  }, taskId);
 }

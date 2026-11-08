@@ -222,7 +222,7 @@ test('shutdown during remote base fetch prevents JEV and coding-agent launch aft
   let fetchStarted = false;
   let uploads = 0;
   const worker = new WorkerLoop({
-    client: testHub.client, machineId: 'm-fetch', repos: () => ({ [project.id]: clone }), agents: () => ['claude'],
+    hub: 'http://fixture.local', client: testHub.client, machineId: 'm-fetch', repos: () => ({ [project.id]: clone }), agents: () => ['claude'],
     localConfig: () => local, verifySlots: new Semaphore(1),
     transport: {
       async fetchBase() {
@@ -284,7 +284,7 @@ test('shutdown while a remote claim is in flight returns the claim without launc
   });
   let transportCalls = 0;
   const worker = new WorkerLoop({
-    client, machineId: 'm-claim', repos: () => ({ [project.id]: box.repo }), agents: () => ['claude'], verifySlots: new Semaphore(1),
+    hub: 'http://fixture.local', client, machineId: 'm-claim', repos: () => ({ [project.id]: box.repo }), agents: () => ['claude'], verifySlots: new Semaphore(1),
     localConfig: () => resolveConfig([loadConfig(), {
       effortRouting: { enabled: true, mode: 'active', command: [process.execPath, routerScript],
         bindings: [{ agent: 'claude', model: 'claim-test-model', efforts: ['low', 'medium', 'high'], cacheImpact: 'preserves-prefix' }] },

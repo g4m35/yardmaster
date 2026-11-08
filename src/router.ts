@@ -1,7 +1,7 @@
 import { agentSettings, routingFor, TIERS, type Config, type Tier } from './config.ts';
 
 const CHEAP = /\b(typo|typos|readme|docs?|documentation|comment|comments|rename|lint|format|formatting|bump|changelog|copy ?edit|wording|spelling|license header)\b/i;
-const STRONG = /\b(architect|architecture|design|security|vulnerab|migrat|concurren|race condition|deadlock|performance|optimi[sz]e|rewrite|refactor (the )?(whole|entire)|across the (codebase|repo)|auth(entication|orization)?|crypto|payment|billing)\b/i;
+const STRONG = /\b(architect(?:ure)?|design|security|vulnerabilit(?:y|ies)|migrat(?:e[ds]?|ing|ions?)|concurren(?:t|cy)|race conditions?|deadlocks?|performance|optimi[sz](?:e[ds]?|ing|ations?)|rewrite|refactor (the )?(whole|entire)|across the (codebase|repo)|auth(entication|orization)?|crypto|payments?|billing)\b/i;
 
 /** Cheap heuristic so non-technical users get sensible model sizes without choosing one. */
 export function inferTier(text: string, fallback: Tier = 'standard'): Tier {

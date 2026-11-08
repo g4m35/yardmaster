@@ -52,8 +52,30 @@ const AgentSettingsSchema = z.object({
   tools: z.array(z.string()).optional(),
   /** MCP servers lean runs should still load: path to an MCP config JSON (Claude Code `--mcp-config`). */
   mcpConfig: z.string().optional(),
-  /** Reasoning effort per tier, e.g. { "cheap": "low", "standard": "medium", "strong": "high" }. Empty string: the agent's default. */
+  /**
+   * Reasoning effort per tier, e.g. { "cheap": "low", "standard": "medium", "strong": "high" }. Empty string: the agent's
+   * own configuration decides for that tier. An explicit value always wins over `effortOwnership` and routing; one below
+   * `minimumEffort` stops the launch instead of being overridden.
+   */
   effort: z.partialRecord(TierSchema, z.string()).default({}),
+  /**
+   * Who picks effort for tiers without an `effort` entry. "managed" (the default): Yardmaster passes its tier default
+   * (cheap low, standard medium, strong high), raised to `minimumEffort`. "native": Yardmaster passes no effort flag, so
+   * the CLI's own configuration decides; JEV routing is skipped.
+   */
+  effortOwnership: z.enum(['managed', 'native']).optional(),
+  /**
+   * Never launch this agent below this effort, including plans and reviews (e.g. "high"). Generated and routed choices
+   * are raised to it; an explicit lower choice, an agent with no effort control, or a level the CLI does not accept stops
+   * the launch with an error. Yardmaster checks the value it passes, not whether the model honors it.
+   */
+  minimumEffort: z.string().min(1).optional(),
+  /**
+   * The effort you have verified this agent actually uses when Yardmaster cannot see or set it: native ownership, `""`
+   * tiers, a custom `command`, or a CLI with no effort flag. Yardmaster cannot read native configuration, so a
+   * `minimumEffort` in those cases requires this to be at least the minimum. It is your statement, not a measurement.
+   */
+  attestedEffort: z.string().min(1).optional(),
   /** On retry, continue the previous session instead of starting over (it keeps what the agent already read). */
   resume: z.boolean().default(true),
   /**
@@ -177,8 +199,8 @@ export const ConfigSchema = z.object({
     .object({ maxLoadPerCpu: z.number().default(0.9), minFreeMemMb: z.number().default(1024) })
     .default({ maxLoadPerCpu: 0.9, minFreeMemMb: 1024 }),
   cleanup: z
-    .object({ auto: z.boolean().default(true), logRetentionDays: z.number().default(14), deleteMergedBranches: z.boolean().default(true) })
-    .default({ auto: true, logRetentionDays: 14, deleteMergedBranches: true }),
+    .object({ auto: z.boolean().default(true), logRetentionDays: z.number().default(14), eventRetentionDays: z.number().int().min(1).max(3650).nullable().default(30), deleteMergedBranches: z.boolean().default(true) })
+    .default({ auto: true, logRetentionDays: 14, eventRetentionDays: 30, deleteMergedBranches: true }),
   disk: z
     .object({
       /** Hold new work when the worktree disk has less than this free. */
@@ -219,8 +241,13 @@ export const ConfigSchema = z.object({
       /** A review reads the diff it's given plus a few files; these caps keep one from turning into a long session. */
       maxTurns: z.number().int().min(1).default(15),
       budgetUsd: z.number().positive().default(1),
+      /**
+       * Strict review: when a review is requested, a missing, failed, canceled or unreadable review does not let the
+       * change through. Off by default, where such a review is reported and the verified change proceeds.
+       */
+      required: z.boolean().default(false),
     })
-    .default({ mode: 'auto', minChangedLines: 200, maxRounds: 1, reviewers: ['claude', 'codex', 'gemini', 'cursor', 'opencode'], crossFamily: true, onUnresolved: 'proceed', maxTurns: 15, budgetUsd: 1 }),
+    .default({ mode: 'auto', minChangedLines: 200, maxRounds: 1, reviewers: ['claude', 'codex', 'gemini', 'cursor', 'opencode'], crossFamily: true, onUnresolved: 'proceed', maxTurns: 15, budgetUsd: 1, required: false }),
   learning: z
     .object({
       /** Pick agents by their verified track record on this repo, not just list order. */

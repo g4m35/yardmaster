@@ -153,13 +153,10 @@ export async function addWorktree(root: string, path: string, branch: string, st
  * Remove a clean linked worktree. The fast path moves it to the worktree root's trash and deletes it in the
  * background (a big node_modules takes seconds to delete); anything unusual falls back to `git worktree remove`.
  */
-export async function removeWorktree(root: string, path: string): Promise<void> {
+export async function removeWorktree(root: string, path: string, opts: { expectedHead?: string; expectedBranch?: string | null; guard?: () => void } = {}): Promise<void> {
   if (!(await isClean(path))) throw new GitError(['worktree', 'remove', path], `${path} has uncommitted changes`);
-  try {
-    removeWorktreeFast(root, path, join(dirname(dirname(path)), '.trash'));
-  } catch {
-    await git(root, ['worktree', 'remove', path]);
-  }
+  // A failed identity/lock check must not fall through to a less guarded deletion.
+  removeWorktreeFast(root, path, join(dirname(dirname(path)), '.trash'), opts);
 }
 
 /** Confirms a directory is a linked worktree of `root` (and not, say, the user's main checkout). */
@@ -170,7 +167,7 @@ export function isLinkedWorktreeOf(path: string, root: string): boolean {
     const content = readFileSync(dotGit, 'utf8');
     const m = content.match(/^gitdir:\s*(.+)$/m);
     if (!m) return false;
-    return resolve(path, m[1]!.trim()).startsWith(resolve(root, '.git', 'worktrees'));
+    return resolve(path, m[1]!.trim()).startsWith(resolve(root, '.git', 'worktrees') + '/');
   } catch {
     return false;
   }

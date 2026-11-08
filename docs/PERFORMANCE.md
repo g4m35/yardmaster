@@ -1,5 +1,58 @@
 # Performance
 
+## Statement reuse under quiet CI
+
+The dedicated [GitHub Actions run for `f3b3cfc`](https://github.com/g4m35/yardmaster/actions/runs/42530865992) measured the statement-reuse change against `028cc2a080f7962256d5feea2b93a79f4f17ab61`. The runner used Node 24.22.2, Linux x64, four logical CPUs and 16 GiB RAM. Its merge checkout `7dabb3d` and PR head had the same runtime source tree (`2fbf63208a0af0ca70eb6f2cecaaedea2ff2af7a`); artifact `13637566759` had verified SHA-256 `c52adb2abadbac110635451632ebfbcc52d1515da430caea7228b832e2c0025a`.
+
+| Operation | Baseline | `f3b3cfc` | Change |
+| --- | ---: | ---: | ---: |
+| Claim pass, no matching agent | 142.45 ms | 99.15 ms | −30.4% |
+| Board read | 166.90 ms | 92.40 ms | −44.6% |
+| Individual blockers outside a shared pass | 928.60 ms | 943.35 ms | +1.6% |
+
+Each entry is the median across four separate processes per revision, interleaved in alternating order. Every process seeds the same 1,000 tasks with 30 marked running, then performs one warmup and five timed calls per operation. The artifact confirms low background load and removal of every fixture. This does not promise these absolute times on another machine or make the individual-blocker path faster. Before statement reuse, [run `42528394612` at `8213a76`](https://github.com/g4m35/yardmaster/actions/runs/42528394612) measured claim/board ratios of 1.09×/1.15× on its own paired runner; earlier runs corroborated the regression. Compare within-run ratios rather than absolute times across machines.
+
+End-of-process median RSS was 410.0 MiB for the baseline and 372.8 MiB for `f3b3cfc`; peak RSS had the same medians. This includes fixture construction and all three operations, so it does not attribute memory changes to the retained statements. The fixture contains no usage-ledger history, actual run rows, attached budget holds, provider/network calls, HTTP or browser rendering. It cannot establish scaling with a large ledger or many held runs, provider savings, or real-agent end-to-end latency.
+
+Reproduce the committed comparison harness from a clean candidate checkout after installing dependencies, with the baseline object fetched:
+
+```sh
+node bench/compare.mjs 028cc2a080f7962256d5feea2b93a79f4f17ab61 > performance.json
+```
+
+The command measures the checked-out candidate source and loads baseline modules from Git in memory. It records source revisions, CPU idle/load, all paired results, RSS and fixture-removal proof. The CI `performance` job runs this command against the PR base; it records results without enforcing a numerical threshold. The linked public run's `scheduler-performance` artifact contains the eight raw process results and conditions. Future runtime revisions must use their own source-bound CI results.
+
+## Scheduler profiling and statement reuse
+
+CPU profiles of both immutable revisions on macOS arm64 / Node 24.22.2 identified SQLite statement preparation and task decoding as major costs. Across five board reads at `8213a76`, sampled self time in statement preparation was about 137 ms: 70.5 ms below `latestRunUncached` and 66.5 ms below `getTask` through `activeScopes`. Instrumented calls confirmed 1,000 latest-run preparations and 970 task-by-ID preparations per board read on both revisions. Expanded task/run schemas make repeated `SELECT *` preparation a plausible contributor to the newer revision's cost, but these profiles do not allocate the exact Linux regression among schema growth, recovery checks, budgeting and other changes.
+
+Four interleaved diagnostic triplets kept the original fixture and warmup/sample counts. Reusing only the two exact lookup statements reduced claim/board medians from 55.49/65.56 ms to 38.66/33.84 ms; individual blockers changed from 353.86 to 344.83 ms. Omitting the recovery-hold query only for diagnosis changed board reads to 60.56 ms and had smaller, inconsistent effects elsewhere. That unsafe omission is not a product change. These were busy-host measurements (CPU idle samples 44.8–74.8%), so their role is causal diagnosis, not quiet-runner certification or a precise accounting of the earlier regression.
+
+`getTask` and `latestRunUncached` now lazily retain those two prepared statements per coordinator. Every lookup still executes `.get()` with its current task ID; query text, run-role filter and timestamp/rowid ordering are unchanged. This removes repeated compilation while retaining fresh results, and keeps recovery/admission rights independent of display caches. Tests cover no-row warmup, different IDs, same-connection updates, external commits, savepoint rollback and equal-time run ordering. The resource tradeoff is two retained SQLite statements per coordinator, released with its database; no memory reduction is claimed. Use the dedicated CI comparison to qualify the optimization under quiet load; local profiles alone cannot establish that claim.
+
+A subsequent four-pair local comparison captured all candidate source bytes once and verified they were unchanged at completion. Against the original baseline, claim/board medians were 42.63/34.83 ms versus 60.34/57.45 ms (0.71×/0.61×). Individual blockers were 344.02 versus 366.05 ms (0.94×), with two pairs slower and two faster. CPU idle samples were 44.7–71.1%, with substantial absolute variation. Those local diagnostics support the bounded optimization; the public quiet-CI result above supplies the qualification for `f3b3cfc`. Neither establishes a universal production no-regression guarantee.
+
+## Local stress check
+
+Run `node scripts/benchmark.ts` from a source checkout on Node 24. It creates and removes a disposable home/repository, seeds 1,000 tasks and 10,000 events, warms each operation five times, and measures 100 samples without provider calls. No personal hub is connected. Admission samples explicitly release their unattached allowance because no child is launched.
+
+On macOS arm64, Node 24.22.2, during concurrent test/agent activity on 2026-11-07:
+
+| Operation | Median | p95 |
+| --- | ---: | ---: |
+| Board API | 153.7 ms | 282.5 ms |
+| Registry API | 0.12 ms | 0.32 ms |
+| Last 100 events | 0.14 ms | 0.41 ms |
+| Queue admission | 26.4 ms | 41.5 ms |
+
+End-of-run RSS was 245 MiB. These are in-process API dispatch measurements, excluding HTTP, browser rendering, provider latency and cold startup. This separate API stress run has no paired baseline; the scheduler comparison above uses a different fixture. Neither establishes a cross-machine performance guarantee. Raw measurement is retained in the hillclimb evidence; rerun on the target machine for a meaningful comparison.
+
+Registry history and passive machine/session inventories are bounded; live runs remain visible. SSE refreshes coalesce and serialize. Cleanup removes up to 1,000 expired project events per pass, using `cleanup.eventRetentionDays` (30 by default, `null` to retain indefinitely). Unfinished and process-held task evidence survives retention and stale cleanup plans. Accepted artifact refs are pruned only after terminal integration, ancestry validation and compare-and-delete; unmerged artifacts remain reachable.
+
+## Historical measurements
+
+These earlier measurements are retained for context and have not been requalified by the current hillclimb. The current stress check above has a different dataset and load; it is not a direct regression comparison.
+
 Goal: Yardmaster should never be the thing an agent waits on, and it should remove waiting agents would
 otherwise do. Measured on an M-series MacBook (2026-11-03). Reproduce with the scripts in `bench/`.
 
@@ -30,15 +83,14 @@ triggers). Measured context at startup:
 | + `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` (drops the Artifact and DesignSync tools) | 29,907 |
 | + only the coding tools (Bash, Read, Edit, Write, NotebookEdit, LSP, WebFetch, WebSearch) | **about 14,000 per turn** |
 
-Each turn re-reads that context (cheaply when cached, but every task writes its own cache, because caches are
-per directory and every task has its own worktree), so it multiplies by the number of turns. Your CLAUDE.md,
+Repeated context may be cheaper when the provider reports cache reuse. Cache identity depends on the provider and launch/session shape; neither a worktree change nor a matching Yardmaster launch fingerprint proves a cache miss or hit. Your CLAUDE.md,
 AGENTS.md, hooks and permission rules still apply in lean runs. `"full"` restores the old behavior;
 `mcpConfig` keeps chosen MCP servers.
 
 Also cheaper by default:
 - **Effort follows the tier**: cheap work runs at low reasoning effort, standard at medium, strong at high (Claude Code `--effort`, Codex `model_reasoning_effort`). Override per agent with `effort`.
 - **Escalation after the second failure**, not the first: the same model usually fixes its first failure once it sees the error, especially with its session resumed. A retry escalated to a stronger model no longer triggers a review by itself.
-- **The CLI enforces the budget too** (`--max-budget-usd` with what's left of the task's budget).
+- **Claude receives its native budget flag** with the reserved allowance; reported usage drives reactive stops. These are not a guaranteed hard cap; see BUDGETS.md.
 - **Reviews are capped**: read-only tools, 15 turns, $1 (`review.maxTurns`, `review.budgetUsd`).
 - **Spend is counted once per message.** Claude Code repeats a message's usage once per content block; counting each copy doubled the mid-run estimate, so budgets tripped at about half the real spend.
 - **The brief says which checks matter**: with `verifyQuick`, agents are told to run the quick checks on their changes rather than the whole suite.
@@ -109,3 +161,52 @@ The hub reacts to every state change immediately (debounced 15 ms) instead of wa
   thousands of tracked files.
 - (Corrected in 0.5: 0.3 measured only the startup time of skipping MCP servers, about 0.2 s, and called it not
   worth it. The token cost, measured since, is the real saving; see the lean launch above.)
+
+The existing `bench/scheduler.bench.ts` was also rerun with `N=1000` on this checkpoint: no-match claim pass 189.0 ms, board read 136.6 ms, and calling blockers individually outside a pass 1605.1 ms. The earlier same-harness historical figures above were lower. Concurrent machine load and different dates limit attribution, but repeated budget reads are a concrete optimization target; no claim of no performance regression is made.
+
+## Budget display cache (2026-11-07)
+
+Budget displays now share one ephemeral read snapshot per synchronous coordinator pass: today's ledger totals, every held reservation's unspent amount, and aggregated lifetime spend per task. Task-specific allowances use those integer-micro-dollar totals. Local midnight, same-connection writes (`total_changes()`), external commits (`PRAGMA data_version`), observed transaction-state changes and existing coordinator invalidation discard the snapshot. The reader and its maps are discarded when the pass ends. Reads outside a pass remain fresh. `reserve()` never accepts a snapshot or displayed allowance: it recomputes under the existing write transaction, including reservations made by independent processes. No process-lifetime or ownership gate changed, and the cleanup-failed lookup remains fresh on each blocker call.
+
+A paired rerun against immutable checkpoint `cfc5d31` on the same macOS arm64 / Node 24.22.2 host measured:
+
+| Existing scheduler harness, `N=1000` | Checkpoint | Display cache |
+| --- | ---: | ---: |
+| No-match claim pass | 115.2 ms | 84.2 ms |
+| Board read | 119.6 ms | 88.0 ms |
+| Individual blocker calls, outside a pass | 666.3 ms | 645.5 ms |
+
+| API harness, 1,000 tasks / 10,000 events | Checkpoint median / p95 | Display cache median / p95 |
+| --- | ---: | ---: |
+| Board API | 134.2 / 220.4 ms | 78.7 / 115.0 ms |
+| Registry API | 0.235 / 0.767 ms | 0.100 / 0.135 ms |
+| Last 100 events | 0.318 / 0.519 ms | 0.127 / 0.160 ms |
+| Queue admission | 26.6 / 40.7 ms | 22.4 / 36.9 ms |
+
+The scheduler harness uses one warmup and five timed repetitions; the API harness uses five warmups and 100 samples. These runs were sequential with no tests launched by this task during the paired measurements; other host activity was not controlled. Baseline budget/coordinator sources were loaded from `git show cfc5d31` in memory, without a copied checkout. A loader hook was removed before execution, and deterministic `Math.random` suffixes were used only while creating fixtures, then restored before warmup/timing. This avoids an observed pre-existing `shortId` collision during rapid task seeding; measured operation bodies and sample counts were unchanged. `scripts/benchmark.ts` now separately retries only that specific rolled-back fixture collision, at most four times, and reports the retry count. Both paired API runs reported zero retries.
+
+Board API median fell 41.4% and p95 fell 47.8% in this pair; no provider calls were made and no provider-cost savings were measured. End-of-run RSS increased from 165.6 to 199.8 MiB, so these numbers do not establish a memory improvement. Registry/event paths and individual blocker calls do not use the new pass snapshot; their changes illustrate measurement/load variability and should not be attributed to it. The historical 47/50 ms scheduler/board numbers remain faster than these reruns; this is not a claim of recovering historical performance or a general no-regression guarantee. The harnesses seed no usage ledger history or attached budget holds, so they do not characterize large-ledger or many-held-run scaling.
+
+Every benchmark ran under a wrapper-owned `mkdtemp` TMPDIR removed in `finally`; the scheduler's fixture root was contained within it. Tests verify a single aggregation for 100 repeated display reads, cache/fresh equivalence, same-connection and external-process reserve/usage/release refreshes, two independently warmed process displays racing for one $5 budget, coordinator board updates within a pass, rollback exit, and midnight with lifetime task spend and cross-day holds retained. Reproduce the current source with the committed benchmark commands above.
+
+Validation for this bounded change: typecheck, build and all 299 tests passed; the full test process exited naturally in 98.8 seconds without force-exit.
+
+The production test command now logs its executable, Node/platform, arguments and completion code and exits naturally; `npm test` no longer uses `--test-force-exit`. Package smoke verification (`node scripts/package-smoke.mjs`, after building) creates a temporary tarball install and checks version, help, packaged dashboard and doctor without a personal hub. `YM_SMOKE_NODE=/path/to/node` selects the installed runtime to test. Both Node22.23.4 and24.22.2 passed this check. Test directories are removed in finally cleanup.
+
+A separate stress-fixture failure exposed collisions in millisecond/three-character IDs. New short IDs use 64 bits of cryptographic randomness, retaining existing prefixes; a fixed-clock/fixed-weak-RNG regression exercises tight creation without duplicate IDs.
+
+## Round-4 paired check against the original baseline
+
+The recovery-hold guard now reuses one prepared query and reads fresh results for every decision. It combines process and utility holds without caching admission rights; a savepoint-rollback regression protects this boundary. This removes two statement preparations per queued task without changing the ownership policy.
+
+Four interleaved pairs used the original `028cc2a` scheduler benchmark text on both revisions, Node 24.22.2, 1,000 tasks and the same ten-core/16 GiB host. The original product modules were loaded from Git objects in memory, with no copied checkout. Both seeders retried only the old ID collision before timing. One warmup and five timed repetitions were unchanged; each reported pair was a separate process.
+
+| Operation | Original median across four runs | Round-4 median | Ratio |
+|---|---:|---:|---:|
+| Claim pass, no matching agent | 52.75 ms | 58.35 ms | 1.11× |
+| Board read | 55.25 ms | 63.80 ms | 1.15× |
+| Individual blockers outside a shared pass | 326.20 ms | 360.15 ms | 1.10× |
+
+The fencing, recovery and reservation work had measurable overhead in this historical sample. It fell within that review's 1.25× target; it is not a universal speed claim. Host load ranged roughly 8–10 and reported free memory was low; other applications were not controlled, so this was a balanced loaded-host comparison, not quiet-load certification. These fixtures have no large usage ledger or many historical held runs. The later public CI comparison at the top is the newer evidence; the benchmark loader removes its exact temporary fixture root on process exit.
+
+A separate real paired HTTP test held the integration lock while uploading a verified fixture branch. Receipt completed in 138 ms before that lock was released. Imports now use independent owned quarantine scopes with at most two concurrent Git imports, preserving generation checks and shutdown/restart process ownership. They no longer queue behind integration checks. This is a small local bundle measurement, not remote-network throughput evidence.

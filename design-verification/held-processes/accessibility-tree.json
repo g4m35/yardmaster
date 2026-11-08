@@ -1,0 +1,1382 @@
+[
+  {
+    "role": "RootWebArea",
+    "name": "Yardmaster"
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "banner",
+    "name": ""
+  },
+  {
+    "role": "main",
+    "name": ""
+  },
+  {
+    "role": "heading",
+    "name": "Yardmaster"
+  },
+  {
+    "role": "LabelText",
+    "name": ""
+  },
+  {
+    "role": "status",
+    "name": ""
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "button",
+    "name": "Pause new work"
+  },
+  {
+    "role": "button",
+    "name": "Add work"
+  },
+  {
+    "role": "region",
+    "name": "Needs you 3 items"
+  },
+  {
+    "role": "region",
+    "name": "Agents and processes"
+  },
+  {
+    "role": "region",
+    "name": "Work"
+  },
+  {
+    "role": "region",
+    "name": "What just happened"
+  },
+  {
+    "role": "region",
+    "name": "Machines"
+  },
+  {
+    "role": "region",
+    "name": "Cleanup"
+  },
+  {
+    "role": "paragraph",
+    "name": ""
+  },
+  {
+    "role": "StaticText",
+    "name": "Yardmaster"
+  },
+  {
+    "role": "StaticText",
+    "name": "Project"
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "StaticText",
+    "name": "Live"
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "StaticText",
+    "name": "Pause new work"
+  },
+  {
+    "role": "StaticText",
+    "name": "Add work"
+  },
+  {
+    "role": "heading",
+    "name": "Needs you 3 items"
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "heading",
+    "name": "Agents and processes"
+  },
+  {
+    "role": "LabelText",
+    "name": ""
+  },
+  {
+    "role": "status",
+    "name": ""
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "group",
+    "name": ""
+  },
+  {
+    "role": "heading",
+    "name": "Work"
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "heading",
+    "name": "What just happened"
+  },
+  {
+    "role": "list",
+    "name": ""
+  },
+  {
+    "role": "heading",
+    "name": "Machines"
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "paragraph",
+    "name": ""
+  },
+  {
+    "role": "heading",
+    "name": "Cleanup"
+  },
+  {
+    "role": "paragraph",
+    "name": ""
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "button",
+    "name": "Check what can be removed"
+  },
+  {
+    "role": "StaticText",
+    "name": "Personal hub · Data and logs come from this hub only. No cloud telemetry. Remote access needs your own private HTTPS or encrypted network; this page does not configure it."
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Yardmaster"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Project"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Live"
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "StaticText",
+    "name": " spent today "
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Pause new work"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Add work"
+  },
+  {
+    "role": "StaticText",
+    "name": "Needs you "
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "button",
+    "name": "Try again"
+  },
+  {
+    "role": "button",
+    "name": "Cancel task"
+  },
+  {
+    "role": "button",
+    "name": "Details"
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "button",
+    "name": "Try again"
+  },
+  {
+    "role": "button",
+    "name": "Cancel task"
+  },
+  {
+    "role": "button",
+    "name": "Details"
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "button",
+    "name": "Try again"
+  },
+  {
+    "role": "button",
+    "name": "Cancel task"
+  },
+  {
+    "role": "button",
+    "name": "Details"
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "StaticText",
+    "name": "Agents and processes"
+  },
+  {
+    "role": "StaticText",
+    "name": "Registry view"
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "StaticText",
+    "name": "Snapshot received 4s ago. Only connected or machine-reported clients are visible."
+  },
+  {
+    "role": "article",
+    "name": ""
+  },
+  {
+    "role": "article",
+    "name": ""
+  },
+  {
+    "role": "article",
+    "name": ""
+  },
+  {
+    "role": "article",
+    "name": ""
+  },
+  {
+    "role": "DisclosureTriangle",
+    "name": "What this view can see"
+  },
+  {
+    "role": "StaticText",
+    "name": "Work"
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "StaticText",
+    "name": "What just happened"
+  },
+  {
+    "role": "listitem",
+    "name": ""
+  },
+  {
+    "role": "listitem",
+    "name": ""
+  },
+  {
+    "role": "listitem",
+    "name": ""
+  },
+  {
+    "role": "listitem",
+    "name": ""
+  },
+  {
+    "role": "listitem",
+    "name": ""
+  },
+  {
+    "role": "listitem",
+    "name": ""
+  },
+  {
+    "role": "listitem",
+    "name": ""
+  },
+  {
+    "role": "StaticText",
+    "name": "Machines"
+  },
+  {
+    "role": "StaticText",
+    "name": "Fixture hub"
+  },
+  {
+    "role": "generic",
+    "name": "0 of 3 slots in use"
+  },
+  {
+    "role": "StaticText",
+    "name": "No coding agents found on this machine"
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "StaticText",
+    "name": "Fixture worker"
+  },
+  {
+    "role": "StaticText",
+    "name": " (offline)"
+  },
+  {
+    "role": "generic",
+    "name": "0 of 3 slots in use"
+  },
+  {
+    "role": "StaticText",
+    "name": "Agents: mock"
+  },
+  {
+    "role": "StaticText",
+    "name": "No interactive agent sessions connected. Run “ym connect all” to use Yardmaster from Claude Code, Codex, Cursor and others."
+  },
+  {
+    "role": "StaticText",
+    "name": "Cleanup"
+  },
+  {
+    "role": "StaticText",
+    "name": "Finished worktrees, merged branches and expired reservations are removed. Review the plan first. Changed or unmerged work is kept when the hub cannot confirm it is safe to remove."
+  },
+  {
+    "role": "StaticText",
+    "name": "Check what can be removed"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Personal hub · Data and logs come from this hub only. "
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "No cloud telemetry. Remote access needs your own "
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "private HTTPS or encrypted network; this page does not "
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "configure it."
+  },
+  {
+    "role": "StaticText",
+    "name": "$0"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": " spent today "
+  },
+  {
+    "role": "StaticText",
+    "name": "of $50"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Needs you "
+  },
+  {
+    "role": "StaticText",
+    "name": "3 items"
+  },
+  {
+    "role": "StaticText",
+    "name": "Inspect interrupted coding group"
+  },
+  {
+    "role": "StaticText",
+    "name": "Try again"
+  },
+  {
+    "role": "StaticText",
+    "name": "Cancel task"
+  },
+  {
+    "role": "StaticText",
+    "name": "Details"
+  },
+  {
+    "role": "StaticText",
+    "name": "Exit remains unconfirmed; inspect preserved work."
+  },
+  {
+    "role": "StaticText",
+    "name": "Inspect lost worker"
+  },
+  {
+    "role": "StaticText",
+    "name": "Try again"
+  },
+  {
+    "role": "StaticText",
+    "name": "Cancel task"
+  },
+  {
+    "role": "StaticText",
+    "name": "Details"
+  },
+  {
+    "role": "StaticText",
+    "name": "Exit remains unconfirmed; inspect preserved work."
+  },
+  {
+    "role": "StaticText",
+    "name": "Inspect pending Git utility"
+  },
+  {
+    "role": "StaticText",
+    "name": "Try again"
+  },
+  {
+    "role": "StaticText",
+    "name": "Cancel task"
+  },
+  {
+    "role": "StaticText",
+    "name": "Details"
+  },
+  {
+    "role": "StaticText",
+    "name": "Exit remains unconfirmed; inspect preserved work."
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Agents and processes"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Registry "
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "view"
+  },
+  {
+    "role": "combobox",
+    "name": "Registry view"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Snapshot received 4s ago. Only connected or machine-"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "reported clients are visible."
+  },
+  {
+    "role": "strong",
+    "name": ""
+  },
+  {
+    "role": "StaticText",
+    "name": "stale"
+  },
+  {
+    "role": "paragraph",
+    "name": ""
+  },
+  {
+    "role": "paragraph",
+    "name": ""
+  },
+  {
+    "role": "paragraph",
+    "name": ""
+  },
+  {
+    "role": "button",
+    "name": "Inspect mock on Fixture worker"
+  },
+  {
+    "role": "strong",
+    "name": ""
+  },
+  {
+    "role": "StaticText",
+    "name": "stale"
+  },
+  {
+    "role": "paragraph",
+    "name": ""
+  },
+  {
+    "role": "paragraph",
+    "name": ""
+  },
+  {
+    "role": "paragraph",
+    "name": ""
+  },
+  {
+    "role": "button",
+    "name": "Inspect mock on Fixture worker"
+  },
+  {
+    "role": "strong",
+    "name": ""
+  },
+  {
+    "role": "StaticText",
+    "name": "stale"
+  },
+  {
+    "role": "paragraph",
+    "name": ""
+  },
+  {
+    "role": "paragraph",
+    "name": ""
+  },
+  {
+    "role": "paragraph",
+    "name": ""
+  },
+  {
+    "role": "button",
+    "name": "Inspect mock on Fixture worker"
+  },
+  {
+    "role": "strong",
+    "name": ""
+  },
+  {
+    "role": "StaticText",
+    "name": "unconnected"
+  },
+  {
+    "role": "paragraph",
+    "name": ""
+  },
+  {
+    "role": "paragraph",
+    "name": ""
+  },
+  {
+    "role": "button",
+    "name": "Inspect mock on Fixture worker"
+  },
+  {
+    "role": "StaticText",
+    "name": "What this view can see"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Work"
+  },
+  {
+    "role": "sectionheader",
+    "name": ""
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "sectionheader",
+    "name": ""
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "sectionheader",
+    "name": ""
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "sectionheader",
+    "name": ""
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "sectionheader",
+    "name": ""
+  },
+  {
+    "role": "generic",
+    "name": ""
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "What just happened"
+  },
+  {
+    "role": "time",
+    "name": ""
+  },
+  {
+    "role": "link",
+    "name": "mock started \"Inspect pending Git utility\" on Fixture worker"
+  },
+  {
+    "role": "time",
+    "name": ""
+  },
+  {
+    "role": "link",
+    "name": "New task \"Inspect pending Git utility\" (files: held-2/**)"
+  },
+  {
+    "role": "time",
+    "name": ""
+  },
+  {
+    "role": "link",
+    "name": "mock started \"Inspect lost worker\" on Fixture worker"
+  },
+  {
+    "role": "time",
+    "name": ""
+  },
+  {
+    "role": "link",
+    "name": "New task \"Inspect lost worker\" (files: held-1/**)"
+  },
+  {
+    "role": "time",
+    "name": ""
+  },
+  {
+    "role": "link",
+    "name": "mock started \"Inspect interrupted coding group\" on Fixture worker"
+  },
+  {
+    "role": "time",
+    "name": ""
+  },
+  {
+    "role": "link",
+    "name": "New task \"Inspect interrupted coding group\" (files: held-0/**)"
+  },
+  {
+    "role": "time",
+    "name": ""
+  },
+  {
+    "role": "StaticText",
+    "name": "Project \"repo\" is now managed by Yardmaster"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Machines"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Fixture hub"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "No coding agents found on this machine"
+  },
+  {
+    "role": "StaticText",
+    "name": "189.6 GB free · worktrees 0 MB"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Fixture worker"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": " (offline)"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Agents: mock"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "No interactive agent sessions connected. Run “ym "
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "connect all” to use Yardmaster from Claude Code, "
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Codex, Cursor and others."
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Cleanup"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Finished worktrees, merged branches and expired "
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "reservations are removed. Review the plan first. "
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Changed or unmerged work is kept when the hub "
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "cannot confirm it is safe to remove."
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Check what can be removed"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "$0"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "of $50"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "3 items"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Inspect interrupted coding group"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Try again"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Cancel task"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Details"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Exit remains unconfirmed; inspect "
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "preserved work."
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Inspect lost worker"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Try again"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Cancel task"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Details"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Exit remains unconfirmed; inspect "
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "preserved work."
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Inspect pending Git utility"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Try again"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Cancel task"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Details"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Exit remains unconfirmed; inspect "
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "preserved work."
+  },
+  {
+    "role": "MenuListPopup",
+    "name": ""
+  },
+  {
+    "role": "StaticText",
+    "name": "mock"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "stale"
+  },
+  {
+    "role": "StaticText",
+    "name": "Fixture worker · implement"
+  },
+  {
+    "role": "StaticText",
+    "name": "succeeded · fresh · last seen 2m ago"
+  },
+  {
+    "role": "StaticText",
+    "name": "Inspect pending Git utility"
+  },
+  {
+    "role": "StaticText",
+    "name": "Inspect"
+  },
+  {
+    "role": "StaticText",
+    "name": "mock"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "stale"
+  },
+  {
+    "role": "StaticText",
+    "name": "Fixture worker · implement"
+  },
+  {
+    "role": "StaticText",
+    "name": "lost · fresh · last seen 2m ago"
+  },
+  {
+    "role": "StaticText",
+    "name": "Inspect lost worker"
+  },
+  {
+    "role": "StaticText",
+    "name": "Inspect"
+  },
+  {
+    "role": "StaticText",
+    "name": "mock"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "stale"
+  },
+  {
+    "role": "StaticText",
+    "name": "Fixture worker · implement"
+  },
+  {
+    "role": "StaticText",
+    "name": "cleanup_failed · fresh · last seen 2m ago"
+  },
+  {
+    "role": "StaticText",
+    "name": "Inspect interrupted coding group"
+  },
+  {
+    "role": "StaticText",
+    "name": "Inspect"
+  },
+  {
+    "role": "StaticText",
+    "name": "mock"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "unconnected"
+  },
+  {
+    "role": "StaticText",
+    "name": "Fixture worker"
+  },
+  {
+    "role": "StaticText",
+    "name": "unconnected · fresh · last seen 2m ago"
+  },
+  {
+    "role": "StaticText",
+    "name": "Inspect"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "What this view can see"
+  },
+  {
+    "role": "StaticText",
+    "name": "Waiting"
+  },
+  {
+    "role": "emphasis",
+    "name": ""
+  },
+  {
+    "role": "StaticText",
+    "name": "No waiting work"
+  },
+  {
+    "role": "StaticText",
+    "name": "Working"
+  },
+  {
+    "role": "emphasis",
+    "name": ""
+  },
+  {
+    "role": "StaticText",
+    "name": "Empty"
+  },
+  {
+    "role": "StaticText",
+    "name": "Checking"
+  },
+  {
+    "role": "emphasis",
+    "name": ""
+  },
+  {
+    "role": "StaticText",
+    "name": "Empty"
+  },
+  {
+    "role": "StaticText",
+    "name": "Ready to merge"
+  },
+  {
+    "role": "emphasis",
+    "name": ""
+  },
+  {
+    "role": "StaticText",
+    "name": "Empty"
+  },
+  {
+    "role": "StaticText",
+    "name": "Done"
+  },
+  {
+    "role": "emphasis",
+    "name": ""
+  },
+  {
+    "role": "StaticText",
+    "name": "Empty"
+  },
+  {
+    "role": "StaticText",
+    "name": "11:10:55 AM"
+  },
+  {
+    "role": "StaticText",
+    "name": "mock started \"Inspect pending Git utility\" on Fixture worker"
+  },
+  {
+    "role": "StaticText",
+    "name": "11:10:55 AM"
+  },
+  {
+    "role": "StaticText",
+    "name": "New task \"Inspect pending Git utility\" (files: held-2/**)"
+  },
+  {
+    "role": "StaticText",
+    "name": "11:10:55 AM"
+  },
+  {
+    "role": "StaticText",
+    "name": "mock started \"Inspect lost worker\" on Fixture worker"
+  },
+  {
+    "role": "StaticText",
+    "name": "11:10:55 AM"
+  },
+  {
+    "role": "StaticText",
+    "name": "New task \"Inspect lost worker\" (files: held-1/**)"
+  },
+  {
+    "role": "StaticText",
+    "name": "11:10:55 AM"
+  },
+  {
+    "role": "StaticText",
+    "name": "mock started \"Inspect interrupted coding group\" on Fixture worker"
+  },
+  {
+    "role": "StaticText",
+    "name": "11:10:55 AM"
+  },
+  {
+    "role": "StaticText",
+    "name": "New task \"Inspect interrupted coding group\" (files: held-0/**)"
+  },
+  {
+    "role": "StaticText",
+    "name": "11:10:55 AM"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Project \"repo\" is now managed by "
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Yardmaster"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "189.6 GB free · worktrees 0 MB"
+  },
+  {
+    "role": "option",
+    "name": "Current connections"
+  },
+  {
+    "role": "option",
+    "name": "Include recent runs"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "mock"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Fixture worker · implement"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "succeeded · fresh · last seen 2m ago"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Inspect pending Git utility"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Inspect"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "mock"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Fixture worker · implement"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "lost · fresh · last seen 2m ago"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Inspect lost worker"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Inspect"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "mock"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Fixture worker · implement"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "cleanup_failed · fresh · last seen 2m ago"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Inspect interrupted coding group"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Inspect"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "mock"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Fixture worker"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "unconnected · fresh · last seen 2m ago"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Inspect"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Waiting"
+  },
+  {
+    "role": "StaticText",
+    "name": "0"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "No waiting work"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Working"
+  },
+  {
+    "role": "StaticText",
+    "name": "0"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Empty"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Checking"
+  },
+  {
+    "role": "StaticText",
+    "name": "0"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Empty"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Ready to merge"
+  },
+  {
+    "role": "StaticText",
+    "name": "0"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Empty"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Done"
+  },
+  {
+    "role": "StaticText",
+    "name": "0"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "Empty"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "11:10:55 "
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "AM"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "mock started \"Inspect pending Git "
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "utility\" on Fixture worker"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "11:10:55 "
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "AM"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "New task \"Inspect pending Git "
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "utility\" (files: held-2/**)"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "11:10:55 "
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "AM"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "mock started \"Inspect lost worker\" "
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "on Fixture worker"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "11:10:55 "
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "AM"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "New task \"Inspect lost worker\" "
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "(files: held-1/**)"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "11:10:55 "
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "AM"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "mock started \"Inspect interrupted "
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "coding group\" on Fixture worker"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "11:10:55 "
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "AM"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "New task \"Inspect interrupted "
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "coding group\" (files: held-0/**)"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "11:10:55 "
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "AM"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "0"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "0"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "0"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "0"
+  },
+  {
+    "role": "InlineTextBox",
+    "name": "0"
+  }
+]

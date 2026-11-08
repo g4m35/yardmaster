@@ -1,0 +1,48 @@
+# Dashboard iteration
+
+The dashboard serves one trusted owner from their personal hub. Its reader wants to find a blocker, understand which connected agent owns work, inspect that exact task, and request a supported stop. Machines advertise installed clients; that alone is not evidence of a running agent. The audit screenshots in `outputs/audit-2026-11-07/` show a useful task board with incomplete process visibility and unverified dialog keyboard behavior.
+
+## Direction and acceptance
+
+Two bounded directions were considered before implementation:
+
+1. **Task-first control view (selected).** Keep attention and the five existing task stages. Add a compact, readable registry above the task board; disclose detailed process facts in the same native detail dialog. This fits an owner checking a few machines, preserves task actions, and avoids making unknown telemetry dominate the first screen. Needs registry identity/capabilities and exact task ids. Risk: large inventories become long; current/history filtering and compact rows contain that. Wrong if the core job becomes managing hundreds of simultaneous machines.
+2. **Machine-first fleet table (rejected).** Group processes under machines with model, effort, PID, phase and cache columns. Better for a fleet operator comparing machines, but sparse native signals would produce a wide table of unknowns. Mobile would require another layout and the owner's next task action would be buried. Needs reliable machine grouping and much richer telemetry. Wrong for this small personal hub and current evidence.
+
+Hypothesis: retaining attention-first task actions while placing truthful current-agent summaries immediately above work will let the owner identify an agent's state and reach its exact task without interpreting installation inventory or fabricated progress. A two-step path (Inspect agent → Open task) exposes process context without cluttering the board.
+
+Acceptance contract: preserve add/retry/approve/cancel/redirect/pause/resume/cleanup/feed/project flows; fetch `registry.list` from the authenticated same-origin RPC; show managed/observed/stale/unconnected and freshness literally; expose unknown model/effort/phase/PID/cache in detail; gate stop on `capabilities.requestStop`; never claim stop acknowledgment from a successful request. Coalesce SSE refreshes, serialize refresh requests, ignore old-project responses, and preserve form drafts/selection/focus. Detail is a labelled native modal dialog with Escape, focus containment and restoration. Desktop and exact 390px viewports must remain legible without horizontal overflow, with visible focus and reduced motion. Errors must preserve the last snapshot and show its age, plus a retry/setup path. No external assets, telemetry, inference, or owner-hub connection.
+
+The frozen machine contract is `design-verification/dashboard/acceptance-contract.json`. The contract and rendered artifacts are evidence, not release approval; the final verification and delivery gates still apply.
+
+## Components and scope
+
+The owner's explicit override preserves the framework-free single HTML file and waives Creative OS's component-library quota. Native `button`, labelled `select`, `details`, `dialog`, `fieldset` and form controls provide semantics and keyboard mechanics; source-owned layout/CSS supplies composition. Adding two libraries solely for a quota would increase runtime/dependency cost without solving an unmet interaction need. No framework, CDN, external asset, or new dependency is introduced. Existing small lamp/meter motion has reduced-motion fallbacks; no new animation is needed. Portfolio fingerprint/contact sheet is not applicable to this repair of one existing utility surface.
+
+## Data and interaction contracts
+
+`board.status({projectId: null|string})` remains the source for task actions, supervision, machines, spend and setup. `registry.list({})` covers all projects; a selected project passes `{projectId}` (not null, because the registry schema accepts an optional string). Each refresh reads those two endpoints concurrently; refreshes themselves serialize, with one trailing 250ms refresh for an SSE burst. The existing 10-second fallback snapshot and 2-second open-task log refresh remain. Log requests do not overlap; late logs and late detail/project responses are discarded. DOM fixture tests exercise these behaviors without a live hub.
+
+Current connections exclude completed run history, retain stale sessions/runs and unconnected machine advertisements, and never infer that installation means connection. “Include recent runs” includes the registry's bounded run history. The snapshot receipt age, heartbeat age/freshness, truncation limits and unknown-signal coverage are explicit. An API failure retains the previous snapshot, labels its age, and suppresses stop buttons until the registry recovers. Stream reconnect status remains separate from successful snapshot reads. Unknown model/phase/effort/PID/cache values are visible in Inspect. Process identity and exact task ids stay linked; a task's artifact SHA is shown when supplied.
+
+The task detail uses a native labelled `<dialog>` to provide browser modal semantics, background inertness, focus containment and Escape. The close handler restores the trigger by node or stable focus key after a refresh, with a top-level fallback. Guidance drafts live only in page memory per task, including caret selection; refresh snapshots preserve the most recent edits made while a request is pending. Add-work fields are not rebuilt by snapshot refresh. A successful redirect clears that task's submitted draft. Form controls are labelled; size choices remain a native fieldset/radio group.
+
+`capabilities.requestStop` is rechecked via a fresh registry read when clicked. The control calls the existing task-scoped `task.control({id,action:'stop',by:'dashboard'})`; it does not kill a selected PID or promise native stop. Registry entries lacking capability do not get stop controls. Cancellation retains its existing two-click guard; retry, approve, redirect, pause, resume, cleanup, add work and event inspection remain. Pause-and-stop and request-stop acknowledgments explicitly say a stop was requested; later state is required to establish completion.
+
+Pairing UI is deliberately deferred to keep this iteration bounded. `fleet.invite({projectId})`, `fleet.devices({})` and `fleet.revoke({id,invitation?})` are known owner RPCs, but this dashboard does not invoke them or claim paired-device configuration. It never automatically creates an invitation or stores a pairing code in the DOM. A future pairing control must create only on explicit click, require a selected project, display the returned secret once in a short-lived modal, clear it on close/expiry/visibility loss, and show metadata-only inventory/revocation. Remote private transport still requires separate configuration.
+
+Remaining backend contracts: request-stop capability and mutation are separate requests; there is a read/mutation race because task.control has no expected run/generation field. The backend must remain authoritative about current ownership and stop semantics. Per-record acknowledgment/exit, native stop, attested effective phase/effort, native model identity, activity timestamps and cache counters cannot be manufactured in the UI. Registry read freshness is a heartbeat projection, not OS liveness. Rich accepted check/review evidence needs a typed backend contract before the UI can promise it. Fleet inventory metadata is not connection or transport health.
+
+## Verification handoff
+
+Deterministic checks execute actual dashboard JavaScript with a limited DOM/RPC fixture (`node --test test/dashboard.test.ts`). They verify controls, source data, refresh ordering and draft/focus preservation; they do not prove CSS layout or native keyboard behavior.
+
+Rendered evidence is saved in two directories:
+
+1. `design-verification/dashboard/` contains the frozen contract, desktop/390px/dialog/error PNGs and console/geometry assertions for managed/observed/stale/unconnected states, Enter/Tab/Escape focus, SSE guidance/caret preservation, reduced motion and stale-registry handling. Explicit boundary wrapping fixes an observed native-dialog focus escape.
+2. `design-verification/real-hub/` binds the tested server to `22f76b8` and its source-tree object, and the dashboard bytes by sha256. Two actual `ym mcp` child processes use stdio SDK clients and real Hub HTTP. Browserbase verifies empty onboarding and zero counts, two-project isolation, 1440/390px rendering, dialog keyboard/focus, accessible labels and the explicit coding/checks/review pause policy. Sessions render as observed, with unknown model/process details.
+3. The real HTTP 401 case removes the saved owner key and private controls. A separate auth-only stage passes; the combined-flow reload timeout is retained as a harness diagnostic and never counted as a passing check. No physical screen reader, installed editor window, native coding model or provider cache hit was tested by this browser fixture.
+
+All browser work used disposable homes/repos, fake names and a narrowly scoped ephemeral tunnel, with no personal hub or installed settings changes. Both MCP clients, fixture hubs, tunnels and Browserbase sessions were closed. Release approval still requires the independent review, full verification and delivery gates.
+
+Inspect facts include bounded persisted utility-child records (command basename, registration state and PID), without inferring OS liveness. Passive sessions keep unknown child information. Empty station counts explicitly display zero, rather than map callback indexes.
