@@ -2,19 +2,14 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { inSea } from '../assets.ts';
-import type { Tier } from '../config.ts';
-import { type Adapter, type AdapterContext, type AgentEvent, WRITE_TOOL, arr, commonFailure, num, obj, safeJson, str } from './types.ts';
+import { DEFAULT_EFFORT, resolveEffort, withEffort } from '../effort.ts';
+import { type Adapter, type AgentEvent, WRITE_TOOL, arr, commonFailure, num, obj, safeJson, str } from './types.ts';
 
 const toolEvent = (name: string, input: unknown): AgentEvent => ({ type: 'tool', name, input, write: WRITE_TOOL.test(name) });
+/** Cache-write tokens only when the CLI reported them: absent means unknown, never zero. */
+const cacheWrite = (v: unknown): { cacheWriteIn?: number } => (typeof v === 'number' && Number.isFinite(v) ? { cacheWriteIn: Math.max(0, v) } : {});
 
-/** Reasoning effort by tier when the user hasn't set one: cheap work thinks less, hard work more. */
-export const DEFAULT_EFFORT: Record<Tier, string> = { cheap: 'low', standard: 'medium', strong: 'high' };
-
-function effortFor(ctx: AdapterContext): string | null {
-  if (!ctx.tier) return null;
-  const e = ctx.settings.effort[ctx.tier] ?? DEFAULT_EFFORT[ctx.tier];
-  return e ? e : null;
-}
+export { DEFAULT_EFFORT };
 
 /**
  * The built-in tools a background coding run needs. Leaving out the rest (scheduling, remote triggers, artifacts,
@@ -31,6 +26,7 @@ export const claude: Adapter = {
   resumable: true,
   setupHint: 'Install Claude Code (npm i -g @anthropic-ai/claude-code) and run `claude` once to sign in.',
   build(ctx) {
+    const effort = resolveEffort('claude', ctx);
     const args = ['-p', '--output-format', 'stream-json', '--verbose'];
     const env: Record<string, string> = {};
     if (ctx.session && 'resume' in ctx.session) args.push('--resume', ctx.session.resume);
@@ -62,12 +58,11 @@ export const claude: Adapter = {
       env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1';
       env.DISABLE_AUTOUPDATER = '1';
     }
-    const effort = effortFor(ctx);
-    if (effort) args.push('--effort', effort);
+    if (effort.emitted) args.push('--effort', effort.emitted);
     if (ctx.budgetUsd !== undefined && ctx.budgetUsd !== null && ctx.budgetUsd > 0) args.push('--max-budget-usd', Math.max(0.05, ctx.budgetUsd).toFixed(2));
     if (ctx.maxTurns) args.push('--max-turns', String(ctx.maxTurns));
     args.push(...ctx.settings.extraArgs);
-    return { command: ctx.settings.command ?? 'claude', args, stdin: ctx.prompt, env };
+    return withEffort({ command: ctx.settings.command ?? 'claude', args, stdin: ctx.prompt, env }, effort);
   },
   parse(line) {
     const j = safeJson(line);
@@ -86,6 +81,7 @@ export const claude: Adapter = {
           type: 'usage',
           tokensIn: num(u.input_tokens) + num(u.cache_creation_input_tokens),
           cachedIn: num(u.cache_read_input_tokens),
+          ...cacheWrite(u.cache_creation_input_tokens),
           tokensOut: num(u.output_tokens),
           cumulative: false,
           id: str(msg.id) || undefined,
@@ -101,6 +97,7 @@ export const claude: Adapter = {
         type: 'usage',
         tokensIn: num(u.input_tokens) + num(u.cache_creation_input_tokens),
         cachedIn: num(u.cache_read_input_tokens),
+        ...cacheWrite(u.cache_creation_input_tokens),
         tokensOut: num(u.output_tokens),
         costUsd: typeof j.total_cost_usd === 'number' ? j.total_cost_usd : undefined,
         cumulative: true,
@@ -119,6 +116,7 @@ export const codex: Adapter = {
   resumable: true,
   setupHint: 'Install Codex CLI (npm i -g @openai/codex) and run `codex login`.',
   build(ctx) {
+    const effort = resolveEffort('codex', ctx);
     const resume = ctx.session && 'resume' in ctx.session ? ctx.session.resume : null;
     // `exec resume` has no -C or -s: it runs in the worktree (spawn cwd) and takes the sandbox as config.
     const args = resume ? ['exec', 'resume', '--json', '--skip-git-repo-check'] : ['exec', '--json', '--skip-git-repo-check', '-C', ctx.cwd];
@@ -128,12 +126,11 @@ export const codex: Adapter = {
     else if (resume) args.push('-c', `sandbox_mode="${sandbox}"`);
     else args.push('-s', sandbox);
     if (ctx.settings.context === 'lean') args.push('-c', 'check_for_update_on_startup=false');
-    const effort = effortFor(ctx);
-    if (effort) args.push('-c', `model_reasoning_effort="${effort}"`);
+    if (effort.emitted) args.push('-c', `model_reasoning_effort="${effort.emitted}"`);
     args.push(...ctx.settings.extraArgs);
     if (resume) args.push(resume);
     args.push('-');
-    return { command: ctx.settings.command ?? 'codex', args, stdin: ctx.prompt };
+    return withEffort({ command: ctx.settings.command ?? 'codex', args, stdin: ctx.prompt }, effort);
   },
   parse(line) {
     const j = safeJson(line);
@@ -174,11 +171,12 @@ export const opencode: Adapter = {
   binary: 'opencode',
   setupHint: 'Install OpenCode (https://opencode.ai) and run `opencode auth login`.',
   build(ctx) {
+    const effort = resolveEffort('opencode', ctx);
     const args = ['run', '--format', 'json'];
     if (ctx.model) args.push('--model', ctx.model);
     if (!ctx.readOnly) args.push('--auto');
     args.push(...ctx.settings.extraArgs, ctx.prompt);
-    return { command: ctx.settings.command ?? 'opencode', args };
+    return withEffort({ command: ctx.settings.command ?? 'opencode', args }, effort);
   },
   parse(line) {
     const j = safeJson(line);
@@ -195,7 +193,11 @@ export const opencode: Adapter = {
     if (j.type === 'step_finish') {
       const t = obj(part.tokens);
       const cache = obj(t.cache);
-      return [{ type: 'usage', tokensIn: num(t.input) + num(cache.write), cachedIn: num(cache.read), tokensOut: num(t.output) + num(t.reasoning), costUsd: num(part.cost), cumulative: false }];
+      // A missing cost stays absent (estimated later), not a recorded $0; a reported 0 is kept.
+      return [{
+        type: 'usage', tokensIn: num(t.input) + num(cache.write), cachedIn: num(cache.read), ...cacheWrite(cache.write),
+        tokensOut: num(t.output) + num(t.reasoning), ...(typeof part.cost === 'number' && Number.isFinite(part.cost) ? { costUsd: part.cost } : {}), cumulative: false,
+      }];
     }
     if (j.type === 'error') return [{ type: 'error', text: str(obj(j.error).message) || str(j.error) }];
     return [];
@@ -209,12 +211,13 @@ export const cursor: Adapter = {
   binary: 'cursor-agent',
   setupHint: 'Install Cursor CLI (curl https://cursor.com/install -fsS | bash) and run `cursor-agent login`.',
   build(ctx) {
+    const effort = resolveEffort('cursor', ctx);
     const args = ['-p', '--output-format', 'stream-json', '--trust'];
     if (ctx.model) args.push('--model', ctx.model);
     if (ctx.readOnly) args.push('--plan');
     else args.push('--force');
     args.push(...ctx.settings.extraArgs, ctx.prompt);
-    return { command: ctx.settings.command ?? 'cursor-agent', args };
+    return withEffort({ command: ctx.settings.command ?? 'cursor-agent', args }, effort);
   },
   parse(line) {
     const j = safeJson(line);
@@ -247,11 +250,12 @@ export const gemini: Adapter = {
   binary: 'gemini',
   setupHint: 'Install Gemini CLI (npm i -g @google/gemini-cli) and run `gemini` once to sign in.',
   build(ctx) {
+    const effort = resolveEffort('gemini', ctx);
     const args = ['--output-format', 'stream-json'];
     if (ctx.model) args.push('-m', ctx.model);
     args.push('--approval-mode', ctx.readOnly ? 'plan' : ctx.settings.autonomy === 'full' ? 'yolo' : 'auto_edit');
     args.push(...ctx.settings.extraArgs, '-p', ctx.prompt);
-    return { command: ctx.settings.command ?? 'gemini', args };
+    return withEffort({ command: ctx.settings.command ?? 'gemini', args }, effort);
   },
   parse(line) {
     const j = safeJson(line);
@@ -292,10 +296,11 @@ export const mock: Adapter = {
     return process.env.YARDMASTER_MOCK_RESUMABLE === '1';
   },
   build(ctx) {
-    const env: Record<string, string> = { YM_MOCK_ARGS: JSON.stringify({ tier: ctx.tier ?? null, budget: ctx.budgetUsd ?? null, context: ctx.settings.context }) };
+    const effort = resolveEffort('mock', ctx);
+    const env: Record<string, string> = { YM_MOCK_ARGS: JSON.stringify({ tier: ctx.tier ?? null, budget: ctx.budgetUsd ?? null, context: ctx.settings.context, effort: effort.emitted }) };
     if (ctx.session && 'resume' in ctx.session) env.YM_MOCK_RESUME = ctx.session.resume;
     else if (ctx.session) env.YM_MOCK_SESSION = ctx.session.pin;
-    return { command: process.execPath, args: mockAgentArgs(), stdin: ctx.prompt, env };
+    return withEffort({ command: process.execPath, args: mockAgentArgs(), stdin: ctx.prompt, env }, effort);
   },
   parse(line) {
     const j = safeJson(line);
@@ -314,9 +319,11 @@ export function commandAdapter(name: string, command: string): Adapter {
     label: name,
     binary: bin,
     build(ctx) {
+      // A plain command has no effort flag Yardmaster knows: a configured minimum needs an attested level.
+      const effort = resolveEffort(name, ctx);
       const usesArg = rest.includes('{prompt}');
       const args = rest.map((a) => (a === '{prompt}' ? ctx.prompt : a)).concat(ctx.settings.extraArgs);
-      return { command: bin, args, stdin: usesArg ? undefined : ctx.prompt };
+      return withEffort({ command: bin, args, stdin: usesArg ? undefined : ctx.prompt }, effort);
     },
     parse(line) {
       return line.trim() ? [{ type: 'text', text: line }] : [];

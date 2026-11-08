@@ -11,15 +11,15 @@
     --panel: #F6F8F7;
     --ink: #1C2A28;
     --ink-2: #4A5856;
-    --steel: #7B8886;
+    --steel: #596B66;
     --rule: #C9D3D0;
     --amber: #E0A019;
     --amber-wash: #FBF1D9;
-    --green: #2F8A5B;
+    --green: #246E49;
     --red: #C3352C;
     --red-wash: #F8E1DF;
     --blue: #2B6CB0;
-    --sign: "DIN Alternate", "DIN Next", "Bahnschrift", "D-DIN", "Roboto Condensed", "Arial Narrow", sans-serif;
+    --sign: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
     --body: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     --r-sm: 4px;
     --r-md: 8px;
@@ -164,11 +164,11 @@
   .form-msg { font-size: 14px; min-height: 1.5em; }
 
   /* ---- drawer ---- */
-  aside.drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(560px, 100vw); background: var(--panel); border-left: 1px solid var(--rule); transform: translateX(100%); visibility: hidden; transition: transform .22s ease-out, visibility 0s linear .22s; display: grid; grid-template-rows: auto auto 1fr; z-index: 20; }
-  aside.drawer.open { transform: none; visibility: visible; box-shadow: -24px 0 60px rgba(20, 35, 32, .18); transition: transform .22s ease-out; }
-  @media (prefers-reduced-motion: reduce) { aside.drawer { transition: none; } }
+  dialog.drawer { position: fixed; inset: 0 0 0 auto; margin: 0; width: min(600px, 100%); max-width: 100%; height: 100dvh; max-height: 100dvh; border-radius: 0; border-left: 1px solid var(--rule); }
+  dialog.drawer[open] { display: grid; grid-template-rows: minmax(0, auto) auto minmax(0, 1fr); }
+  .drawer .head { max-height: 48dvh; overflow: auto; }
   .drawer .head { padding: 18px 22px 12px; border-bottom: 1px solid var(--rule); display: grid; gap: 8px; }
-  .drawer .head h3 { font-family: var(--sign); font-size: 21px; font-weight: 600; margin: 0; line-height: 1.25; padding-right: 36px; }
+  .drawer .head h2 { overflow-wrap: anywhere; font-family: var(--sign); font-size: 21px; font-weight: 600; margin: 0; line-height: 1.25; padding-right: 36px; }
   .drawer .close { position: absolute; top: 14px; right: 16px; border: 0; background: none; font-size: 22px; cursor: pointer; line-height: 1; padding: 4px 8px; }
   .facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; font-size: 14px; margin: 0; }
   .facts dt { color: var(--ink-2); }
@@ -187,6 +187,45 @@
   .gate h1 { font-family: var(--sign); margin: 0 0 8px; font-weight: 600; }
   .gate code { background: #E4EAE8; padding: 2px 6px; border-radius: 3px; }
 
+  [hidden] { display: none !important; }
+  h1 { font-size: 22px; margin: 0; font-weight: 650; }
+  a { color: #245B95; }
+  main > *, .lower > *, .registry-row > *, .machine > * { min-width: 0; }
+  p { overflow-wrap: anywhere; }
+  .section-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
+  .section-head h2 { margin: 0; }
+  .section-head select { max-width: 100%; padding: 6px 8px; background: var(--panel); border: 1px solid var(--rule); border-radius: var(--r-sm); }
+  .notice { background: var(--amber-wash); border: 1px solid #D8BF83; border-radius: var(--r-md); padding: 12px 16px; }
+  .notice p { margin: 0 0 8px; }
+  .registry-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .registry-row { background: var(--panel); border: 1px solid var(--rule); border-radius: var(--r-md); padding: 14px 16px; display: grid; align-content: start; gap: 8px; overflow-wrap: anywhere; }
+  .registry-top { display: flex; align-items: baseline; gap: 8px; justify-content: space-between; }
+  .registry-top strong { font-size: 16px; min-width: 0; }
+  .registry-state { flex-shrink: 0; font-size: 14px; color: var(--ink-2); }
+  .registry-row[data-state="stale"] { border-left: 4px solid #9A6900; }
+  .registry-row p { margin: 0; }
+  .registry-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
+  .registry-actions .btn { font-size: 14px; }
+  .privacy { margin: 0; }
+  .need .t, .need .why, .machine .n, .machine .a { overflow-wrap: anywhere; }
+  .feed span, .gate { overflow-wrap: anywhere; }
+  .gate { width: calc(100% - 32px); }
+  .machine .slots { flex-wrap: wrap; max-width: 100px; }
+  .btn, select { min-height: 38px; }
+  .drawer .close { min-height: 40px; min-width: 40px; }
+  .facts { grid-template-columns: minmax(0, 100px) minmax(0, 1fr); }
+  .facts dt, .facts dd { overflow-wrap: anywhere; }
+  .form-acts { flex-wrap: wrap; }
+  @media (max-width: 650px) {
+    .registry-list { grid-template-columns: minmax(0, 1fr); }
+    .need { grid-template-columns: minmax(0, 1fr); }
+    .need .acts { grid-row: auto; justify-content: start; order: 3; }
+    .panel { padding: 16px; }
+    .meter { min-width: 150px; flex: 1; }
+    header.bar .spacer { display: none; }
+    .bar select { max-width: 210px; }
+    .drawer .head, .drawer .acts, .drawer .body { padding-left: 16px; padding-right: 16px; }
+  }
   .toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); background: var(--ink); color: #fff; padding: 9px 16px; border-radius: var(--r-sm); font-size: 14px; z-index: 30; }
   .toast[hidden] { display: none; }
   .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
@@ -206,13 +245,14 @@
 </style>
 </head>
 <body>
+<noscript><p class="gate">This local control dashboard needs JavaScript. Enable it here or use <code>ym status</code> in a terminal.</p></noscript>
 <div id="app"></div>
 <div class="toast" id="toast" role="status" hidden></div>
 
 <template id="tpl-gate">
   <div class="gate">
     <h1>Open this page from Yardmaster</h1>
-    <p>This dashboard needs the access key for your hub. Run this in a terminal and use the link it prints:</p>
+    <p id="auth-message">This dashboard needs the access key for your hub. Run this in a terminal and use the link it prints:</p>
     <p><code>ym dashboard</code></p>
     <p class="muted">The key stays in this browser only and is never sent anywhere except your own hub.</p>
   </div>
@@ -220,10 +260,10 @@
 
 <template id="tpl-main">
   <header class="bar">
-    <div class="brand"><span class="lamps" aria-hidden="true"><i style="background:#E0A019"></i><i style="background:#4CC38A"></i></span>Yardmaster</div>
+    <h1 class="brand"><span class="lamps" aria-hidden="true"><i style="background:#E0A019"></i><i style="background:#4CC38A"></i></span>Yardmaster</h1>
     <label><span class="sr">Project</span><select id="project"></select></label>
     <div class="spacer"></div>
-    <div class="conn" id="conn"><i></i><span>Connecting</span></div>
+    <div class="conn" id="conn" role="status"><i></i><span>Connecting</span></div>
     <div class="meter" id="meter" aria-live="polite">
       <div><b class="num" id="spent">$0</b> spent today <span id="budget-of"></span></div>
       <div class="track"><div class="fill" id="fill"></div></div>
@@ -232,7 +272,14 @@
     <button class="btn ghost" id="pause-btn" type="button">Pause new work</button>
     <button class="btn primary" id="open-add" type="button">Add work</button>
   </header>
-  <main>
+  <main id="main">
+    <section id="load-state" class="notice" role="status">
+      <p id="load-message">Connecting to your personal hub…</p>
+      <button class="btn" id="refresh-btn" type="button">Refresh now</button>
+    </section>
+    <section id="setup" class="notice" hidden aria-label="Set up a project">
+      <p>Start with a repository. Run <code>ym init</code> there, then <code>ym connect all</code> to connect supported coding clients. Return here and refresh.</p>
+    </section>
     <section id="pause-ask" hidden aria-labelledby="pa-h" class="pause-ask">
       <div><b id="pa-h">Pause new work?</b> Agents that are running right now can finish, or stop now and keep their work for later.</div>
       <div style="display:flex; gap:8px; flex-wrap:wrap">
@@ -253,8 +300,20 @@
       <h2 id="hu-h">Heads up</h2>
       <ul id="hu-list"></ul>
     </section>
+    <section aria-labelledby="agents-h">
+      <div class="section-head">
+        <h2 id="agents-h">Agents and processes</h2>
+        <label><span class="sr">Registry view</span><select id="registry-view"><option value="current">Current connections</option><option value="all">Include recent runs</option></select></label>
+      </div>
+      <p id="registry-status" class="muted" role="status">Loading connected agents…</p>
+      <div id="registry" class="registry-list"></div>
+      <details id="registry-coverage"><summary>What this view can see</summary>
+        <p class="muted">Managed: Yardmaster run records. Observed: connected native sessions. Stale: connection or ownership evidence is out of date. Unconnected: a machine reports an installed client, without a connected session. A heartbeat does not prove a process is alive.</p>
+        <p class="muted" id="coverage"></p>
+      </details>
+    </section>
     <section aria-labelledby="board-h">
-      <h2 id="board-h" class="sr">Work in progress</h2>
+      <h2 id="board-h">Work</h2>
       <div class="line" id="board"></div>
     </section>
     <div class="lower">
@@ -270,12 +329,13 @@
         </section>
         <section class="panel" aria-labelledby="clean-h">
           <h2 id="clean-h">Cleanup</h2>
-          <p class="muted">Finished worktrees, merged branches and expired reservations are removed. Anything with unsaved or unmerged work is always kept.</p>
+          <p class="muted">Finished worktrees, merged branches and expired reservations are removed. Review the plan first. Changed or unmerged work is kept when the hub cannot confirm it is safe to remove.</p>
           <div id="clean"></div>
-          <div style="display:flex; gap:8px"><button class="btn" id="clean-preview" type="button">Check what can be removed</button><button class="btn go" id="clean-run" type="button" hidden>Clean up now</button></div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap"><button class="btn" id="clean-preview" type="button">Check what can be removed</button><button class="btn go" id="clean-run" type="button" hidden>Clean up now</button></div>
         </section>
       </div>
     </div>
+    <p class="muted privacy">Personal hub · Data and logs come from this hub only. No cloud telemetry. Remote access needs your own private HTTPS or encrypted network; this page does not configure it.</p>
   </main>
 
   <dialog id="add-dialog" aria-labelledby="add-h">
@@ -306,15 +366,15 @@
     </form>
   </dialog>
 
-  <aside class="drawer" id="drawer" aria-hidden="true" aria-labelledby="d-title">
+  <dialog class="drawer" id="drawer" aria-labelledby="d-title">
     <div class="head">
       <button class="close" id="d-close" type="button" aria-label="Close details">×</button>
-      <h3 id="d-title"></h3>
+      <h2 id="d-title"></h2>
       <dl class="facts" id="d-facts"></dl>
     </div>
     <div class="acts" id="d-acts"></div>
     <div class="body" id="d-body"></div>
-  </aside>
+  </dialog>
 </template>
 
 <script>
@@ -356,10 +416,55 @@
   let projectId = localStorage.getItem('ym-project') || '';
   let board = null;
   let openTask = null;
+  let openEntry = null;
+  let registry = null;
+  let registryError = '';
+  let registryReceivedAt = null;
+  let boardReceivedAt = null;
+  let authFailed = false;
+  let streamConnected = false;
+  let snapshotError = '';
+  function renderConnectionNotice() {
+    if (authFailed) return;
+    $('load-state').hidden = !snapshotError && streamConnected;
+    $('load-message').textContent = snapshotError || (streamConnected ? '' : 'Live updates disconnected. Displayed records may be out of date. Retrying in 2 seconds; check “ym doctor” if this continues.');
+  }
+  let drawerOrigin = null;
+  let detailSequence = 0;
+  const drafts = new Map();
+  const unknown = (value) => value === null || value === undefined || value === '' ? 'Unknown' : String(value);
+  const age = (at) => {
+    if (at === null || at === undefined || at > Date.now()) return 'age unknown';
+    const seconds = Math.max(0, Math.floor((Date.now() - at) / 1000));
+    return seconds < 60 ? seconds + 's ago' : seconds < 3600 ? Math.floor(seconds / 60) + 'm ago' : Math.floor(seconds / 3600) + 'h ago';
+  };
+  function captureFocus(root = document) {
+    const node = document.activeElement;
+    if (!node || !root.contains(node)) return null;
+    return { node, id: node.id, key: node.getAttribute('data-focus'), start: node.selectionStart, end: node.selectionEnd, direction: node.selectionDirection };
+  }
+  function restoreFocus(saved, root = document) {
+    if (!saved) return;
+    const node = saved.node.isConnected ? saved.node : saved.id ? $(saved.id) : saved.key ? [...root.querySelectorAll('[data-focus]')].find(n => n.getAttribute('data-focus') === saved.key) : null;
+    if (!node || !root.contains(node)) return;
+    node.focus({ preventScroll: true });
+    if (typeof saved.start === 'number' && node.setSelectionRange) node.setSelectionRange(saved.start, saved.end, saved.direction || 'none');
+  }
+  function loseAuth() {
+    if (authFailed) return;
+    authFailed = true;
+    localStorage.removeItem('ym-token');
+    clearInterval(logTimer);
+    if ($('drawer').open) $('drawer').close();
+    if ($('add-dialog').open) $('add-dialog').close();
+    app.replaceChildren($('tpl-gate').content.cloneNode(true));
+    $('auth-message').textContent = 'Access expired or this key is not valid for the owner dashboard. Run “ym dashboard” on your hub and open its new link.';
+  }
 
   async function rpc(method, params = {}) {
     const res = await fetch('/api/rpc/' + method, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token }, body: JSON.stringify(params) });
-    if (res.status === 401) { localStorage.removeItem('ym-token'); location.reload(); }
+    if (res.status === 401) { loseAuth(); throw new Error('Owner access required. Open a fresh “ym dashboard” link.'); }
+    if (!res.ok) throw new Error('Hub request failed (HTTP ' + res.status + '). Retry or check “ym doctor”.');
     const body = await res.json();
     if (!body.ok) throw new Error(body.error || 'Request failed');
     return body.result;
@@ -377,7 +482,7 @@
       await rpc('task.control', { id, action, by: 'dashboard' });
       toast(label);
       refresh();
-      if (openTask === id) showTask(id);
+      if (openTask === id) showTask(id, true);
     } catch (e) { toast(e.message); }
   }
 
@@ -388,6 +493,7 @@
     sel.replaceChildren(el('option', { value: '', text: 'All projects' }), ...board.projects.map((p) => el('option', { value: p.id, text: p.name })));
     sel.value = projectId && board.projects.some((p) => p.id === projectId) ? projectId : cur && board.projects.some((p) => p.id === cur) ? cur : '';
     sel.hidden = board.projects.length < 2 && !projectId;
+    $('setup').hidden = board.projects.length > 0;
   }
 
   function renderSupervision() {
@@ -418,10 +524,10 @@
     const out = [];
     if (s === 'needs_human' || s === 'failed' || s === 'canceled') out.push(el('button', { class: 'btn primary', type: 'button', text: 'Try again', onclick: () => act(t.id, 'retry', 'Queued to try again') }));
     if (s === 'ready' && t.attention) out.push(el('button', { class: 'btn go', type: 'button', text: 'Approve and merge', onclick: () => act(t.id, 'approve', 'Approved. Merging now.') }));
-    if (s === 'running' || s === 'verifying') out.push(el('button', { class: 'btn', type: 'button', text: 'Stop', onclick: () => act(t.id, 'stop', 'Stopping') }));
+    if ((s === 'running' || s === 'verifying') && canStopTask(t.id)) out.push(el('button', { class: 'btn', type: 'button', 'data-focus': 'stop:' + t.id, text: 'Request stop', onclick: () => requestStop(t.id) }));
     if (!['done', 'canceled', 'failed'].includes(s)) {
       // Two clicks instead of a blocking dialog: the first arms the button for a few seconds.
-      const b = el('button', { class: 'btn danger', type: 'button', text: 'Cancel task' });
+      const b = el('button', { class: 'btn danger', type: 'button', 'data-focus': 'cancel:' + t.id, text: 'Cancel task' });
       let armed = null;
       b.addEventListener('click', () => {
         if (armed) { clearTimeout(armed); act(t.id, 'cancel', 'Canceled. Its work is kept until cleanup confirms nothing is lost.'); return; }
@@ -430,7 +536,8 @@
       });
       out.push(b);
     }
-    if (compact) out.push(el('button', { class: 'btn', type: 'button', text: 'Details', onclick: () => showTask(t.id) }));
+    out.forEach(button => { if (!button.hasAttribute('data-focus')) button.setAttribute('data-focus', 'action:' + t.id + ':' + button.textContent); });
+    if (compact) out.push(el('button', { class: 'btn', type: 'button', 'data-focus': 'task:' + t.id, text: 'Details', onclick: () => showTask(t.id) }));
     return out;
   }
 
@@ -448,7 +555,7 @@
   function ticket(t) {
     const who = t.assignee && t.assignee.startsWith('session:') ? t.assignee.slice(8) + ' (in its own session)' : t.agent;
     const detail = t.waiting || t.lastActivity || t.summary || '';
-    return el('button', { class: 'ticket', type: 'button', 'data-s': t.status, onclick: () => showTask(t.id), 'aria-label': `${t.title}, ${LABEL[t.status] || t.status}` },
+    return el('button', { class: 'ticket', type: 'button', 'data-s': t.status, 'data-focus': 'task:' + t.id, onclick: () => showTask(t.id), 'aria-label': `${t.title}, ${LABEL[t.status] || t.status}` },
       el('span', { class: 't' }, clip(t.title, 90)),
       el('span', { class: 'm' }, el('span', { class: 'lamp', 'aria-hidden': 'true' }), who ? el('span', {}, who) : null, t.cost ? el('span', { class: 'num' }, usd(t.cost)) : null, t.status === 'merging' ? el('span', {}, 'merging') : null),
       detail ? el('span', { class: 'd' }, clip(detail, 120)) : null,
@@ -493,21 +600,128 @@
       el('span', { class: 'slots', title: `${m.running} of ${m.maxParallel} agent slots in use`, 'aria-label': `${m.running} of ${m.maxParallel} slots in use` }, Array.from({ length: m.maxParallel }, (_, i) => el('i', { class: i < m.running ? 'used' : '' }))),
       el('span', { class: 'a' }, m.agents.length ? 'Agents: ' + m.agents.join(', ') : 'No coding agents found on this machine'),
       m.diskFreeGb === null ? null : diskBar(m),
-    )) : [el('p', { class: 'muted' }, 'No machines yet. Start the hub with “ym hub start”.')]));
+    )) : [el('p', { class: 'muted' }, 'No machine heartbeat yet. Check “ym doctor” on the hub; start a configured worker to connect another machine.')]));
     const ss = board.sessions;
     $('sessions').textContent = ss.length ? `Connected agent sessions: ${ss.map((s) => s.id.replace('session:', '')).join(', ')}` : 'No interactive agent sessions connected. Run “ym connect all” to use Yardmaster from Claude Code, Codex, Cursor and others.';
   }
 
-  async function refresh() {
+  function canStopTask(id) {
+    return !registryError && registry && registry.entries.some(e => e.taskId === id && e.capabilities?.requestStop === true);
+  }
+  async function requestStop(id) {
     try {
-      board = await rpc('board.status', { projectId: projectId || null });
-      renderProjects(); renderMeter(); renderSupervision(); renderAttention(); renderBoard(); renderMachines();
+      // Recheck capability at click time; task.control is task-scoped, not an individual PID signal.
+      const scope = projectId;
+      const snapshot = await rpc('registry.list', scope ? { projectId: scope } : {});
+      if (scope !== projectId || authFailed) return;
+      registry = snapshot; registryError = ''; registryReceivedAt = Date.now();
+      if (!canStopTask(id)) { renderRegistry(); return toast('Stop is unavailable for this task. Inspect its latest connection state.'); }
+      await act(id, 'stop', 'Stop requested for the task. Wait for its next reported state; exit is not yet confirmed.');
     } catch (e) { toast(e.message); }
+  }
+  function entryFacts(e) {
+    return [
+      ['Record', e.id], ['State', e.state + ' · ' + unknown(e.status)],
+      ['Snapshot', registryError ? 'Refresh failed · received ' + age(registryReceivedAt) : 'Received ' + age(registryReceivedAt)],
+      ['Machine', unknown(e.machineName || e.machineId)], ['Connection', e.online === true ? 'Heartbeat received' : e.online === false ? 'Heartbeat overdue' : 'Unknown'],
+      ['Agent', unknown(e.agent)], ['Model', unknown(e.model)], ['Role', unknown(e.role)],
+      ['Phase', unknown(e.phase)], ['Effort', unknown(e.effort)], ['PID', unknown(e.pid)],
+      ['Process start', e.processStartedAt == null ? 'Unknown' : new Date(e.processStartedAt).toLocaleString()],
+      ['Task', unknown(e.taskId)], ['Run', unknown(e.runId)], ['Session', unknown(e.sessionId)],
+      ['Generation', unknown(e.generation)], ['Freshness', unknown(e.freshness) + ' · ' + age(e.lastSeenAt)],
+      ['Last activity', unknown(e.lastActivity)],
+      ['Cache read / write', unknown(e.cache?.readTokens) + ' / ' + unknown(e.cache?.writeTokens) + ' tokens'],
+    ];
+  }
+  function renderFacts(facts) {
+    $('d-facts').replaceChildren(...facts.flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)]));
+  }
+  function presentDrawer() {
+    const drawer = $('drawer');
+    if (!drawer.open) { drawerOrigin = captureFocus(); drawer.showModal(); $('d-close').focus(); }
+  }
+  function showEntry(id, quiet = false) {
+    const entry = registry?.entries.find(e => e.id === id);
+    if (!entry) {
+      if (quiet) { $('d-acts').replaceChildren(); $('d-facts').replaceChildren(); $('d-title').textContent = 'Record no longer reported'; $('d-body').replaceChildren(el('p', {}, 'This record is no longer in the latest registry snapshot. Close details and refresh.')); }
+      return;
+    }
+    saveDraft(); openTask = null; openEntry = id; ++detailSequence; clearInterval(logTimer);
+    const saved = captureFocus($('drawer'));
+    $('d-title').textContent = unknown(entry.agent) + ' · ' + entry.state;
+    renderFacts(entryFacts(entry));
+    const actions = [
+      entry.taskId && entry.capabilities?.inspect ? el('button', { class: 'btn', type: 'button', 'data-focus': 'open-task:' + entry.taskId, text: 'Open exact task', onclick: () => showTask(entry.taskId) }) : null,
+      entry.taskId && entry.capabilities?.requestStop && !registryError ? el('button', { class: 'btn', type: 'button', 'data-focus': 'stop:' + entry.taskId, text: 'Request task stop', onclick: () => requestStop(entry.taskId) }) : null,
+    ].filter(Boolean);
+    $('d-acts').replaceChildren(...actions);
+    $('d-body').replaceChildren(el('p', {}, entry.taskId ? 'Task controls affect this task and its owned work. A stop request does not confirm process exit.' : 'No task is linked to this record. Connect a supported session with “ym connect all”; an installed client alone does not report work.'), el('p', { class: 'muted' }, 'Unknown means the hub has no attested signal. Heartbeat freshness is connection evidence, not process liveness. Native stop is unavailable.'));
+    if (!quiet) presentDrawer();
+    restoreFocus(saved, $('drawer'));
+  }
+  function renderRegistry() {
+    const root = $('registry');
+    const status = $('registry-status');
+    if (!registry) { root.replaceChildren(); status.textContent = registryError ? 'Agent view unavailable. ' + registryError + ' Use Refresh now to retry.' : 'Loading connected agents…'; return; }
+    const entries = registry.entries.filter(e => $('registry-view').value === 'all' || e.source !== 'run' || e.status === 'running');
+    const taskNames = new Map([...(board?.active || []), ...(board?.attention || []), ...(board?.recentDone || [])].map(t => [t.id, t.title]));
+    status.textContent = registryError ? 'Agent view could not refresh. Showing snapshot from ' + age(registryReceivedAt) + '. Use Refresh now to retry.' : 'Snapshot received ' + age(registryReceivedAt) + '. ' + (entries.length ? 'Only connected or machine-reported clients are visible.' : 'No connected agents reported. Run “ym connect all” in an initialized repository, then refresh.');
+    root.replaceChildren(...entries.map(e => el('article', { class: 'registry-row', 'data-state': e.state },
+      el('div', { class: 'registry-top' }, el('strong', {}, unknown(e.agent)), el('span', { class: 'registry-state' }, e.state)),
+      el('p', {}, unknown(e.machineName || e.machineId) + (e.model ? ' · ' + e.model : '') + (e.role ? ' · ' + e.role : '')),
+      el('p', { class: 'muted' }, unknown(e.status) + ' · ' + unknown(e.freshness) + ' · last seen ' + age(e.lastSeenAt)),
+      e.taskId ? el('p', {}, clip(taskNames.get(e.taskId) || e.taskId, 120)) : null,
+      e.lastActivity ? el('p', { class: 'muted' }, clip(e.lastActivity, 150)) : null,
+      el('div', { class: 'registry-actions' }, el('button', { class: 'btn', type: 'button', 'data-focus': 'entry:' + e.id, 'aria-label': 'Inspect ' + unknown(e.agent) + ' on ' + unknown(e.machineName || e.machineId), text: 'Inspect', onclick: () => showEntry(e.id) }),
+        e.taskId && e.capabilities?.requestStop && !registryError ? el('button', { class: 'btn', type: 'button', 'data-focus': 'stop:' + e.id, text: 'Request stop', onclick: () => requestStop(e.taskId) }) : null),
+    )));
+    const c = registry.coverage || {};
+    $('coverage').textContent = 'Unavailable signals: ' + (c.unknownSignals || []).join(', ') + '.' + (c.sessionsTruncated || c.machinesTruncated ? ' Passive inventory is truncated; this is not a complete fleet list.' : '') + ' Recent run history is limited to ' + unknown(c.historyLimit) + ' records.';
+  }
+
+  // One serialized snapshot pair, with one trailing refresh regardless of SSE burst size.
+  let refreshInFlight = false;
+  let refreshAgain = false;
+  let refreshTimer = null;
+  function scheduleRefresh() {
+    if (authFailed || refreshTimer !== null) return;
+    refreshTimer = setTimeout(() => { refreshTimer = null; refresh(); }, 250);
+  }
+  async function refresh() {
+    if (authFailed) return;
+    if (refreshInFlight) { refreshAgain = true; return; }
+    refreshInFlight = true;
+    const scope = projectId;
+    try {
+      const [b, r] = await Promise.allSettled([
+        rpc('board.status', { projectId: scope || null }),
+        rpc('registry.list', scope ? { projectId: scope } : {}),
+      ]);
+      if (authFailed || scope !== projectId) { refreshAgain = !authFailed; return; }
+      const saved = $('drawer').open ? null : captureFocus();
+      registryError = r.status === 'rejected' ? r.reason.message : '';
+      if (r.status === 'fulfilled') { registry = r.value; registryReceivedAt = Date.now(); }
+      if (b.status === 'fulfilled') {
+        board = b.value; boardReceivedAt = Date.now();
+        renderProjects(); renderMeter(); renderSupervision(); renderAttention(); renderBoard(); renderMachines();
+      }
+      renderRegistry();
+      const errors = b.status === 'rejected' || r.status === 'rejected';
+      snapshotError = errors ? (b.status === 'rejected' ? 'Work view could not refresh. ' + b.reason.message + (boardReceivedAt ? ' Last work snapshot received ' + age(boardReceivedAt) + '.' : '') : 'Work view connected; agent view unavailable.') + ' Check the hub with “ym doctor”, then retry.' : '';
+      renderConnectionNotice();
+      if (openEntry) showEntry(openEntry, true);
+      if (openTask) await showTask(openTask, true);
+      restoreFocus(saved);
+    } finally {
+      refreshInFlight = false;
+      if (refreshAgain) { refreshAgain = false; scheduleRefresh(); }
+    }
   }
 
   // ---------- feed (live stream) ----------
   const feed = [];
   function pushEvents(evs) {
+    if (authFailed) return;
     for (const e of evs) if (!projectId || !e.project_id || e.project_id === projectId) feed.unshift(e);
     feed.splice(150);
     $('feed').replaceChildren(...feed.map((e) => el('li', { 'data-l': e.level },
@@ -516,7 +730,6 @@
     )));
   }
 
-  let refreshQueued = false;
   async function stream() {
     const conn = $('conn');
     let last = 0;
@@ -525,14 +738,19 @@
       feed.length = 0; pushEvents(initial);
       if (initial.length) last = initial[initial.length - 1].id;
     } catch {}
-    for (;;) {
+    while (!authFailed) {
       try {
         const res = await fetch('/api/stream?after=' + last, { headers: { authorization: 'Bearer ' + token } });
+        if (res.status === 401) { loseAuth(); return; }
+        if (!res.ok || !res.body) throw new Error('Stream unavailable');
+        streamConnected = true;
+        renderConnectionNotice();
         conn.className = 'conn live'; conn.lastElementChild.textContent = 'Live';
         const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
         let buf = '';
         for (;;) {
           const { value, done } = await reader.read();
+          if (authFailed) { await reader.cancel(); return; }
           if (done) break;
           buf += value;
           let i;
@@ -544,28 +762,43 @@
             if (Array.isArray(evs) && evs.length) {
               last = evs[evs.length - 1].id;
               pushEvents(evs);
-              if (!refreshQueued) { refreshQueued = true; setTimeout(() => { refreshQueued = false; refresh(); if (openTask) showTask(openTask, true); }, 250); }
+              scheduleRefresh();
             }
           }
         }
       } catch {}
+      if (authFailed) return;
+      streamConnected = false;
       conn.className = 'conn'; conn.lastElementChild.textContent = 'Reconnecting';
+      renderConnectionNotice();
       await new Promise((r) => setTimeout(r, 2000));
     }
   }
 
   // ---------- task drawer ----------
   let logTimer;
+  let logInFlight = false;
+  function saveDraft() {
+    const note = $('d-note');
+    if (note) drafts.set(note.dataset.task, { value: note.value, start: note.selectionStart, end: note.selectionEnd, direction: note.selectionDirection });
+  }
   async function showTask(id, quiet) {
-    openTask = id;
+    saveDraft();
+    const request = ++detailSequence;
+    openTask = id; openEntry = null;
     const drawer = $('drawer');
     let d;
     try { d = await rpc('task.get', { id }); } catch (e) { toast(e.message); return; }
+    if (request !== detailSequence || openTask !== id || authFailed) return;
+    saveDraft();
+    const savedFocus = captureFocus(drawer);
     const t = d.task;
     const run = [...d.runs].reverse().find((r) => r.role !== 'review') || d.runs[d.runs.length - 1];
     $('d-title').textContent = t.title;
     const facts = [
+      ['Task', t.id],
       ['Status', d.label],
+      t.head_sha ? ['Artifact SHA', t.head_sha] : null,
       d.waiting ? ['Waiting on', d.waiting] : null,
       ['Agent', run ? `${run.agent}${run.model ? ' · ' + run.model : ''}` : t.agent || 'picked automatically'],
       ['Attempt', `${t.attempts} of ${t.max_attempts}`],
@@ -581,7 +814,7 @@
       })(),
       run && run.lessons && run.lessons.length ? ['Briefed with', `${run.lessons.length} lesson(s) from earlier work`] : null,
     ].filter(Boolean);
-    $('d-facts').replaceChildren(...facts.flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)]));
+    renderFacts(facts);
     $('d-acts').replaceChildren(...actionButtons(t, false));
     const body = [];
     if (t.attention) body.push(el('div', { class: 'callout amber' }, t.attention));
@@ -589,46 +822,52 @@
     if (t.summary) body.push(el('div', {}, el('h4', {}, 'What the agent says it did'), el('div', { class: 'callout plain' }, t.summary)));
     if (t.prompt && t.prompt !== t.title) body.push(el('div', {}, el('h4', {}, 'Request'), el('div', { class: 'callout plain' }, clip(t.prompt, 1200))));
     if (!['done', 'canceled', 'failed'].includes(t.status)) {
-      const ta = el('textarea', { id: 'd-note', 'data-task': id, placeholder: 'For example: use the existing date helper instead of adding a library' });
-      const send = el('button', { class: 'btn', type: 'button', text: t.status === 'running' ? 'Redirect now' : 'Add guidance', onclick: async () => {
+      const ta = el('textarea', { id: 'd-note', 'data-task': id, maxlength: '4000', placeholder: 'For example: use the existing date helper instead of adding a library' });
+      const send = el('button', { class: 'btn', type: 'button', 'data-focus': 'guidance:' + id, text: t.status === 'running' ? 'Redirect now' : 'Add guidance', onclick: async () => {
         const note = ta.value.trim();
         if (!note) { ta.focus(); return; }
-        try { await rpc('task.control', { id, action: 'redirect', note, by: 'dashboard' }); toast(t.status === 'running' ? 'Redirected. The agent restarts with your guidance and keeps its work.' : 'Guidance saved for the next attempt.'); showTask(id, true); } catch (e) { toast(e.message); }
+        try { await rpc('task.control', { id, action: 'redirect', note, by: 'dashboard' }); toast(t.status === 'running' ? 'Redirect requested. Check the next reported activity.' : 'Guidance saved for the next attempt.'); drafts.delete(id); ta.value = ''; showTask(id, true); } catch (e) { toast(e.message); }
       } });
-      body.push(el('div', { class: 'redirect' }, el('h4', {}, 'Tell the agent something'), ta, el('div', {}, send)));
+      body.push(el('div', { class: 'redirect' }, el('label', { for: 'd-note' }, 'Guidance for this task'), ta, el('div', {}, send)));
     }
     const pre = el('pre', { class: 'log', id: 'd-log', 'aria-label': 'Activity log' }, 'Loading activity…');
     body.push(el('div', {}, el('h4', {}, 'Activity'), pre));
-    // Live refreshes rebuild the drawer; keep whatever the person is typing.
-    const prev = $('d-note');
-    const same = prev && prev.dataset.task === id;
-    const draft = same ? prev.value : '';
-    const typing = same && document.activeElement === prev;
     $('d-body').replaceChildren(...body);
     const next = $('d-note');
-    if (next && draft) next.value = draft;
-    if (next && typing) next.focus();
-    if (!quiet) { drawer.classList.add('open'); drawer.setAttribute('aria-hidden', 'false'); $('d-close').focus(); }
+    const draft = drafts.get(id);
+    if (next && draft) { next.value = draft.value; next.setSelectionRange(draft.start, draft.end, draft.direction || 'none'); }
+    if (!quiet) presentDrawer();
+    restoreFocus(savedFocus, drawer);
     const loadLog = async () => {
-      if (openTask !== id) return;
+      if (openTask !== id || logInFlight || authFailed) return;
+      logInFlight = true;
+      const target = $('d-log');
       try {
         const text = await rpc('task.logs', { id, lines: 300 });
-        const node = $('d-log'); if (!node) return;
+        const node = $('d-log'); if (!node || target !== node || openTask !== id) return;
         const atBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 30;
         node.textContent = text || 'No activity yet.';
         if (atBottom) node.scrollTop = node.scrollHeight;
-      } catch {}
+      } catch { if (target?.isConnected) target.textContent = 'Activity unavailable. Close and reopen details to retry.'; }
+      finally { logInFlight = false; }
     };
     loadLog();
     clearInterval(logTimer);
     logTimer = setInterval(loadLog, 2000);
   }
   function closeDrawer() {
-    openTask = null; clearInterval(logTimer);
-    const drawer = $('drawer'); drawer.classList.remove('open'); drawer.setAttribute('aria-hidden', 'true');
+    if ($('drawer').open) $('drawer').close();
+    else { openTask = null; openEntry = null; ++detailSequence; clearInterval(logTimer); }
   }
+  $('drawer').addEventListener('close', () => {
+    saveDraft(); openTask = null; openEntry = null; ++detailSequence; clearInterval(logTimer);
+    restoreFocus(drawerOrigin);
+    if (!document.activeElement || document.activeElement === document.body) $('open-add')?.focus();
+    drawerOrigin = null;
+  });
   $('d-close').addEventListener('click', closeDrawer);
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && openTask) closeDrawer(); });
+  $('refresh-btn').addEventListener('click', () => refresh());
+  $('registry-view').addEventListener('change', renderRegistry);
 
   // ---------- add work ----------
   const dlg = $('add-dialog');
@@ -657,8 +896,8 @@
       const r = await rpc('task.add', { projectId: pid, tasks: [task], createdBy: 'dashboard' });
       if (r.created.length) { toast('Queued: ' + clip(r.created[0].title, 60)); dlg.close(); e.target.reset(); refresh(); }
       else if (r.duplicates.length) $('add-msg').textContent = `This looks the same as “${r.duplicates[0].existingTitle}”, which is already queued.`;
-    } catch (err) { $('add-msg').textContent = err.message; }
-    finally { $('add-submit').disabled = false; }
+    } catch (err) { if (!authFailed) $('add-msg').textContent = err.message; }
+    finally { if (!authFailed) $('add-submit').disabled = false; }
   });
 
   // ---------- cleanup ----------
@@ -689,7 +928,7 @@
   $('pause-cancel').addEventListener('click', () => { pauseAsk.hidden = true; $('pause-btn').focus(); });
   const doPause = async (now) => {
     pauseAsk.hidden = true;
-    try { await rpc('fleet.pause', { projectId: projectId || null, stopRunning: now, by: 'dashboard' }); toast(now ? 'Paused. Running agents saved their work and stopped.' : 'Paused. Running agents will finish first.'); refresh(); } catch (e) { toast(e.message); }
+    try { await rpc('fleet.pause', { projectId: projectId || null, stopRunning: now, by: 'dashboard' }); toast(now ? 'Paused. Stop requested for running work; wait for reported state.' : 'Paused. Running agents can finish first.'); refresh(); } catch (e) { toast(e.message); }
   };
   $('pause-soft').addEventListener('click', () => doPause(false));
   $('pause-now').addEventListener('click', () => doPause(true));
@@ -697,7 +936,13 @@
     try { await rpc('fleet.resume', { projectId: projectId || null, by: 'dashboard' }); toast('Resumed'); refresh(); } catch (e) { toast(e.message); }
   });
 
-  $('project').addEventListener('change', (e) => { projectId = e.target.value; localStorage.setItem('ym-project', projectId); feed.length = 0; refresh(); rpc('events.since', { after: 0, limit: 60, projectId: projectId || null }).then(pushEvents).catch(() => {}); });
+  $('project').addEventListener('change', (e) => {
+    closeDrawer(); projectId = e.target.value; localStorage.setItem('ym-project', projectId);
+    registry = null; registryError = ''; board = null; feed.length = 0;
+    $('registry').replaceChildren(); $('board').replaceChildren(); $('att-list').replaceChildren(); $('attention').hidden = true; $('machines').replaceChildren(); $('sessions').textContent = ''; $('feed').replaceChildren();
+    const scope = projectId;
+    refresh(); rpc('events.since', { after: 0, limit: 60, projectId: scope || null }).then(events => { if (scope === projectId) pushEvents(events); }).catch(() => {});
+  });
 
   refresh();
   stream();

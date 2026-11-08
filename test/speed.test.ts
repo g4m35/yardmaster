@@ -230,8 +230,8 @@ test('a redirected run is resumed and its spend becomes the new session baseline
     const impl = s.hub.coord.runsFor(t!.id).filter((r) => r.role === 'implement').sort((a, b) => a.started_at - b.started_at);
     assert.equal(impl[0]!.stop_reason, 'redirected');
     assert.equal(impl[1]!.resumed, true, 'the redirect continued the session');
-    assert.ok(Math.abs(done!.session_cost - 0.2) < 1e-9, `baseline covers both runs, got ${done!.session_cost}`);
-    assert.ok(Math.abs(done!.cost_usd - 0.2) < 1e-9, `each run charged once, got ${done!.cost_usd}`);
+    assert.ok(Math.abs(done!.session_cost - (0.2 + 0.00225)) < 1e-9, `baseline covers both runs, got ${done!.session_cost}`);
+    assert.ok(Math.abs(done!.cost_usd - (0.2 + 0.00225)) < 1e-9, `each run charged once including estimated usage, got ${done!.cost_usd}`);
   } finally {
     delete process.env.YARDMASTER_MOCK_RESUMABLE;
   }

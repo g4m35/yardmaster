@@ -1,15 +1,14 @@
-import { createWriteStream, existsSync, type WriteStream } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { createWriteStream, existsSync, readFileSync, type WriteStream } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
-import { createInterface } from 'node:readline';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
 import { getAdapter } from './adapters/index.ts';
-import type { AgentEvent } from './adapters/types.ts';
+import type { AdapterContext, AgentEvent, LaunchSpec } from './adapters/types.ts';
 import { agentSettings, priceFor, type Config, worktreeRootOf } from './config.ts';
-import { paths } from './paths.ts';
+import { expandHome, paths } from './paths.ts';
 import { addWorktree, branchExists, changedFiles, commitAll, conflictedFiles, git, hasConflictMarkers, isAncestor, isClean, isLinkedWorktreeOf, revParse } from './git.ts';
 import { rememberChecked } from './ci/verified.ts';
-import { cleanEnv, killGroup, processStartTime, runShell } from './proc.ts';
+import { cleanEnv, startOwnedProcess, runShell, type OwnedProcess } from './proc.ts';
 import { escalate } from './router.ts';
 import { inScope, matches } from './scope.ts';
 import { clip, errorFingerprint, formatUsd, tail } from './text.ts';
@@ -19,25 +18,41 @@ import type { Client } from './api.ts';
 import type { TaskPatch } from './coordinator.ts';
 import { changedLineCount, formatIssues, runReview, shouldReview } from './review.ts';
 import { siblingWorktrees, warmStart } from './warmstart.ts';
-import { UsageMeter } from './usage.ts';
-import { routeEffort } from './jev.ts';
+import { UsageMeter, type UsageSnapshot } from './usage.ts';
+import { routeEffort, routedEffortOf } from './jev.ts';
+import { EffortPolicyError, launchEffort, launchIdentity } from './effort.ts';
+import { verifyArtifact as runVerify } from './verification.ts';
 
 export class Semaphore {
-  private queue: (() => void)[] = [];
+  private queue: { grant: () => void; reject: (error: Error) => void; signal?: AbortSignal; abort: () => void }[] = [];
   private active = 0;
   private readonly max: number;
-  constructor(max: number) {
-    this.max = max;
+  constructor(max: number) { if (!Number.isInteger(max) || max < 1) throw new Error('Capacity must be a positive integer.'); this.max = max; }
+  async acquire(signal?: AbortSignal): Promise<() => void> {
+    if (signal?.aborted) throw new Error('Capacity wait canceled.');
+    if (this.active < this.max) this.active++;
+    else await new Promise<void>((grant, reject) => {
+      const waiter = { grant, reject, signal, abort: () => {
+        const index = this.queue.indexOf(waiter);
+        if (index >= 0) this.queue.splice(index, 1);
+        reject(new Error('Capacity wait canceled.'));
+      } };
+      this.queue.push(waiter);
+      signal?.addEventListener('abort', waiter.abort, { once: true });
+    });
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const next = this.queue.shift();
+      if (next) { next.signal?.removeEventListener('abort', next.abort); next.grant(); }
+      else this.active--;
+    };
   }
-  async use<T>(fn: () => Promise<T>): Promise<T> {
-    if (this.active >= this.max) await new Promise<void>((r) => this.queue.push(r));
-    this.active++;
-    try {
-      return await fn();
-    } finally {
-      this.active--;
-      this.queue.shift()?.();
-    }
+  async use<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    const release = await this.acquire(signal);
+    try { if (signal?.aborted) throw new Error('Capacity wait canceled.'); return await fn(); }
+    finally { release(); }
   }
 }
 
@@ -57,6 +72,11 @@ export interface RunContext {
   /** Agents installed on this machine (for picking a reviewer). */
   installed?: string[];
   onSpawn?: (stop: (reason: StopReason, message: string) => void) => void;
+  signal?: AbortSignal;
+  stopTask?: (reason: StopReason, message: string) => void;
+  stopReason?: () => StopReason | null;
+  cleanup?: (fn: () => void | Promise<void>) => void;
+  reserveAgent?: (agent: string, signal?: AbortSignal) => Promise<() => void>;
 }
 
 export type StopReason = Verdict['kind'] | 'budget' | 'canceled' | 'stopped' | 'preempted' | 'shutdown' | 'redirected' | 'lost';
@@ -219,16 +239,77 @@ function describe(ev: AgentEvent): string | null {
 
 /** Runs one attempt of a task end to end: worktree, agent, watchdog, commit, scope check, verification. */
 export async function runAttempt(ctx: RunContext): Promise<RunOutcome> {
+  const cleanups: (() => void | Promise<void>)[] = [];
+  const lifetime = new AbortController();
+  let stopped: { reason: StopReason; message: string } | null = null;
+  let activeStop: RunContext['stopTask'];
+  let polling = false;
+  let lease = ctx.task.lease_until ?? Date.now();
+  const stopTask = (reason: StopReason, message: string) => {
+    if (stopped) return;
+    stopped = { reason, message };
+    lifetime.abort(message);
+    activeStop?.(reason, message);
+  };
+  ctx.onSpawn?.(stopTask);
+  const control = setInterval(() => {
+    if (polling || stopped) return;
+    polling = true;
+    void ctx.api['task.peek']({ id: ctx.task.id }).then((t) => {
+      if (t.generation !== ctx.task.generation || t.assignee !== ctx.task.assignee) stopTask('lost', 'This claim was superseded.');
+      else if (t.status === 'canceled') stopTask('canceled', 'Canceled on request.');
+      else if (t.control === 'stop') stopTask('stopped', 'Stopped on request.');
+      else if (t.control === 'stop-pause') stopTask('shutdown', 'Paused; work is preserved.');
+      else if (t.control === 'redirect') stopTask('redirected', 'Restarting with your new guidance.');
+      else if (['running', 'verifying'].includes(t.status)) {
+        lease = t.lease_until ?? lease;
+        if (lease <= Date.now()) stopTask('lost', 'The claim lease expired; this process must stop before work is reassigned.');
+      }
+    }).catch(() => { if (lease <= Date.now()) stopTask('lost', 'Hub unreachable beyond the claim lease.'); })
+      .finally(() => { polling = false; });
+  }, 250);
   try {
-    return await runAttemptInner(ctx);
+    const owner = claimOwner(ctx.task);
+    const fenced = new Set(['task.update', 'task.usage', 'task.touched', 'task.event', 'run.start', 'run.update', 'run.log', 'run.usage', 'lesson.outcome']);
+    const api = new Proxy(ctx.api, { get: (target, key: string) => {
+      const call = target[key as keyof Client];
+      return fenced.has(key) ? (params: Record<string, unknown>) => {
+        const status = (params.patch as TaskPatch | undefined)?.status;
+        if (lifetime.signal.aborted && (key === 'run.start' || (key === 'task.update' &&
+            (status === 'ready' || (status === 'queued' && ['stopped', 'canceled', 'lost'].includes(stopped?.reason ?? '')))))) throw new Error('Task lifetime stopped.');
+        return (call as (p: unknown) => unknown)({ ...params, owner });
+      } : call;
+    } });
+    return await runAttemptInner({ ...ctx, api, signal: lifetime.signal, stopTask, stopReason: () => stopped?.reason ?? null, cleanup: (fn) => cleanups.push(fn), onSpawn: (handler) => {
+      activeStop = handler;
+      const pending = stopped as { reason: StopReason; message: string } | null;
+      if (pending) handler(pending.reason, pending.message);
+    } });
   } catch (err) {
+    const control = /Task control pending: (.+)/.exec((err as Error)?.message ?? '')?.[1];
+    if (control) stopTask(control === 'redirect' ? 'redirected' : control === 'stop-pause' ? 'shutdown' : 'stopped', 'Stopped before the next phase or acceptance.');
     if (isStale(err)) return { status: 'superseded', message: (err as Error).message };
+    const pending = stopped as { reason: StopReason; message: string } | null;
+    if (pending) {
+      if (pending.reason === 'lost') return { status: 'superseded', message: pending.message };
+      if (pending.reason === 'canceled') return { status: 'canceled', message: pending.message };
+      const requeue = ['shutdown', 'redirected', 'preempted'].includes(pending.reason);
+      await ctx.api['task.update']({ id: ctx.task.id, owner: claimOwner(ctx.task), patch: {
+        status: requeue ? 'queued' : 'needs_human', attention: requeue ? null : pending.message,
+        ...(requeue ? { attempts: Math.max(0, ctx.task.attempts - 1), assignee: null, machine_id: null } : {}), lease_until: null,
+      } }).catch(() => undefined);
+      return { status: requeue ? 'queued' : 'needs_human', message: pending.message };
+    }
     throw err;
+  } finally {
+    clearInterval(control);
+    await Promise.allSettled(cleanups.map((fn) => Promise.resolve().then(fn)));
   }
 }
 
 async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   const { api, task, config } = ctx;
+  if (!Number.isSafeInteger(task.generation) || task.generation < 1) throw new Error('A valid claim generation is required. Upgrade the worker and claim the task again.');
   let preparationStop: { reason: StopReason; message: string } | null = null;
   const preparationAbort = new AbortController();
   // Install before the first await: shutdown must also stop attempts preparing a worktree or waiting on JEV.
@@ -236,6 +317,10 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
     preparationStop = { reason, message };
     preparationAbort.abort();
   });
+  const initial = await api['task.peek']({ id: task.id });
+  if (initial.generation !== task.generation || initial.assignee !== task.assignee || initial.status !== 'running' ||
+      initial.lease_until === null || initial.lease_until <= Date.now()) return { status: 'superseded', message: 'This attempt no longer owns the task.' };
+
   // Where the attempt's time went: prepare (worktree, dependencies), agent, collect (commit, scope, bookkeeping), verify, review.
   const phases: Record<string, number> = {};
   let phaseStart = Date.now();
@@ -246,6 +331,19 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   };
   const adapter = getAdapter(ctx.agent, config);
   if (!adapter) return finishNeedsHuman(ctx, `No adapter for agent "${ctx.agent}".`);
+
+  const rawLog = join(paths.logs(), `${task.id}-${task.generation}.jsonl`);
+  const runId = await api['run.start']({ taskId: task.id, machineId: ctx.machineId, agent: ctx.agent, model: ctx.model, logPath: rawLog });
+  let attemptReaped = true;
+  ctx.cleanup?.(() => attemptReaped ? api['run.exit']({ runId, taskId: task.id, owner: claimOwner(task), reaped: true }) : undefined);
+  const log = new LogBuffer(api, runId);
+  ctx.cleanup?.(() => log.close());
+  await api['run.update']({ runId, patch: { phase: 'prepare' } });
+  const prepareState = await api['task.peek']({ id: task.id });
+  if (prepareState.status !== 'running' || prepareState.generation !== task.generation || prepareState.assignee !== task.assignee) {
+    ctx.stopTask?.(prepareState.status === 'canceled' ? 'canceled' : 'lost', 'Claim changed before preparation.');
+    throw new Error('Task lifetime stopped before preparation.');
+  }
 
   // Only ever reuse a worktree that is ours: under our root and linked to this repo.
   const defaultPath = worktreePathFor(config, ctx.project, task.id);
@@ -290,33 +388,65 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
     }
     for (const sk of warm.skipped) await event(ctx, 'info', 'task.warm_start_skipped', `Didn't bring over ${sk.rel}: ${sk.why}`);
     for (const command of config.worktree.setup) {
-      const r = await runShell(command, { cwd: wt, timeoutMs: config.verifyTimeoutMinutes * 60_000 });
+      const r = await runShell(command, { cwd: wt, timeoutMs: config.verifyTimeoutMinutes * 60_000, signal: ctx.signal, onSpawn: async ({ pid, startedAt }) => { await api['run.update']({ runId, patch: { phase: 'setup', pid, proc_started: startedAt } }); } });
+      if (!r.reaped) { attemptReaped = false; await api['run.update']({ runId, patch: { status: 'cleanup_failed' } }); return finishNeedsHuman(ctx, 'A setup process survived cleanup; work is held for recovery.'); }
+      await api['run.update']({ runId, patch: { phase: 'prepare', pid: null, proc_started: null } });
       if (r.code !== 0) return finishNeedsHuman(ctx, `Worktree setup \`${command}\` failed:\n${tail(r.stdout, 20, 1500)}`);
     }
   }
 
   const context = await api['task.context']({ id: task.id });
   const settings = agentSettings(config, ctx.agent);
-  // Retry in the same worktree with the same agent, soon after: continue its session instead of starting over.
-  const resumeId = adapter.resumable && settings.resume && !freshWorktree && task.agent_session && task.session_agent === ctx.agent && task.session_at !== null && Date.now() - task.session_at < 60 * 60_000 ? task.agent_session : null;
-  const prompt = resumeId ? buildResumePrompt(ctx, { messages: context.messages, conflicts }) : buildPrompt(ctx, { ...context, conflicts });
-  const pinned = !resumeId && adapter.resumable ? randomUUID() : null;
-  const baseline = resumeId ? task.session_cost : 0;
-  const remaining = task.budget_usd !== null ? Math.max(0, task.budget_usd - task.cost_usd) + baseline : null;
+  // Resume only a recent, same-agent conversation whose managed launch shape still matches.
+  let resumeId = adapter.resumable && settings.resume && !freshWorktree && task.agent_session && task.session_agent === ctx.agent && task.session_at !== null && Date.now() - task.session_at < 60 * 60_000 ? task.agent_session : null;
+  let pinned = !resumeId && adapter.resumable ? randomUUID() : null;
+  let baseline = resumeId ? task.session_cost : 0;
+  const taskRemaining = task.budget_usd !== null ? Math.max(0, task.budget_usd - task.cost_usd) : null;
   phase('prepare');
   const effort = await routeEffort({ config: config.effortRouting, agent: ctx.agent, model: ctx.model, settings,
-    tier: task.tier, task, repoPath: ctx.repoPath, signal: preparationAbort.signal });
+    tier: task.tier, task, repoPath: ctx.repoPath, signal: ctx.signal });
   if (config.effortRouting.enabled) phase('route');
-  const launchSettings = effort.effort ? { ...settings, effort: { ...settings.effort, [task.tier]: effort.effort } } : settings;
-  const spec = adapter.build({
-    prompt, cwd: wt, model: ctx.model, settings: launchSettings, tier: task.tier, budgetUsd: remaining,
-    session: resumeId ? { resume: resumeId } : pinned ? { pin: pinned } : undefined,
-  });
-  if (ctx.agent === 'claude' && effort.managed) spec.env = { ...spec.env, JEV_ROUTER_HOST_ROUTING: '1' };
+  const input: AdapterContext = { prompt: resumeId ? buildResumePrompt(ctx, { messages: context.messages, conflicts }) : buildPrompt(ctx, { ...context, conflicts }),
+    cwd: wt, model: ctx.model, settings, tier: task.tier, routedEffort: routedEffortOf(effort),
+    budgetUsd: taskRemaining === null ? null : taskRemaining + baseline,
+    session: resumeId ? { resume: resumeId } : pinned ? { pin: pinned } : undefined };
+  const build = (): LaunchSpec => {
+    const spec = adapter.build(input);
+    if (ctx.agent === 'claude' && effort.managed) spec.env = { ...spec.env, JEV_ROUTER_HOST_ROUTING: '1' };
+    return spec;
+  };
+  let toolConfigDigest: string | null = null;
+  if (settings.mcpConfig) {
+    try { toolConfigDigest = createHash('sha256').update(readFileSync(resolve(wt, expandHome(settings.mcpConfig)))).digest('hex'); }
+    catch { toolConfigDigest = 'unreadable'; }
+  }
+  let spec: LaunchSpec;
+  let effective;
+  let fingerprint: string;
+  try {
+    spec = build();
+    effective = launchEffort(ctx.agent, input, spec);
+    const identity = launchIdentity(ctx.agent, input, spec).fingerprint;
+    fingerprint = createHash('sha256').update(`${identity}:${toolConfigDigest ?? ''}`).digest('hex');
+    if (resumeId && task.session_fingerprint !== fingerprint) {
+      resumeId = null;
+      baseline = 0;
+      pinned = adapter.resumable ? randomUUID() : null;
+      input.prompt = buildPrompt(ctx, { ...context, conflicts });
+      input.session = pinned ? { pin: pinned } : undefined;
+      input.budgetUsd = taskRemaining;
+      spec = build();
+      await event(ctx, 'info', 'task.resume_identity_changed', 'Starting a fresh conversation because its model, effort, tools or launch configuration changed (or the previous identity was not recorded). Worktree changes are preserved; provider cache impact remains unknown.');
+    }
+  } catch (error) {
+    if (!(error instanceof EffortPolicyError)) throw error;
+    return finishNeedsHuman(ctx, error.message, runId);
+  }
+  await api['run.update']({ runId, patch: { effort: effective.effective, effort_source: effective.source, launch_fingerprint: fingerprint } });
   const beforeLaunch = async (): Promise<RunOutcome | null> => {
     // The routing wait may outlive a cancellation, redirect or ownership change. Never launch stale work.
     const current = await api['task.peek']({ id: task.id });
-    if (current.assignee !== task.assignee || current.attempts !== task.attempts || !['running', 'canceled'].includes(current.status)) return { status: 'superseded', message: 'This attempt no longer owns the task.' };
+    if (current.assignee !== task.assignee || current.generation !== task.generation || !['running', 'canceled'].includes(current.status)) return { status: 'superseded', message: 'This attempt no longer owns the task.' };
     const pending = preparationStop as { reason: StopReason; message: string } | null;
     if (current.status === 'canceled' || pending?.reason === 'canceled') return { status: 'canceled', message: 'Canceled before the agent started.' };
     const reason = pending?.reason ?? (current.control === 'stop-pause' ? 'shutdown' : current.control === 'redirect' ? 'redirected' : current.control === 'stop' ? 'stopped' : null);
@@ -329,19 +459,16 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
     }
     return finishNeedsHuman(ctx, pending?.message ?? 'Stopped before the agent started.');
   };
-  if (config.effortRouting.enabled || preparationStop) {
+  {
     const stopped = await beforeLaunch();
     if (stopped) return stopped;
   }
   phase('prepare');
 
-  const rawLog = join(paths.logs(), `${task.id}-${task.attempts}.jsonl`);
-  const runId = await api['run.start']({ taskId: task.id, machineId: ctx.machineId, agent: ctx.agent, model: ctx.model, logPath: rawLog, lessons: context.lessonIds });
-  const log = new LogBuffer(api, runId);
   log.push(`start ${adapter.label}${ctx.model ? ` (${ctx.model})` : ''} in ${wt}${resumeId ? ` (continuing session ${resumeId.slice(0, 8)})` : ''}`);
   if (effort.status !== 'disabled') log.push(`JEV effort: ${effort.status} (${effort.reason}, ${effort.latencyMs} ms)`);
   if (resumeId) await api['run.update']({ runId, patch: { resumed: true } });
-  if (config.effortRouting.enabled || preparationStop) {
+  {
     const stopped = await beforeLaunch();
     if (stopped) {
       await log.close();
@@ -353,8 +480,11 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   let toolCalls = 0;
 
   const raw: WriteStream = createWriteStream(rawLog, { flags: 'a' });
+  ctx.cleanup?.(() => { raw.end(); });
   const watchdog = new Watchdog(config.watchdog);
   const meter = new UsageMeter(priceFor(config, ctx.agent, ctx.model), baseline);
+  let usageSequence = 0;
+  const recordUsage = (usage: UsageSnapshot) => api['run.usage']({ runId, taskId: task.id, owner: claimOwner(task), sequence: ++usageSequence, usage });
   let resultText = '';
   let resultOk: boolean | null = null;
   let lastText = '';
@@ -362,52 +492,17 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   let stop: { reason: StopReason; message: string } | null = null;
   let lastActivity = '';
   const budget = task.budget_usd;
-  const owner = { attempt: task.attempts, assignee: task.assignee ?? '' };
+  const owner = claimOwner(task);
 
-  let child: ChildProcess;
-  try {
-    child = spawn(spec.command, spec.args, {
-      cwd: wt,
-      env: cleanEnv({ ...spec.env, YARDMASTER_TASK_ID: task.id, YARDMASTER_ATTEMPT: String(task.attempts), YARDMASTER_PROJECT_ID: task.project_id }),
-      stdio: [spec.stdin !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'],
-      detached: true,
-    });
-  } catch (err) {
-    await log.close();
-    raw.end();
-    return finishNeedsHuman(ctx, `${adapter.label} could not start: ${(err as Error).message}. ${adapter.setupHint ?? ''}`, runId);
-  }
-  if (spec.stdin !== undefined) child.stdin?.end(spec.stdin);
-  // Listen for the exit before the first await: a fast agent can finish while we look up its start time or tell the
-  // hub its pid (an HTTP call on remote workers), and an exit nobody was listening for is never reported again, which
-  // left the run "running" forever.
-  const exit = new Promise<number>((done) => {
-    child.on('close', (code) => done(code ?? 1));
-    // A background process the agent started (dev server, watcher) can hold stdout open after the agent exits.
-    child.on('exit', (code) => {
-      setTimeout(() => {
-        killGroup(child.pid, 'SIGTERM');
-        done(code ?? 1);
-      }, 3000).unref();
-    });
-    child.on('error', (err) => {
-      stderrTail += `\n${String(err)}`;
-      done(127);
-    });
-  });
-
-  const procStarted = child.pid ? await processStartTime(child.pid) : null;
-  await api['run.update']({ runId, patch: { pid: child.pid ?? null, proc_started: procStarted } });
-
+  let coding: OwnedProcess | null = null;
   const requestStop = (reason: StopReason, message: string) => {
     if (stop) return;
     stop = { reason, message };
     log.push(`stop ${reason}: ${message}`);
-    killGroup(child.pid, 'SIGTERM');
-    setTimeout(() => killGroup(child.pid, 'SIGKILL'), 5000).unref();
+    coding?.stop(message);
+    ctx.stopTask?.(reason, message);
   };
   ctx.onSpawn?.(requestStop);
-  // A stop may arrive after spawn while pid/session bookkeeping is awaiting the hub.
   const pendingStop = preparationStop as { reason: StopReason; message: string } | null;
   if (pendingStop) requestStop(pendingStop.reason, pendingStop.message);
 
@@ -439,15 +534,35 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
     if (verdict) requestStop(verdict.kind, verdict.message);
   };
 
-  const rl = createInterface({ input: child.stdout! });
-  rl.on('line', (line) => {
-    raw.write(line + '\n');
-    for (const ev of adapter.parse(line)) onEvent(ev);
-  });
-  child.stderr?.on('data', (d: Buffer) => {
-    const s = d.toString();
-    raw.write(JSON.stringify({ stderr: s }) + '\n');
-    stderrTail = tail(stderrTail + s, 40);
+  const decoder = new StringDecoder('utf8');
+  let buffered = '';
+  const consume = (chunk: string) => {
+    buffered += chunk;
+    let newline: number;
+    while ((newline = buffered.indexOf('\n')) >= 0) {
+      const line = buffered.slice(0, newline).replace(/\r$/, '');
+      buffered = buffered.slice(newline + 1);
+      raw.write(line + '\n');
+      try { for (const ev of adapter.parse(line)) onEvent(ev); }
+      catch (err) { requestStop('stopped', `The agent adapter could not parse its output: ${(err as Error).message}`); }
+    }
+    if (buffered.length > 1_000_000) requestStop('stopped', 'Agent output exceeded the bounded line size.');
+  };
+  const releaseAgent = await ctx.reserveAgent?.(ctx.agent, ctx.signal);
+  if (releaseAgent) ctx.cleanup?.(releaseAgent);
+  coding = startOwnedProcess(spec.command, spec.args, {
+    cwd: wt, env: cleanEnv({ ...spec.env, YARDMASTER_TASK_ID: task.id, YARDMASTER_ATTEMPT: String(task.attempts),
+      YARDMASTER_GENERATION: String(task.generation), YARDMASTER_PROJECT_ID: task.project_id }),
+    stdin: spec.stdin, signal: ctx.signal,
+    onSpawn: async ({ pid, startedAt }) => {
+      await api['run.update']({ runId, patch: { phase: 'agent', pid, proc_started: startedAt } });
+    },
+    onStdout: (chunk) => consume(decoder.write(chunk)),
+    onStderr: (chunk) => {
+      const text = chunk.toString();
+      raw.write(JSON.stringify({ stderr: text }) + '\n');
+      stderrTail = tail(stderrTail + text, 40);
+    },
   });
 
   let lastTouchedCheck = 0;
@@ -455,11 +570,12 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   const ticker = setInterval(async () => {
     const v = watchdog.tick();
     if (v) requestStop(v.kind, v.message);
-    const patch: Record<string, unknown> = { cost_usd: spent(), tokens_in: meter.tokensIn, tokens_out: meter.tokensOut, last_activity: lastActivity, cost_estimated: meter.estimated };
+    await recordUsage(meter.snapshot()).catch(() => undefined);
+    const patch: Record<string, unknown> = { last_activity: lastActivity };
     await api['run.update']({ runId, patch }).catch(() => undefined);
     try {
       const control = await api['task.peek']({ id: task.id });
-      if (control.assignee !== owner.assignee || control.attempts !== owner.attempt) requestStop('lost', 'This attempt no longer owns the task (it was re-queued or claimed elsewhere).');
+      if (control.assignee !== owner.assignee || control.generation !== owner.generation) requestStop('lost', 'This attempt no longer owns the task (it was re-queued or claimed elsewhere).');
       else if (control.status === 'canceled') requestStop('canceled', 'Canceled.');
       else if (control.control === 'stop') requestStop('stopped', 'Stopped on request.');
       else if (control.control === 'stop-pause') requestStop('shutdown', 'Paused by the supervisor; partial work is saved.');
@@ -478,36 +594,41 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
     }
   }, tickMs);
 
-  let code: number;
-  try {
-    code = await exit;
-  } finally {
+  const result = await coding.done.finally(() => {
     clearInterval(ticker);
-    rl.close();
+    releaseAgent?.();
+    consume(decoder.end() + (buffered ? '\n' : ''));
     raw.end();
-    // Whatever happens next, nothing the agent started may outlive the attempt.
-    killGroup(child.pid, 'SIGTERM');
-    setTimeout(() => killGroup(child.pid, 'SIGKILL'), 3000).unref();
+  });
+  const code = result.code ?? 127;
+  if (!result.reaped) {
+    attemptReaped = false;
+    await log.close();
+    await api['run.update']({ runId, patch: { status: 'cleanup_failed', stop_reason: result.reap.reason ?? 'Process cleanup could not be verified', ended_at: Date.now() } }).catch(() => undefined);
+    return finishNeedsHuman(ctx, 'An owned process may still be alive. This worktree is held until process recovery proves it stopped.');
+  }
+  if (result.end === 'hook_failed' || result.end === 'spawn_failed') {
+    stderrTail = `${result.error}\n${stderrTail}`;
   }
   phase('agent');
   const cost = spent();
   const { tokensIn, tokensOut } = meter;
-  await api['run.update']({ runId, patch: { cost_usd: cost, tokens_in: tokensIn, tokens_out: tokensOut, exit_code: code, ended_at: Date.now(), last_activity: lastActivity, cost_estimated: meter.estimated } });
-  // Spend is recorded even when the attempt turns out to be stale: the tokens were really used.
-  await api['task.usage']({ id: task.id, costUsd: cost, tokensIn, tokensOut });
+  await recordUsage(meter.snapshot());
+  await api['run.update']({ runId, patch: { exit_code: code, last_activity: lastActivity, phase: 'collect', pid: null, proc_started: null } }).catch((err) => { if (!isStale(err)) throw err; });
+  if (result.end === 'hook_failed' || result.end === 'spawn_failed') return finishNeedsHuman(ctx, `The agent could not be safely started/registered: ${result.error || stderrTail}`, runId);
   const totals: TaskPatch = {};
   const summary = clip(resultText || lastText, 1200);
   // Remember the session, and what it has cost so far, so a retry can continue it without charging this run again.
   // Interrupted runs (redirect, preemption, shutdown) count too: they are resumed next. Owner-fenced like every write.
   const stopReason = (stop as { reason: StopReason } | null)?.reason;
   if (sessionId && adapter.resumable && stopReason !== 'lost' && stopReason !== 'canceled') {
-    await update(ctx, { agent_session: sessionId, session_agent: ctx.agent, session_cost: meter.sessionTotal, session_at: Date.now() });
+    await update(ctx, { agent_session: sessionId, session_agent: ctx.agent, session_cost: meter.sessionTotal, session_at: Date.now(), session_fingerprint: fingerprint });
   }
 
   const finishRun = async (status: string, reason?: string) => {
     phase('collect');
     await log.close();
-    await api['run.update']({ runId, patch: { status, stop_reason: reason ?? null, phases } });
+    await api['run.update']({ runId, patch: { status, stop_reason: reason ?? null, phases, phase: null, ended_at: Date.now() } });
   };
 
   // ---- stopped by us ----
@@ -609,16 +730,23 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   const head = await revParse(wt, 'HEAD');
   await update(ctx, { status: 'verifying', head_sha: head, summary });
   if (commands.length) {
+    await api['run.update']({ runId, patch: { phase: 'verify' } });
     log.push(`verify ${commands.join(' && ')}`);
     phase('collect');
-    const result = await ctx.verifySlots.use(() => runVerify(wt, commands, config.verifyTimeoutMinutes));
+    const result = await ctx.verifySlots.use(() => runVerify(wt, commands, config.verifyTimeoutMinutes, ctx.signal, async ({ pid, startedAt }) => { await api['run.update']({ runId, patch: { pid, proc_started: startedAt } }); }), ctx.signal);
     phase('verify');
     if (!result.ok) {
+      if (!result.reaped) {
+        attemptReaped = false;
+        await api['run.update']({ runId, patch: { status: 'cleanup_failed' } });
+        return finishNeedsHuman(ctx, result.output);
+      }
       await finishRun('failed');
       log.push(`verify failed`);
       return retryOrStop(ctx, totals, `Checks failed (\`${result.command}\`):\n${tail(result.output, 40, 2500)}`, errorFingerprint(result.output), { backoff: false });
     }
     log.push('verify passed');
+    await api['run.update']({ runId, patch: { phase: 'collect', pid: null, proc_started: null } });
     if (head && (await isClean(wt))) await rememberChecked(wt, head, commands);
   } else {
     await event(ctx, 'warn', 'task.unverified', 'No checks are configured, so this work was not tested. Add "verify" commands to yardmaster.json.');
@@ -631,15 +759,44 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
     log.push(`review requested: ${why}`);
     await event(ctx, 'info', 'task.review', `Getting a second opinion on "${task.title}" (${why})`);
     phase('collect');
-    const outcome = await runReview({ task, config, implementer: ctx.agent, installed: ctx.installed ?? [ctx.agent], cwd: wt, base: baseSha! });
+    await api['run.update']({ runId, patch: { phase: 'review_wait' } });
+    let reviewRun: string | null = null;
+    let reviewReaped = false;
+    let reviewSequence = 0;
+    let releaseReviewer: (() => void) | undefined;
+    const currentCost = (await api['task.get']({ id: task.id })).task.cost_usd;
+    const allowance = task.budget_usd === null ? config.review.budgetUsd : Math.min(config.review.budgetUsd, Math.max(0, task.budget_usd - currentCost));
+    if (allowance <= 0) return finishNeedsHuman(ctx, 'No task allowance remains for the requested review.', runId);
+    const outcome = await runReview({ task, config: { ...config, review: { ...config.review, budgetUsd: allowance } },
+      implementer: ctx.agent, installed: ctx.installed ?? [ctx.agent], cwd: wt, base: baseSha!, signal: ctx.signal,
+      hooks: {
+        beforeLaunch: async ({ reviewer, model }) => {
+          releaseReviewer = await ctx.reserveAgent?.(reviewer, ctx.signal);
+          if (releaseReviewer) ctx.cleanup?.(releaseReviewer);
+          reviewRun = await api['run.start']({ taskId: task.id, machineId: ctx.machineId, agent: reviewer, model, logPath: '', role: 'review' });
+          const captured = reviewRun;
+          ctx.cleanup?.(() => reviewReaped ? api['run.exit']({ runId: captured, taskId: task.id, owner: claimOwner(task), reaped: true }) : undefined);
+          await api['run.update']({ runId: reviewRun, patch: { phase: 'review', verdict_sha: head } });
+        },
+        onSpawn: async ({ pid, startedAt }) => { if (reviewRun) await api['run.update']({ runId: reviewRun, patch: { pid, proc_started: startedAt } }); },
+        onUsage: async (usage) => { if (reviewRun) await api['run.usage']({ runId: reviewRun, taskId: task.id, owner: claimOwner(task), sequence: ++reviewSequence, usage }); },
+      },
+    }).finally(() => releaseReviewer?.());
+    reviewReaped = outcome.reaped;
     phase('review');
+    if (reviewRun) {
+      await api['run.usage']({ runId: reviewRun, taskId: task.id, owner: claimOwner(task), sequence: ++reviewSequence, usage: outcome.usage });
+      await api['run.update']({ runId: reviewRun, patch: { status: !outcome.reaped ? 'cleanup_failed' : 'skipped' in outcome ? outcome.status === 'not_started' ? 'skipped' : 'failed' : 'succeeded',
+        ended_at: outcome.endedAt, stop_reason: 'skipped' in outcome ? outcome.skipped : null, verdict: 'review' in outcome ? JSON.stringify(outcome.review) : null,
+        phase: null } }).catch((err) => { if (!isStale(err)) throw err; });
+    }
+    if (!outcome.reaped) return finishNeedsHuman(ctx, 'The reviewer process may still be alive; work is held for process recovery.', runId);
+    if ((await revParse(wt, 'HEAD')) !== head || !(await isClean(wt))) return finishNeedsHuman(ctx, 'The reviewer changed the accepted artifact. Its verdict cannot approve this work; the changes are preserved.', runId);
     if ('skipped' in outcome) {
       log.push(`review skipped: ${outcome.skipped}`);
       await event(ctx, 'warn', 'task.review_skipped', `Review skipped: ${outcome.skipped}.`);
+      if (outcome.required) return finishNeedsHuman(ctx, `Required review did not complete: ${outcome.skipped}`, runId);
     } else {
-      const reviewRun = await api['run.start']({ taskId: task.id, machineId: ctx.machineId, agent: outcome.reviewer, model: null, logPath: '', role: 'review' });
-      await api['run.update']({ runId: reviewRun, patch: { status: 'succeeded', cost_usd: outcome.costUsd, tokens_in: outcome.tokensIn, tokens_out: outcome.tokensOut, ended_at: Date.now(), verdict: JSON.stringify(outcome.review) } });
-      await api['task.usage']({ id: task.id, costUsd: outcome.costUsd, tokensIn: outcome.tokensIn, tokensOut: outcome.tokensOut });
       const issues = formatIssues(outcome.blocking);
       log.push(`review by ${outcome.reviewer}: ${outcome.review.verdict}${issues.length ? ` (${issues.length} issue${issues.length > 1 ? 's' : ''})` : ''}`);
       if (issues.length && task.review_rounds < config.review.maxRounds) {
@@ -652,7 +809,7 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
         return { status: 'queued', message: 'review requested changes' };
       }
       if (issues.length) {
-        if (config.review.onUnresolved === 'needs_human') {
+        if (config.review.required || config.review.onUnresolved === 'needs_human') {
           await finishRun('succeeded');
           return finishNeedsHuman(ctx, `Checks pass, but the reviewer (${outcome.reviewer}) still has concerns: ${clip(issues.join(' '), 600)}`);
         }
@@ -685,24 +842,23 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   return { status: 'ready', message: summary };
 }
 
-export async function runVerify(cwd: string, commands: string[], timeoutMinutes: number): Promise<{ ok: boolean; command: string; output: string }> {
-  for (const command of commands) {
-    const r = await runShell(command, { cwd, timeoutMs: timeoutMinutes * 60_000 });
-    if (r.code !== 0) return { ok: false, command, output: r.timedOut ? `${r.stdout}\n(timed out after ${timeoutMinutes} minutes)` : r.stdout };
-  }
-  return { ok: true, command: commands.join(' && '), output: '' };
+export { runVerify };
+
+function claimOwner(task: Task) {
+  return { generation: task.generation, attempt: task.attempts, assignee: task.assignee ?? '' };
 }
 
 /** Every state change from a runner is fenced to this attempt (see Coordinator.updateTaskIfOwner). */
 async function update(ctx: RunContext, patch: TaskPatch) {
-  await ctx.api['task.update']({ id: ctx.task.id, patch, owner: { attempt: ctx.task.attempts, assignee: ctx.task.assignee ?? '' } });
+  await ctx.api['task.update']({ id: ctx.task.id, patch, owner: claimOwner(ctx.task) });
 }
 
 async function event(ctx: RunContext, level: 'info' | 'warn' | 'error' | 'success', kind: string, message: string) {
-  await ctx.api['task.event']({ projectId: ctx.task.project_id, taskId: ctx.task.id, level, kind, message });
+  await ctx.api['task.event']({ projectId: ctx.task.project_id, taskId: ctx.task.id, level, kind, message }).catch(() => undefined);
 }
 
 async function finishNeedsHuman(ctx: RunContext, message: string, runId?: string, totals: TaskPatch = {}): Promise<RunOutcome> {
+  if (ctx.signal?.aborted && ['stopped', 'canceled', 'lost', 'shutdown', 'redirected', 'preempted'].includes(ctx.stopReason?.() ?? '')) throw new Error('Task lifetime stopped.');
   if (runId) await ctx.api['run.update']({ runId, patch: { status: 'failed', ended_at: Date.now() } });
   await update(ctx, { status: 'needs_human', attention: message, last_error: message, lease_until: null });
   await event(ctx, 'error', 'task.needs_human', `"${ctx.task.title}" needs you: ${message}`);

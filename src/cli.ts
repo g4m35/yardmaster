@@ -18,6 +18,8 @@ import { isAlive, run, which } from './proc.ts';
 import { ago, clip, formatUsd } from './text.ts';
 import { STATUS_LABEL, type Task } from './types.ts';
 import { WorkerLoop } from './worker.ts';
+import { connectWorker, fleetClient, joinFleet, normalizeHubUrl, workerCredentialDirectory } from './fleet-client.ts';
+import { resolveEffort, describeEffort } from './effort.ts';
 import { Semaphore } from './runner.ts';
 import { httpTransport } from './transport.ts';
 import { applyConnect, connectPlan, hookPlan, installHooks, installSkill, selfCommand } from './connect.ts';
@@ -29,7 +31,7 @@ import { VERSION } from './version.ts';
 import { serviceFiles, installService, uninstallService } from './service.ts';
 import { inSea } from './assets.ts';
 import { runMockAgent } from './mockagent.ts';
-import { TIERS, defaultAgentSettings, verifySlotsFor } from './config.ts';
+import { TIERS, agentSettings, defaultAgentSettings, verifySlotsFor } from './config.ts';
 import { detectVerify } from './detect.ts';
 import { dedupeGroup, defaultScanRoots, purgeDedupeTrash, restoreLatest, scanDeps } from './devdeps.ts';
 
@@ -157,6 +159,7 @@ async function currentProject(client: Client, cwd = process.cwd()) {
 const HELP = `${bold('Yardmaster')} ${VERSION}: run many coding agents at once without the mess.
 
 ${bold('Get started')}
+  ym setup [--agent codex]     guided repo setup; --dry-run previews without changing configs
   ym init                      set up this repo (detects your agents and test command)
   ym connect [agent|all]       add Yardmaster tools + skill to Claude Code, Codex, Cursor, OpenCode, Gemini
                                (also installs zero-token hooks for Claude Code and Codex; --no-hooks to skip)
@@ -185,8 +188,14 @@ ${bold('CI costs')} (GitHub Actions)
 ${bold('Machines')}
   ym hub start|stop|status|run [--host 0.0.0.0] [--port 7777]
   ym service install|uninstall keep the hub running across crashes and reboots
-  ym token                     show how to connect another machine
-  ym worker --hub URL --token T [--repo path]
+  ym pair invite --project ID  create a one-use, expiring worker invitation (owner only)
+  ym pair list                 list paired device/invitation metadata (owner only)
+  ym pair revoke ID [--invitation]  revoke a worker credential or unused invitation
+  ym pair join CODE --hub URL  save a project-scoped credential on this machine
+  ym worker --hub URL [--repo path]  use the saved credential for this repo
+  ym token                     explicitly display the privileged owner secret; never share it
+                               Non-loopback HTTP needs --private-network (encrypted overlay).
+                               HTTPS or loopback is the default; no network setup is performed.
 
 ${bold('Extend')}
   ym plugin new <name> [--kind adapter|notifier] [--describe "..."] [--with claude]
@@ -604,40 +613,123 @@ function lanAddresses(): string[] {
 }
 
 async function cmdToken() {
-  const token = hubToken();
-  const info = readHubInfo();
-  console.log(`${bold('Hub token')} (keep it secret): ${token}\n`);
-  console.log('To add another machine:');
-  console.log(`  1. On this machine, let the hub accept network connections:  ${cyan('ym hub restart --host 0.0.0.0')}`);
-  console.log(`     ${dim('Prefer a private network such as Tailscale over exposing it on public Wi-Fi.')}`);
-  console.log('  2. On the other machine, inside its clone of the repo:');
-  for (const ip of lanAddresses().slice(0, 3)) console.log(`     ${cyan(`ym worker --hub http://${ip.split(' ')[0]}:${info ? new URL(info.url).port : 7777} --token ${token}`)} ${dim(ip.includes('tailscale') ? 'tailscale' : '')}`);
+  console.log(`${bold('Privileged owner token')} (full hub administration; keep private): ${hubToken()}`);
+  console.log('For another worker machine, use ym pair invite --project ID, then ym pair join CODE --hub URL there.');
+  console.log('Use HTTPS or an existing encrypted private overlay. Never put this owner token in a URL or share it as a worker invitation.');
+}
+
+async function cmdPair(a: Args) {
+  const sub = a._[1];
+  const privateNetwork = a.flags['private-network'] === true || flag(a, 'private-network') === 'true';
+  const remote = flag(a, 'hub') ?? process.env.YARDMASTER_HUB;
+  if (sub === 'join') {
+    const hub = remote ?? die('ym pair join CODE --hub https://hub-host:7777');
+    // Validate before reading or creating any local identity files.
+    normalizeHubUrl(hub, { privateNetwork });
+    workerCredentialDirectory();
+    const result = await joinFleet({ hub, code: a._[2] ?? flag(a, 'code') ?? '', machineId: machineId(), projectId: flag(a, 'project'), privateNetwork });
+    console.log(green(`✔ Paired ${hostname()} for project ${result.identity.projectId}. Credential saved privately; expires ${new Date(result.identity.expiresAt).toISOString()}.`));
+    console.log(`Run ym worker --hub ${normalizeHubUrl(hub, { privateNetwork })}${privateNetwork ? ' --private-network' : ''} --repo /path/to/this/project`);
+    return;
+  }
+  if (!['invite', 'list', 'revoke'].includes(sub ?? '')) die('ym pair invite --project ID [--ttl-ms N] [--credential-ttl-ms N] | list | revoke ID [--invitation] | join CODE --hub URL [--private-network]');
+  let client: Client;
+  if (remote) {
+    const hub = normalizeHubUrl(remote, { privateNetwork });
+    const explicit = flag(a, 'token') ?? process.env.YARDMASTER_TOKEN;
+    const local = readHubInfo();
+    const localUrl = local ? normalizeHubUrl(local.url, { privateNetwork }) : null;
+    const token = explicit ?? (hub === localUrl ? hubToken() : die('Remote owner operations require an explicit owner credential. Prefer running ym pair invite/list/revoke on the owner hub machine.'));
+    client = fleetClient(hub, token, { privateNetwork });
+  } else client = await getClient(a);
+  const identity = await client['fleet.identity']({});
+  if (identity.kind !== 'owner') die('Pair invitations, device lists and revocation require owner access. Run this on the owner hub.');
+  if (sub === 'invite') {
+    const projectId = flag(a, 'project') ?? (await currentProject(client)).id;
+    const ttl = (name: string) => {
+      const value = flag(a, name);
+      if (a.flags[name] !== undefined && (!value || !Number.isSafeInteger(Number(value)) || Number(value) < 1)) die(`--${name} requires a positive integer in milliseconds.`);
+      return value ? Number(value) : undefined;
+    };
+    const result = await client['fleet.invite']({ projectId, ttlMs: ttl('ttl-ms'), credentialTtlMs: ttl('credential-ttl-ms') });
+    if (a.flags.json) return console.log(JSON.stringify(result, null, 2));
+    console.log(`One-use pairing code: ${result.code}`);
+    console.log(`Invitation ${result.invitation.id}, project ${result.invitation.projectId}, expires ${new Date(result.invitation.expiresAt).toISOString()}.`);
+    console.log('On the worker: ym pair join CODE --hub https://hub-host:7777 (then run ym worker there).');
+    console.log('Only give this short-lived code to the intended worker. Do not share the owner token.');
+  } else if (sub === 'list') {
+    const devices = await client['fleet.devices']({});
+    if (a.flags.json) return console.log(JSON.stringify(devices, null, 2));
+    for (const device of devices.credentials) console.log(`${device.id}  machine ${device.machineId}  project ${device.projectId}  ${device.revokedAt !== null ? 'revoked' : device.expiresAt <= Date.now() ? 'expired' : 'active'}  expires ${new Date(device.expiresAt).toISOString()}`);
+    for (const invitation of devices.invitations) console.log(`${invitation.id}  invitation for ${invitation.projectId}  ${invitation.revokedAt !== null ? 'revoked' : invitation.redeemedAt !== null ? 'used' : invitation.expiresAt <= Date.now() ? 'expired' : 'unused'}  expires ${new Date(invitation.expiresAt).toISOString()}`);
+    if (!devices.credentials.length && !devices.invitations.length) console.log('No paired devices or invitations. Run ym pair invite --project ID.');
+  } else {
+    const id = a._[2] ?? die('ym pair revoke ID [--invitation]');
+    const changed = await client['fleet.revoke']({ id, invitation: a.flags.invitation === true || flag(a, 'invitation') === 'true' });
+    console.log(changed ? `Revoked ${id}. Subsequent authenticated requests will be refused.` : `No active matching credential/invitation ${id}.`);
+  }
+}
+
+async function cmdSetup(a: Args) {
+  const remote = flag(a, 'hub') ?? process.env.YARDMASTER_HUB;
+  if (remote) {
+    const hub = normalizeHubUrl(remote, { privateNetwork: a.flags['private-network'] === true || flag(a, 'private-network') === 'true' });
+    if (!flag(a, 'token') && !process.env.YARDMASTER_TOKEN) die('Run setup on the owner hub machine, or supply an explicit owner credential for remote setup.');
+    a = { ...a, flags: { ...a.flags, hub } };
+  }
+  const choices = ['claude', 'codex', 'cursor', 'opencode', 'gemini', 'all', 'none'];
+  let selected = flag(a, 'agent');
+  if (a.flags.agent !== undefined && (!selected || !choices.includes(selected))) die(`--agent must be one of ${choices.join(', ')}.`);
+  const root = await mainRepoRoot(process.cwd());
+  if (!root) die('Run setup inside a git repository with a first commit.');
+  if (a.flags['dry-run']) console.log(`Setup plan for ${root}: ym init (register repo; create ${PROJECT_CONFIG_FILE} only when absent).`);
+  else await cmdInit(a);
+  console.log('Keep using your editor/native agent. Choose which client receives Yardmaster MCP tools, skill and optional hooks.');
+  if (!selected && process.stdin.isTTY && process.stdout.isTTY && !a.flags['dry-run']) {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    try { selected = (await rl.question(`Connect which agent? ${choices.join(' / ')} [none]: `)).trim() || 'none'; }
+    finally { rl.close(); }
+    if (!choices.includes(selected)) die('Unknown agent. Run ym setup --agent codex, or ym connect AGENT --dry-run.');
+  }
+  if (selected && selected !== 'none') {
+    await cmdConnect({ ...a, _: ['connect', selected] });
+  } else {
+    console.log('No native client settings changed. Preview: ym connect codex --dry-run (or claude, cursor, opencode, gemini).');
+    console.log('Connect your chosen client explicitly: ym connect codex. Use --no-hooks to skip native hooks.');
+  }
+  console.log('Open the local owner dashboard: ym dashboard. Diagnose checks and connected-client coverage: ym doctor.');
+  console.log('For another machine: configure HTTPS or an encrypted private overlay, then ym pair invite --project ID. See docs/FLEET.md.');
 }
 
 async function cmdWorker(a: Args) {
-  const hub = flag(a, 'hub') ?? process.env.YARDMASTER_HUB ?? die('Pass --hub http://<hub-machine>:7777');
-  const token = flag(a, 'token') ?? process.env.YARDMASTER_TOKEN ?? die('Pass --token (run "ym token" on the hub machine).');
-  if (!(await hubAlive(hub))) die(`Can't reach a Yardmaster hub at ${hub}.`);
-  const client = remoteClient(hub, token);
+  const inputHub = flag(a, 'hub') ?? process.env.YARDMASTER_HUB ?? die('Pass --hub https://hub-host:7777 (pair this machine first).');
+  const privateNetwork = a.flags['private-network'] === true || flag(a, 'private-network') === 'true';
+  normalizeHubUrl(inputHub, { privateNetwork });
   const repoPaths = list(a, 'repo') ?? [process.cwd()];
   const repos: Record<string, string> = {};
   for (const p of repoPaths) {
     const root = await mainRepoRoot(expandHome(p));
     if (!root) die(`${p} is not a git repository.`);
-    const id = await projectIdFor(root);
-    await client['project.resolve']({ projectId: id }).catch(() => die(`The hub doesn't manage ${root} yet. Run "ym init" in that repo on the hub machine.`));
-    repos[id] = root;
+    repos[await projectIdFor(root)] = root;
+  }
+  if (!flag(a, 'token') && !process.env.YARDMASTER_TOKEN) workerCredentialDirectory();
+  const id = machineId();
+  const { hub, token, client, identity } = await connectWorker({ hub: inputHub, token: flag(a, 'token') ?? process.env.YARDMASTER_TOKEN, machineId: id, projectIds: Object.keys(repos), privateNetwork });
+  if (identity.kind === 'owner') console.log(yellow('Privileged legacy owner channel: this explicit token grants full hub administration. Prefer ym pair invite/join for workers.'));
+  for (const projectId of Object.keys(repos)) {
+    if (identity.kind === 'worker') await client['task.list']({ projectId });
+    else await client['project.resolve']({ projectId });
   }
   const loop = new WorkerLoop({
-    client, machineId: machineId(), repos: () => repos, agents: () => detectAgents(loadConfig()), localConfig: () => loadConfig(),
-    transport: httpTransport(hub, token, machineId()), verifySlots: new Semaphore(verifySlotsFor(loadConfig())),
+    client, machineId: id, repos: () => repos, agents: () => detectAgents(loadConfig()), localConfig: () => loadConfig(),
+    transport: httpTransport(hub, token, id), verifySlots: new Semaphore(verifySlotsFor(loadConfig())),
   });
   await loop.heartbeat();
   console.log(green(`✔ ${hostname()} joined ${hub}`) + dim(` with ${Object.keys(repos).length} repo(s) and agents: ${detectAgents(loadConfig()).join(', ') || 'none'}`));
   let beats = 0;
   const timer = setInterval(() => {
     beats++;
-    void loop.heartbeat().then(() => loop.tick()).then(() => (beats % 20 === 0 ? loop.tidyLocal() : undefined)).catch((e: Error) => console.error(dim(`hub unreachable: ${e.message}`)));
+    void loop.heartbeat().then(() => loop.tick()).then(() => (beats % 20 === 0 ? loop.tidyLocal() : undefined)).catch((e: Error) => console.error(dim(`hub request failed: ${e.message}`)));
   }, 3000);
   const shutdown = async () => {
     clearInterval(timer);
@@ -772,7 +864,7 @@ async function cmdPlugin(a: Args) {
   die('ym plugin new|test|list');
 }
 
-async function cmdDoctor() {
+async function cmdDoctor(a: Args) {
   const checks: [string, boolean, string][] = [];
   const [major, minor] = process.versions.node.split('.').map(Number) as [number, number];
   checks.push(['Node.js 22.16+', major > 22 || (major === 22 && minor >= 16), process.versions.node]);
@@ -783,8 +875,10 @@ async function cmdDoctor() {
   const config = loadConfig(root ?? undefined);
   const agents = detectAgents(config);
   checks.push(['at least one coding agent', agents.length > 0, agents.join(', ') || 'install Claude Code, Codex, OpenCode, Cursor CLI or Gemini CLI']);
-  const url = await runningHubUrl();
-  checks.push(['hub running', !!url, url ?? 'ym hub start (starts automatically when needed)']);
+  const remote = flag(a, 'hub') ?? process.env.YARDMASTER_HUB;
+  const privateNetwork = a.flags['private-network'] === true || flag(a, 'private-network') === 'true';
+  const url = remote ? normalizeHubUrl(remote, { privateNetwork }) : await runningHubUrl();
+  checks.push([remote ? 'hub endpoint configured' : 'hub running', !!url, url ?? 'ym hub start (starts automatically when needed)']);
   try {
     const fs = statfsSync(yardHome());
     const freeGb = (fs.bavail * fs.bsize) / 1e9;
@@ -793,6 +887,43 @@ async function cmdDoctor() {
     // statfs unsupported
   }
   if (root) checks.push(['checks configured (verify)', config.verify.length > 0, config.verify.join(' && ') || `add "verify" to ${PROJECT_CONFIG_FILE} so finished work is tested`]);
+  checks.push(['required review policy', !config.review.required || config.review.mode !== 'never', `required=${config.review.required}, mode=${config.review.mode}; configured policy, not proof a review passed`]);
+  for (const agent of [...new Set([...agents, ...Object.keys(config.agents)])]) {
+    const settings = agentSettings(config, agent);
+    if (!settings.enabled) continue;
+    try {
+      const resolutions = TIERS.map(tier => resolveEffort(agent, { settings, tier }));
+      checks.push([`${agent} effort policy`, true, resolutions.map((r, i) => `${TIERS[i]}: ${describeEffort(r)}`).join('; ') + '; launch configuration, model behavior unmeasured']);
+    } catch (err) { checks.push([`${agent} effort policy`, false, (err as Error).message]); }
+  }
+  console.log(`Cost coverage: provider-reported / estimated / unknown; missing usage is not free. JEV classifier cost is excluded from task totals. Configured task/day budgets: ${config.budget.perTaskUsd ?? 'unset'} / ${config.budget.dailyUsd ?? 'unset'} USD; native hard caps only where supported, other limits use admission/reactive checks.`);
+  if (url) {
+    try {
+      let client: Client;
+      if (remote) {
+        const explicit = flag(a, 'token') ?? process.env.YARDMASTER_TOKEN;
+        const local = readHubInfo();
+        if (explicit || (local && normalizeHubUrl(local.url, { privateNetwork }) === url)) client = fleetClient(url, explicit ?? hubToken(), { privateNetwork });
+        else {
+          const projectId = flag(a, 'project') ?? (root ? await projectIdFor(root) : undefined);
+          if (!projectId) throw new Error('Pass --project ID or run from the paired repo to check this worker channel.');
+          workerCredentialDirectory();
+          client = (await connectWorker({ hub: url, projectIds: [projectId], machineId: machineId(), privateNetwork })).client;
+        }
+      } else client = fleetClient(url, hubToken(), { privateNetwork });
+      const identity = await client['fleet.identity']({});
+      if (identity.kind === 'worker') {
+        await client['task.list']({ projectId: identity.projectId! });
+        checks.push(['paired connection', true, `machine ${identity.machineId}, project ${identity.projectId}; registry requires owner access`]);
+      } else {
+        const registry = await client['registry.list']({ projectId: flag(a, 'project') });
+        const counts = { managed: 0, observed: 0, stale: 0, unconnected: 0 };
+        for (const entry of registry.entries) counts[entry.state]++;
+        checks.push(['connected registry', true, Object.entries(counts).map(([name, n]) => `${name}=${n}`).join(', ')]);
+        console.log(`Registry coverage: ${JSON.stringify(registry.coverage)}. Unconnected means advertised availability, not an active process. Native clients without a bridge/hook are not discovered.`);
+      }
+    } catch (err) { checks.push(['connection / registry', false, (err as Error).message]); }
+  } else console.log('Registry coverage: unknown until the hub is running. Install/detection alone does not prove a connected client.');
   for (const [name, ok, detail] of checks) console.log(`${ok ? green('✔') : yellow('!')} ${name.padEnd(28)} ${dim(detail)}`);
 }
 
@@ -864,6 +995,8 @@ async function main() {
   if (a.flags.repo && typeof a.flags.repo === 'string' && cmd !== 'worker') process.chdir(expandHome(a.flags.repo));
   switch (cmd) {
     case 'init': return cmdInit(a);
+    case 'setup': return cmdSetup(a);
+    case 'pair': return cmdPair(a);
     case 'add': return cmdAdd(a);
     case 'plan': return cmdPlan(a);
     case 'status': case 'ls': return cmdStatus(a);
@@ -888,7 +1021,7 @@ async function main() {
     case 'mcp': return cmdMcp(a);
     case 'hook': return cmdHook(a);
     case 'plugin': return cmdPlugin(a);
-    case 'doctor': return cmdDoctor();
+    case 'doctor': return cmdDoctor(a);
     case 'presets': return cmdPresets();
     case 'dashboard': return cmdDashboard(a);
     case 'demo': return cmdDemo(a);

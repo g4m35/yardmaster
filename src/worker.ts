@@ -1,10 +1,10 @@
 import { cpus, freemem, hostname, loadavg, platform } from 'node:os';
 import type { Client } from './api.ts';
-import { deepMerge, resolveConfig, type Config, worktreeRootOf } from './config.ts';
+import { agentSettings, deepMerge, resolveConfig, type Config, worktreeRootOf } from './config.ts';
 import { runAttempt, Semaphore, type StopReason } from './runner.ts';
 import { run } from './proc.ts';
-import { git, isClean, isLinkedWorktreeOf, removeWorktree, revParse } from './git.ts';
-import { dirBytes, findArtifacts, freeGb, gb, removeArtifact } from './disk.ts';
+import { git, isClean, isLinkedWorktreeOf, listWorktrees, revParse } from './git.ts';
+import { dirBytes, freeGb, gb } from './disk.ts';
 import { clonesAreFree } from './warmstart.ts';
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -15,7 +15,7 @@ export interface BranchTransport {
   /** Make sure `sha` (the integration head on the hub) exists in the local clone. */
   fetchBase(project: Project, repoPath: string, sha: string): Promise<void>;
   /** Send the finished task branch to the hub so it can be merged there. */
-  uploadBranch(task: Task, repoPath: string, branch: string, base: string): Promise<void>;
+  uploadBranch(task: Task, repoPath: string, branch: string, base: string): Promise<{ head: string }>;
 }
 
 interface Active {
@@ -45,6 +45,7 @@ async function availableMemMb(): Promise<number> {
  * machine runs `ym worker`, which is the same loop talking to the hub over HTTP.
  */
 export class WorkerLoop {
+  private readonly agentSlots = new Map<string, Semaphore>();
   readonly active = new Map<string, Active>();
   private readonly client: Client;
   readonly machineId: string;
@@ -112,7 +113,7 @@ export class WorkerLoop {
       id: this.machineId,
       name: this.name,
       info: (await this.info()) as unknown as Record<string, unknown>,
-      running: [...this.active.keys()].map((taskId) => ({ taskId })),
+      running: [...this.active.values()].map(({ task }) => ({ taskId: task.id, generation: task.generation })),
     });
   }
 
@@ -151,7 +152,7 @@ export class WorkerLoop {
 
   /**
    * On machines other than the hub, worktrees of finished tasks are removed once the hub confirms the task is
-   * done (its commits are merged there). Unmerged or dirty worktrees are kept; idle ones lose only build output.
+   * done with the exact accepted commit. Unmerged, detached, locked, dirty or active worktrees are kept.
    */
   async tidyLocal(): Promise<void> {
     if (!this.transport) return;
@@ -166,13 +167,23 @@ export class WorkerLoop {
           const path = join(root, group, taskId);
           if (!isLinkedWorktreeOf(path, repo)) continue;
           const t = await this.client['task.peek']({ id: taskId }).catch(() => null);
-          if (!t || ['running', 'verifying'].includes(t.status)) continue;
-          if (t.status === 'done' && (await isClean(path))) {
-            await removeWorktree(repo, path).catch(() => undefined);
-            await git(repo, ['branch', '-D', `yardmaster/${taskId}`], { allowFail: true });
-          } else if (cfg.disk.trimArtifacts && t.status !== 'ready' && t.status !== 'merging') {
-            for (const a of await findArtifacts(path, cfg.disk.artifactDirs)) removeArtifact(path, a);
-          }
+          // Only the exact commit acknowledged by the hub can be discarded. Detached work, locks,
+          // new commits and nonterminal tasks are preserved, including their build/setup artifacts.
+          if (!t || t.status !== 'done' || !t.head_sha || t.branch !== `yardmaster/${taskId}`) continue;
+          const entry = (await listWorktrees(repo)).find((w) => w.path === path);
+          if (!entry || entry.locked || entry.prunable || entry.branch !== t.branch || entry.head !== t.head_sha) continue;
+          if (!(await isClean(path))) continue;
+          const current = await this.client['task.peek']({ id: taskId }).catch(() => null);
+          if (!current || current.status !== 'done' || current.generation !== t.generation || current.head_sha !== t.head_sha ||
+              current.branch !== t.branch || this.active.has(taskId)) continue;
+          const latest = (await listWorktrees(repo)).find((w) => w.path === path);
+          if (!latest || latest.locked || latest.prunable || latest.branch !== t.branch || latest.head !== t.head_sha ||
+              !isLinkedWorktreeOf(path, repo) || !(await isClean(path)) || this.active.has(taskId)) continue;
+          // Git's own worktree removal honors locks; bypassing it via the fast path would lose that guard.
+          const removed = await git(repo, ['worktree', 'remove', path], { allowFail: true });
+          if (removed.code !== 0) continue;
+          // Compare-and-delete: a branch advanced during removal must survive.
+          await git(repo, ['update-ref', '-d', `refs/heads/${t.branch}`, t.head_sha], { allowFail: true });
         }
       }
     }
@@ -185,12 +196,12 @@ export class WorkerLoop {
       while (!this.stopped && (await this.hasCapacity())) {
         const runningByAgent: Record<string, number> = {};
         for (const a of this.active.values()) runningByAgent[a.agent] = (runningByAgent[a.agent] ?? 0) + 1;
-        const claim = await this.client['worker.claim']({ machineId: this.machineId, agents: this.agents(), repos: this.repos(), runningByAgent });
+        const claim = await this.client['worker.claim']({ machineId: this.machineId, agents: this.agents(), repos: this.repos(), runningByAgent, activeTaskIds: [...this.active.keys()] });
         if (!claim) break;
         if (this.stopped) {
           // A shutdown may have happened while the hub was handing us this claim, before an active entry existed.
           await this.client['task.update']({ id: claim.task.id,
-            owner: { attempt: claim.task.attempts, assignee: claim.task.assignee ?? '', statuses: ['running'] },
+            owner: { generation: claim.task.generation, attempt: claim.task.attempts, assignee: claim.task.assignee ?? '', statuses: ['running'] },
             patch: { status: 'queued', attempts: Math.max(0, claim.task.attempts - 1), assignee: null, machine_id: null, lease_until: null },
           });
           break;
@@ -220,15 +231,22 @@ export class WorkerLoop {
           startPoint: claim.startPoint, verifySlots: this.verifySlots, onSpawn: (stop) => {
             entry.stop = stop;
             if (pendingStop) stop(pendingStop.reason, pendingStop.message);
-          }, installed: this.agents(),
+          }, installed: this.agents(), reserveAgent: (agent, signal) => {
+            let slots = this.agentSlots.get(agent);
+            if (!slots) { slots = new Semaphore(agentSettings(config, agent).maxParallel); this.agentSlots.set(agent, slots); }
+            return slots.acquire(signal);
+          },
         });
         if (outcome.status === 'ready' && this.transport) {
           const fresh = (await this.client['task.get']({ id: task.id })).task;
-          await this.transport.uploadBranch(fresh, repoPath, fresh.branch!, fresh.base_sha ?? claim.startPoint);
+          if (fresh.generation !== task.generation || fresh.assignee !== task.assignee || fresh.status !== 'ready') throw new Error('This attempt no longer owns the task before upload.');
+          // Retain the original claim identity; never lend a stale worker the new owner's generation.
+          const accepted = await this.transport.uploadBranch({ ...fresh, generation: task.generation }, repoPath, fresh.branch!, fresh.base_sha ?? claim.startPoint);
+          if (accepted.head !== fresh.head_sha) throw new Error('Hub did not acknowledge the accepted commit.');
         }
       } catch (err) {
         // Fenced: if the task was taken over elsewhere meanwhile, this stale error must not overwrite it.
-        await this.client['task.update']({ id: task.id, owner: { attempt: task.attempts, assignee: task.assignee ?? '', statuses: ['running', 'verifying', 'ready'] }, patch: { status: 'needs_human', attention: `This machine (${this.name}) hit an error: ${(err as Error).message}`, lease_until: null } }).catch(() => undefined);
+        await this.client['task.update']({ id: task.id, owner: { generation: task.generation, attempt: task.attempts, assignee: task.assignee ?? '', statuses: ['running', 'verifying', 'ready'] }, patch: { status: 'needs_human', attention: `This machine (${this.name}) hit an error: ${(err as Error).message}`, lease_until: null } }).catch(() => undefined);
         await this.client['task.event']({ projectId: task.project_id, taskId: task.id, level: 'error', kind: 'worker.error', message: `${this.name}: ${(err as Error).message}` }).catch(() => undefined);
       } finally {
         this.active.delete(task.id);

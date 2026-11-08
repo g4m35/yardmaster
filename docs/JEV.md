@@ -35,9 +35,32 @@ The command is an argument array, never a shell string; use `["node", "/absolute
 
 Each worker uses its **own complete** `effortRouting` section. Hub settings, paths and bindings are never inherited by another machine. Putting this section only in a project's `yardmaster.json` does not enable execution: worker-local configuration is authoritative. JEV receives the local registered checkout path for its allowlist, rather than a temporary worktree or the hub's path.
 
+## Effort ownership and minimum effort
+
+These per-agent settings apply to every launch through an adapter, with or without JEV: coding attempts, retries, resumes, `ym plan` and reviews. They live in `agents.<agent>` of the machine's configuration.
+
+```json
+{
+  "agents": {
+    "claude": { "minimumEffort": "high" },
+    "codex": { "minimumEffort": "high" }
+  }
+}
+```
+
+- `effortOwnership`: `"managed"` (default) passes Yardmaster's tier default (cheap `low`, standard `medium`, strong `high`). `"native"` passes no effort flag, so the CLI's own configuration decides, and JEV is skipped (`native_ownership`) without suppressing native hooks.
+- `minimumEffort`: generated tier defaults and JEV decisions below it are raised to it. Reviews (standard tier) and untiered launches pass it too. JEV is offered only levels at or above it. When no lower level remains below the baseline, JEV is skipped (`at_floor`), and a reply below it falls back (`below_floor`).
+- `attestedEffort`: your statement of the effort the CLI really uses where Yardmaster cannot set or see it, such as native ownership, a `""` tier, a custom `command`, or an agent without an effort flag (OpenCode, Cursor, Gemini, plain commands). In those cases a minimum requires an attestation at or above it. Yardmaster does not read native configuration to check it.
+
+Explicit choices are never changed. `effort.<tier>` and an effort flag in `extraArgs` (Claude `--effort`, Codex `-c`/`--config model_reasoning_effort=`) take precedence over ownership and routing. When the flag is in `extraArgs`, Yardmaster adds none, so the command line has no duplicate. The launch stops with an `EffortPolicyError` before anything starts when an explicit value is below the minimum or cannot be ranked, two explicit values differ, a minimum is not a level the CLI documents (Claude Code 2.1.319: `low`…`max`; Codex: `none`…`ultra`), or a needed attestation is missing or too low. Values Yardmaster does not rank still pass through unchanged when no minimum is set.
+
+Each built launch records its effective effort, source (`tier-default`, `floor`, `manual`, `extra-args`, `jev`, `native`, `native-attested`) and evidence (`launch-flag`, `user-flag`, `attested`, `unknown`), which `launchEffort()` in `src/effort.ts` returns. `launchIdentity()` gives a fingerprint of the launch shape: agent, command, model, the effort on the command line, read-only, autonomy, context mode, tools, MCP config path, sandbox, a hash of `extraArgs`, environment variable names, and an optional CLI version. It leaves out the prompt, session and task identifiers, worktree path, budget and secret values. A matching fingerprint shows the launch shape is unchanged. It does not show a provider cache hit, and with native effort a change in the CLI's own configuration does not change the fingerprint.
+
+Yardmaster checks the value it passes, not whether a given model accepts or honors it. A model that rejects a level fails in the CLI.
+
 ## Preserved behavior and fallbacks
 
-- Explicit effort settings, including `""`, custom executable settings and any `extraArgs` bypass classification. Unsupported agents, unbound models and unknown/default model identities retain normal behavior. Bindings advertise only the effort values actually supported; aliases need their own verified binding.
+- Explicit effort settings, including `""`, custom executable settings, any `extraArgs` and native effort ownership bypass classification. A configured `minimumEffort` still applies to the launch. Unsupported agents, unbound models and unknown/default model identities retain normal behavior. Bindings advertise only the effort values actually supported; aliases need their own verified binding.
 - Retries, resumed sessions, redirects, and review/conflict repairs bypass classification so recovery and escalation keep their existing effort. On enabled, bound Claude launches, `JEV_ROUTER_HOST_ROUTING=1` suppresses duplicate native JEV hooks, including on fallback and recovery. Unbound launches keep their existing hooks.
 - Yardmaster sends only the original task title/prompt, identity and capability metadata to the local JEV process, not the expanded coding brief, dependency summaries or teammate messages. JEV's ordinary policy can hold opaque or long requests unchanged. Eligible redacted task text can be sent to TypeSafe even in shadow mode; this is not an offline classifier.
 - The subprocess has a 5-second default deadline (configurable from 100 ms to 30 seconds), a 64 KiB combined output cap, no shell, and process-group cleanup on timeout/cancellation. Missing command, nonzero exit, malformed/stale responses, wrong identities, unsupported options/values and efforts above the baseline all retain the normal effort. Hub credentials and Git redirect variables are stripped from its environment. Raw router output and arbitrary error/reason text never enter activity logs.
@@ -45,7 +68,9 @@ Each worker uses its **own complete** `effortRouting` section. Hub settings, pat
 
 ## Limits
 
-This selects effort once before the first coding attempt. It does not route each internal model turn, replace the scheduler, select another provider/model, or integrate planning/review subprocesses. The initial supported launch adapters are Claude Code and Codex; other providers in JEV's library need their own verified Yardmaster launch bindings.
+This selects effort once before the first coding attempt. It does not route each internal model turn, replace the scheduler, select another provider/model, or route planning/review subprocesses (they still get the minimum effort). The initial supported launch adapters are Claude Code and Codex; other providers in JEV's library need their own verified Yardmaster launch bindings.
+
+Cache telemetry is reported as given: Claude Code (`cache_creation_input_tokens`) and OpenCode (`cache.write`) usage carries cache-write tokens when present, Codex reports cache reads only, and a missing figure stays unknown rather than zero. An OpenCode step without a cost is estimated from list prices instead of being recorded as $0. None of this certifies cache preservation across launches; that needs controlled provider observations.
 
 Yardmaster does not claim measured savings from this integration. The JEV v1 reply supplies judge latency/attempts but no monetary usage, so TypeSafe classification cost is **not included** in Yardmaster's task/daily dollar meters. Account for it separately and compare total cost per verified task, quality and wall time before broadly enabling active mode. Failed router calls are not retried by this integration.
 

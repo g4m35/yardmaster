@@ -1,7 +1,8 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { basename, dirname, join, resolve } from 'node:path';
-import { run, spawnDetached } from './proc.ts';
+import { cleanEnv, run, spawnDetached } from './proc.ts';
 
 /**
  * File work that scales with folder size, done the fast way:
@@ -108,7 +109,7 @@ export function purgeTrash(trash: string): number {
  * .git/worktrees (not `git worktree prune`, which would also forget other tools' worktrees that are merely missing,
  * say on an unplugged drive). Callers must already have checked it's clean and merged.
  */
-export function removeWorktreeFast(repoRoot: string, worktree: string, trash: string): void {
+export function removeWorktreeFast(repoRoot: string, worktree: string, trash: string, opts: { expectedHead?: string; expectedBranch?: string | null; guard?: () => void } = {}): void {
   const dotGit = join(worktree, '.git');
   let admin: string | null = null;
   try {
@@ -119,6 +120,20 @@ export function removeWorktreeFast(repoRoot: string, worktree: string, trash: st
   }
   const adminRoot = resolve(repoRoot, '.git', 'worktrees') + '/';
   if (!admin || !admin.startsWith(adminRoot)) throw new Error(`${worktree} is not a linked worktree of ${repoRoot}`);
+  if (existsSync(join(admin, 'locked')) || existsSync(join(admin, 'index.lock')) || existsSync(join(admin, 'HEAD.lock'))) {
+    throw new Error('Worktree is locked or a Git operation is in progress; kept');
+  }
+  // These checks and the rename run without yielding: an orchestration claim cannot slip between them.
+  // Use Git's index/ignore semantics rather than guessing cleanliness from file metadata.
+  const inspect = (args: string[]) => execFileSync('git', args, { cwd: worktree, env: cleanEnv(), encoding: 'utf8', timeout: 10_000, maxBuffer: 4 * 1024 * 1024 }).trim();
+  if (inspect(['status', '--porcelain', '--untracked-files=all'])) throw new Error('Worktree changed before removal; kept');
+  if (opts.expectedHead && inspect(['rev-parse', 'HEAD']) !== opts.expectedHead) throw new Error('Worktree commit changed before removal; kept');
+  if (opts.expectedBranch !== undefined) {
+    const head = readFileSync(join(admin, 'HEAD'), 'utf8').trim();
+    const branch = head.startsWith('ref: refs/heads/') ? head.slice('ref: refs/heads/'.length) : null;
+    if (branch !== opts.expectedBranch) throw new Error('Worktree branch changed before removal; kept');
+  }
+  opts.guard?.();
   removeFast(worktree, trash);
   rmSync(admin, { recursive: true, force: true });
 }

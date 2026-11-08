@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import * as z from 'zod/v4';
 import { EFFORT_LEVELS, EffortLevelSchema, type AgentSettings, type EffortRouting, type Tier } from './config.ts';
-import { DEFAULT_EFFORT } from './adapters/builtin.ts';
+import { DEFAULT_EFFORT, type RoutedEffort } from './effort.ts';
 import { cleanEnv, killGroup } from './proc.ts';
 import type { Task } from './types.ts';
 
@@ -79,6 +79,8 @@ export async function routeEffort(opts: {
   const { config, agent, model, settings, task, tier } = opts;
   if (!config.enabled) return result('disabled', 'disabled');
   if (agent !== 'claude' && agent !== 'codex') return result('skipped', 'unsupported_agent');
+  // The native client owns effort here, including any native JEV hook; Yardmaster neither routes nor suppresses it.
+  if (settings.effortOwnership === 'native') return result('skipped', 'native_ownership');
   if (!model) return result('skipped', 'unknown_model');
   const binding = config.bindings.find((b) => b.agent === agent && b.model === model);
   if (!binding) return result('skipped', 'unbound_model');
@@ -86,8 +88,15 @@ export async function routeEffort(opts: {
   if (Object.hasOwn(settings.effort, tier) || settings.extraArgs.length || settings.command) return result('skipped', 'explicit_settings', true);
   // No router call on retries, resumes, redirects or review/conflict repairs. Suppress native re-routing too.
   if (task.attempts !== 1 || task.agent_session || task.retry_note || task.review_rounds || task.conflict_rounds) return result('skipped', 'recovery', true);
-  const baseline = DEFAULT_EFFORT[tier] as Level;
+  // The minimum raises the baseline (the ceiling) and removes lower options, so a reply can never go below it.
+  const floor = settings.minimumEffort ?? null;
+  if (floor !== null && !(EFFORT_LEVELS as readonly string[]).includes(floor)) return result('skipped', 'unsupported_floor', true);
+  const rank = (l: string) => (EFFORT_LEVELS as readonly string[]).indexOf(l);
+  const tierDefault = DEFAULT_EFFORT[tier] as Level;
+  const baseline = floor !== null && rank(floor) > rank(tierDefault) ? (floor as Level) : tierDefault;
   if (!binding.efforts.includes(baseline)) return result('skipped', 'unsupported_baseline', true);
+  const efforts = floor === null ? binding.efforts : binding.efforts.filter((l) => rank(l) >= rank(floor));
+  if (floor !== null && efforts.filter((l) => rank(l) <= rank(baseline)).length < 2) return result('skipped', 'at_floor', true);
   if (config.mode === 'active' && (binding.cacheImpact === 'unknown' || (binding.cacheImpact === 'may-reset' && !binding.allowCacheReset))) return result('hold', 'cache_unverified', true);
   const prompt = task.prompt === task.title ? task.title : `${task.title}\n\n${task.prompt}`;
   // Let JEV perform redaction/truncation checks itself; never trim an unknown task into an apparently trivial one.
@@ -97,7 +106,7 @@ export async function routeEffort(opts: {
   const optionId = agent === 'codex' ? 'model_reasoning_effort' : 'effort';
   const request = { v: 1, requestId, sessionId, providerInstanceId: agent, model, projectDir: opts.repoPath,
     prompt, turn: 1, previousLevel: baseline, baseline, manualSelection: false, attachments: false,
-    capability: { optionId, values: binding.efforts, levels: Object.fromEntries(binding.efforts.map((level) => [level, level])),
+    capability: { optionId, values: efforts, levels: Object.fromEntries(efforts.map((level) => [level, level])),
       cacheImpact: binding.cacheImpact, allowCacheReset: binding.allowCacheReset } };
   let response: Awaited<ReturnType<typeof callRouter>>;
   try {
@@ -118,6 +127,15 @@ export async function routeEffort(opts: {
   }
   if (!decision.patch || decision.patch.optionId !== optionId || decision.patch.value !== decision.level || !decision.level
     || !binding.efforts.includes(decision.level) || EFFORT_LEVELS.indexOf(decision.level) > EFFORT_LEVELS.indexOf(baseline)) return result('fallback', 'invalid_patch', true);
+  if (!efforts.includes(decision.level)) return result('fallback', 'below_floor', true);
   if (config.mode === 'shadow' || decision.status === 'shadow') return result('shadow', `suggested_${decision.level}`, true);
   return result('apply', `selected_${decision.level}`, true, decision.level);
+}
+
+/**
+ * The decision as adapter input: pass it as `routedEffort` to `adapter.build` rather than writing it into
+ * `settings.effort`, so the launch records it as routed (not manual) and the minimum still applies to it.
+ */
+export function routedEffortOf(decision: EffortDecision): RoutedEffort | undefined {
+  return decision.status === 'apply' && decision.effort ? { level: decision.effort, by: 'jev' } : undefined;
 }

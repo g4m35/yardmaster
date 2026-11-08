@@ -2,9 +2,12 @@ import { worktreeRootOf } from './config.ts';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { Coordinator } from './coordinator.ts';
+import type { TaskPatch } from './coordinator.ts';
+import { tx } from './db.ts';
 import { addWorktree, branchExists, conflictedFiles, git, isAncestor, isClean, isLinkedWorktreeOf, removeWorktree, revParse } from './git.ts';
 import { rememberChecked } from './ci/verified.ts';
-import { runVerify, Semaphore, verifyCommands } from './runner.ts';
+import { Semaphore, verifyCommands } from './runner.ts';
+import { verifyArtifact } from './verification.ts';
 import { runShell } from './proc.ts';
 import { lockHash, refreshDeps, siblingWorktrees } from './warmstart.ts';
 import { clip, errorFingerprint, tail } from './text.ts';
@@ -41,6 +44,29 @@ export class Integrator {
   private readonly warned = new Map<string, string>();
   /** Tasks whose batch failed checks; they go through one at a time to find the culprit. */
   private readonly trainFailed = new Set<string>();
+  private readonly pending = new Set<Promise<unknown>>();
+  private readonly lifetime = new AbortController();
+
+  /** Stop admission, abort owned checks, and join all in-flight merge operations before releasing hub ownership. */
+  async stop(): Promise<void> {
+    this.lifetime.abort();
+    await Promise.allSettled([...this.pending]);
+  }
+
+  private current(task: Task, statuses: Task['status'][]): boolean {
+    const fresh = this.coord.getTask(task.id);
+    return !this.lifetime.signal.aborted && !!fresh && fresh.generation === task.generation &&
+      fresh.assignee === task.assignee && fresh.head_sha === task.head_sha && statuses.includes(fresh.status) && !fresh.control;
+  }
+
+  /** Compare and update synchronously under SQLite's write lock; no stale async snapshot can resurrect cancellation. */
+  private transition(task: Task, statuses: Task['status'][], patch: TaskPatch): boolean {
+    return tx(this.coord.db, () => {
+      if (!this.current(task, statuses)) return false;
+      this.coord.updateTask(task.id, patch);
+      return true;
+    });
+  }
 
   constructor(coord: Coordinator, verifySlots: Semaphore) {
     this.coord = coord;
@@ -121,7 +147,7 @@ export class Integrator {
       if (!r) return;
       this.coord.setMeta(key, lockHash(path));
       for (const command of config.worktree.setup) {
-        const s = await runShell(command, { cwd: path, timeoutMs: config.verifyTimeoutMinutes * 60_000 });
+        const s = await runShell(command, { cwd: path, timeoutMs: config.verifyTimeoutMinutes * 60_000, signal: this.lifetime.signal });
         if (s.code !== 0) this.coord.event(project.id, null, 'warn', 'integration.setup_failed', `Setup \`${command}\` failed in the merge worktree: ${clip(s.stdout.trim().split('\n').slice(-3).join(' '), 200)}`);
       }
       if (r.cloned.length) this.coord.event(project.id, null, 'info', 'integration.deps', `Merge worktree has ${r.cloned.map((c) => c.rel).join(', ')} (${(r.ms / 1000).toFixed(1)}s, no reinstall)`);
@@ -141,7 +167,15 @@ export class Integrator {
     }
   }
 
-  async step(projectId: string): Promise<boolean> {
+  step(projectId: string): Promise<boolean> {
+    if (this.lifetime.signal.aborted) return Promise.resolve(false);
+    const operation = this.stepOnce(projectId);
+    this.pending.add(operation);
+    void operation.finally(() => this.pending.delete(operation)).catch(() => undefined);
+    return operation;
+  }
+
+  private async stepOnce(projectId: string): Promise<boolean> {
     if (this.busy.has(projectId)) return false;
     const project = this.coord.getProject(projectId);
     if (!project) return false;
@@ -157,8 +191,8 @@ export class Integrator {
         break;
       }
       // Work from another machine may still be uploading; only complain if it never arrives.
-      if (Date.now() - (t.ready_at ?? 0) > 120_000) {
-        this.coord.updateTask(t.id, { status: 'needs_human', attention: `Its verified commit never arrived on the hub machine. Check that the worker on ${t.machine_id ?? 'the other machine'} is online, then retry.` });
+      if (Date.now() - (t.ready_at ?? 0) > 11 * 60_000) {
+        this.transition(t, ['ready'], { status: 'needs_human', attention: `Its verified commit never arrived on the hub machine. Check that the worker on ${t.machine_id ?? 'the other machine'} is online, then retry.` });
       }
     }
     if (!task) return false;
@@ -193,7 +227,7 @@ export class Integrator {
     try {
       await this.lock.run(projectId, () => this.integrate(project, task!, config));
     } catch (err) {
-      this.coord.updateTask(task.id, { status: 'needs_human', attention: `Merging failed unexpectedly: ${clip((err as Error).message, 400)}` });
+      this.transition(task, ['ready', 'merging'], { status: 'needs_human', attention: `Merging failed unexpectedly: ${clip((err as Error).message, 400)}` });
       this.coord.event(projectId, task.id, 'error', 'integration.error', `Could not merge "${task.title}": ${(err as Error).message}`);
     } finally {
       this.busy.delete(projectId);
@@ -204,7 +238,7 @@ export class Integrator {
   private async integrate(project: Project, task: Task, config: Config): Promise<void> {
     const sha = task.head_sha!;
     if (config.integration.mode === 'none') {
-      this.coord.updateTask(task.id, { status: 'done', finished_at: Date.now() });
+      if (!this.transition(task, ['ready'], { status: 'done', finished_at: Date.now() })) return;
       this.coord.event(project.id, task.id, 'success', 'task.done', `"${task.title}" is done on branch ${task.branch}`);
       return;
     }
@@ -212,9 +246,7 @@ export class Integrator {
     if (!ensured) return;
     const { path, head: before } = ensured;
     // Re-read under the lock: it may have been canceled while waiting.
-    const fresh = this.coord.getTask(task.id);
-    if (!fresh || fresh.status !== 'ready' || fresh.head_sha !== sha) return;
-    this.coord.updateTask(task.id, { status: 'merging' });
+    if (!this.transition(task, ['ready'], { status: 'merging' })) return;
     this.coord.setMeta(`integrating:${project.id}`, before);
     const merge = await git(path, ['merge', '--no-ff', '--no-edit', '-m', `yardmaster: ${task.title} (${task.id})`, sha], { allowFail: true });
     if (merge.code !== 0) {
@@ -224,7 +256,7 @@ export class Integrator {
       this.coord.setMeta(`integrating:${project.id}`, null);
       if (!files.length) {
         // Not a content conflict (hook rejection, lock file, untracked file in the way): don't burn conflict rounds.
-        this.coord.updateTask(task.id, { status: 'needs_human', attention: `Git refused the merge: ${clip(merge.stderr || merge.stdout, 400)}` });
+        if (!this.transition(task, ['merging'], { status: 'needs_human', attention: `Git refused the merge: ${clip(merge.stderr || merge.stdout, 400)}` })) return;
         this.coord.event(project.id, task.id, 'error', 'integration.error', `Could not merge "${task.title}": ${clip(merge.stderr || merge.stdout, 200)}`);
         return;
       }
@@ -236,7 +268,7 @@ export class Integrator {
     if (baseMoved && commands.length) {
       this.coord.event(project.id, task.id, 'info', 'integration.reverify', `Re-checking "${task.title}" combined with work merged since it started`);
       await this.prepareDeps(project, path, config, task.worktree ? [task.worktree] : []);
-      const result = await this.verifySlots.use(() => runVerify(path, commands, config.verifyTimeoutMinutes));
+      const result = await this.verifySlots.use(() => verifyArtifact(path, commands, config.verifyTimeoutMinutes, this.lifetime.signal));
       if (!result.ok) {
         await git(path, ['reset', '--hard', before]);
         this.coord.setMeta(`integrating:${project.id}`, null);
@@ -245,9 +277,9 @@ export class Integrator {
         const same = task.error_fp === fp ? task.same_error_count + 1 : 1;
         const giveUp = same >= config.retry.sameFailureLimit || task.attempts >= task.max_attempts;
         const note = `After combining with the latest merged work, checks failed (\`${result.command}\`):\n${tail(result.output, 40, 2500)}`;
-        this.coord.updateTask(task.id, giveUp
+        if (!this.transition(task, ['merging'], giveUp
           ? { status: 'needs_human', attention: `It works alone but breaks when combined with other merged work. ${clip(note, 500)}`, error_fp: fp, same_error_count: same }
-          : { status: 'queued', pending_rebase: true, retry_note: note, error_fp: fp, same_error_count: same, assignee: null, machine_id: null });
+          : { status: 'queued', pending_rebase: true, retry_note: note, error_fp: fp, same_error_count: same, assignee: null, machine_id: null })) return;
         this.coord.event(project.id, task.id, 'warn', 'integration.reverify_failed', `"${task.title}" broke checks when combined with newer work; ${giveUp ? 'needs you' : 'sent back to fix'}.`);
         return;
       }
@@ -255,16 +287,22 @@ export class Integrator {
     const after = await revParse(path, 'HEAD');
     if (after && baseMoved && commands.length) await rememberChecked(path, after, commands);
     // A cancel that arrived during re-verification wins: undo the merge.
-    if (this.coord.getTask(task.id)?.status !== 'merging') {
+    if (!this.current(task, ['merging'])) {
+      await git(path, ['reset', '--hard', before]);
+      this.coord.setMeta(`integrating:${project.id}`, null);
+      return;
+    }
+    // The accepted commit and terminal state are the commit point. Cleanup is post-completion housekeeping,
+    // never part of the cancelable merge transaction and never permitted to rewrite task status.
+    if (!this.transition(task, ['merging'], { status: 'done', finished_at: Date.now(), head_sha: after, attention: null })) {
       await git(path, ['reset', '--hard', before]);
       this.coord.setMeta(`integrating:${project.id}`, null);
       return;
     }
     this.coord.setMeta(`integrating:${project.id}`, null);
     this.lastGood.set(project.id, after!);
-    await this.tidy(project, task, config, sha).catch(() => undefined);
-    this.coord.updateTask(task.id, { status: 'done', finished_at: Date.now(), head_sha: after, attention: null });
     this.coord.event(project.id, task.id, 'success', 'task.done', `Merged "${task.title}" into ${config.integration.branch}`);
+    await this.tidy(project, task, config, sha).catch(() => undefined);
   }
 
   /**
@@ -276,11 +314,11 @@ export class Integrator {
     const ensured = await this.ensureLocked(project);
     if (!ensured) return true;
     const { path, head: before } = ensured;
-    const fresh = train.map((t) => this.coord.getTask(t.id)).filter((t): t is Task => !!t && t.status === 'ready' && !!t.head_sha);
+    const fresh = train.filter((t) => this.current(t, ['ready']));
     const needsCheck = fresh.filter((t) => t.base_sha !== before || config.verifyQuick.length > 0);
     if (fresh.length < 2 || needsCheck.length < 2 || !config.verify.length) return false;
     this.coord.setMeta(`integrating:${project.id}`, before);
-    for (const t of fresh) this.coord.updateTask(t.id, { status: 'merging' });
+    for (const t of fresh) if (!this.transition(t, ['ready'], { status: 'merging' })) return false;
     const merged: Task[] = [];
     for (const t of fresh) {
       const m = await git(path, ['merge', '--no-ff', '--no-edit', '-m', `yardmaster: ${t.title} (${t.id})`, t.head_sha!], { allowFail: true });
@@ -289,7 +327,7 @@ export class Integrator {
         await git(path, ['merge', '--abort'], { allowFail: true });
         await git(path, ['reset', '--hard', before]);
         this.coord.setMeta(`integrating:${project.id}`, null);
-        for (const x of fresh) this.coord.updateTask(x.id, { status: 'ready' });
+        for (const x of fresh) this.transition(x, ['merging'], { status: 'ready' });
         for (const x of fresh) this.trainFailed.add(x.id);
         return false;
       }
@@ -297,40 +335,50 @@ export class Integrator {
     }
     this.coord.event(project.id, null, 'info', 'integration.train', `Checking ${merged.length} finished tasks together in one run: ${merged.map((t) => `"${clip(t.title, 40)}"`).join(', ')}`);
     await this.prepareDeps(project, path, config, merged.flatMap((t) => (t.worktree ? [t.worktree] : [])));
-    const result = await this.verifySlots.use(() => runVerify(path, config.verify, config.verifyTimeoutMinutes));
-    const stillMerging = merged.every((t) => this.coord.getTask(t.id)?.status === 'merging');
+    const result = await this.verifySlots.use(() => verifyArtifact(path, config.verify, config.verifyTimeoutMinutes, this.lifetime.signal));
+    const stillMerging = merged.every((t) => this.current(t, ['merging']));
     if (!result.ok || !stillMerging) {
       await git(path, ['reset', '--hard', before]);
       this.coord.setMeta(`integrating:${project.id}`, null);
-      for (const t of merged) if (this.coord.getTask(t.id)?.status === 'merging') this.coord.updateTask(t.id, { status: 'ready' });
+      for (const t of merged) this.transition(t, ['merging'], { status: 'ready' });
       for (const t of merged) this.trainFailed.add(t.id);
       if (!result.ok) this.coord.event(project.id, null, 'warn', 'integration.train_failed', `The combined checks failed; merging those ${merged.length} tasks one at a time to find which one breaks.`);
       return false;
     }
     const after = (await revParse(path, 'HEAD'))!;
     await rememberChecked(path, after, config.verify);
+    const committed = tx(this.coord.db, () => {
+      if (!merged.every((t) => this.current(t, ['merging']))) return false;
+      for (const t of merged) this.coord.updateTask(t.id, { status: 'done', finished_at: Date.now(), attention: null });
+      return true;
+    });
+    if (!committed) {
+      await git(path, ['reset', '--hard', before]);
+      this.coord.setMeta(`integrating:${project.id}`, null);
+      for (const t of merged) this.transition(t, ['merging'], { status: 'ready' });
+      return false;
+    }
     this.coord.setMeta(`integrating:${project.id}`, null);
     this.lastGood.set(project.id, after);
-    for (const t of merged) await this.tidy(project, t, config, t.head_sha!).catch(() => undefined);
     for (const t of merged) {
-      this.coord.updateTask(t.id, { status: 'done', finished_at: Date.now(), attention: null });
       this.coord.event(project.id, t.id, 'success', 'task.done', `Merged "${t.title}" into ${config.integration.branch} (batch of ${merged.length})`);
     }
     this.coord.event(project.id, null, 'success', 'integration.train_merged', `Merged ${merged.length} tasks with one check run instead of ${merged.length}.`);
+    for (const t of merged) await this.tidy(project, t, config, t.head_sha!).catch(() => undefined);
     return true;
   }
 
   private async onConflict(project: Project, task: Task, config: Config, files: string[]): Promise<void> {
     const rounds = task.conflict_rounds + 1;
     if (rounds > config.integration.maxConflictRounds) {
-      this.coord.updateTask(task.id, { status: 'needs_human', conflict_rounds: rounds, attention: `Its changes clash with already-merged work in ${files.join(', ')}, and automatic resolution did not work. Open ${task.worktree ?? task.branch} to resolve by hand, then retry.` });
+      if (!this.transition(task, ['merging'], { status: 'needs_human', conflict_rounds: rounds, attention: `Its changes clash with already-merged work in ${files.join(', ')}, and automatic resolution did not work. Open ${task.worktree ?? task.branch} to resolve by hand, then retry.` })) return;
       this.coord.event(project.id, task.id, 'error', 'integration.conflict', `"${task.title}" has merge conflicts that need you (${files.join(', ')})`);
       return;
     }
-    this.coord.updateTask(task.id, {
+    if (!this.transition(task, ['merging'], {
       status: 'queued', pending_rebase: true, conflict_rounds: rounds, assignee: null, machine_id: null,
       retry_note: `Your branch conflicted with work merged since you started (${files.join(', ')}). The latest work has been merged into your worktree; resolve the conflicts and make sure checks pass.`,
-    });
+    })) return;
     this.coord.event(project.id, task.id, 'warn', 'integration.conflict', `"${task.title}" conflicts with newer work in ${files.join(', ')}; sending it back to its agent to reconcile (round ${rounds}).`);
   }
 
@@ -340,11 +388,16 @@ export class Integrator {
     const integration = config.integration.branch;
     const ourRoot = resolve(worktreeRootOf(config)) + '/';
     const wt = task.worktree;
+    const guard = () => {
+      const current = this.coord.getTask(task.id);
+      if (!current || current.generation !== task.generation || current.status !== 'done') throw new Error('Task changed before cleanup; kept');
+    };
     let removed = false;
     if (wt && existsSync(wt) && resolve(wt).startsWith(ourRoot) && isLinkedWorktreeOf(wt, project.root) && (await isClean(wt))) {
       const head = await revParse(wt, 'HEAD');
       if (head && (head === mergedSha || (await isAncestor(project.root, head, integration)))) {
-        await removeWorktree(project.root, wt);
+        await removeWorktree(project.root, wt, { expectedHead: head, guard });
+        guard();
         this.coord.updateTask(task.id, { worktree: null });
         removed = true;
       }

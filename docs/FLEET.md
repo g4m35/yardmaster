@@ -1,0 +1,51 @@
+# Private fleet and native-client setup
+
+Yardmaster coordinates one owner's trusted machines through a private hub. Keep using your editor and native agent session; connecting MCP tools and optional hooks lets that session join the workflow. A connection is not permission to scan every native process. The hub registry reports managed runs, observed bridge/hook sessions, stale records and unconnected machine advertisements. Installed/advertised agents are not evidence of active processes. Hosts without a connection remain outside that coverage.
+
+## Set up the owner machine
+
+1. In a committed git repository, run `ym setup --dry-run`. To preview a particular connection, use `ym setup --agent codex --dry-run`.
+2. Run `ym setup --agent codex` (or `claude`, `cursor`, `opencode`, `gemini`). This calls existing repo initialization and connects only your explicit selection. `--agent all` is an explicit request for all supported clients. `--agent none`, or a noninteractive run with no choice, initializes the repo and prints commands without editing native client settings. `--no-hooks` and `--no-skill` retain the existing connect controls.
+3. Review and commit `yardmaster.json`, particularly `verify` and review policy. Setup detects possible checks; it does not prove they pass. Restart the selected client to load its tools.
+4. Run `ym dashboard` for the local owner dashboard and `ym doctor` for configured checks, review requirement, effort conflicts and available connection/registry coverage. Setup prints these commands; it does not start a browser, alter services or create a network.
+
+The existing `ym init`, `ym connect AGENT --dry-run` and `ym connect AGENT` still work independently. Connected interactive sessions keep their native editor workflow; managed background tasks use worker-local provider credentials. Scoped worker credentials are for `ym worker`, not for configuring a remote owner MCP/dashboard connection.
+
+## Choose private transport
+
+Local loopback HTTP is accepted (`127.0.0.0/8`, `localhost`, `[::1]`). For a remote worker, use HTTPS with certificate verification, usually through a separately managed TLS reverse proxy. Yardmaster's built-in HTTP server does not terminate TLS. If a proxy mounts Yardmaster under a prefix, use that same canonical base URL on join and worker commands and ensure it forwards the API routes.
+
+Alternatively, use an existing encrypted private overlay with application authentication retained. Non-loopback HTTP requires the explicit `--private-network` acknowledgment on every pair/worker/doctor command using that endpoint. The acknowledgment asserts that the transport is already encrypted by your overlay; it does not encrypt HTTP or verify your network. A plain Wi-Fi/Ethernet LAN is not sufficient. Do not expose the hub's HTTP listener to the public internet. Bind the hub to a private interface only after private access is configured.
+
+These commands never provision certificates, DNS, tunnels, firewall rules, overlay membership or cloud infrastructure. TLS/private-network routing, remote browser access and real cross-machine transfer require separate deployment verification. A worker credential grants work execution within its project; project tasks and checks remain trusted code, not a sandbox against a hostile owner or OS account.
+
+Hub URLs must be absolute `http://` or `https://` endpoints with no user/password, query or fragment. Put credentials in neither URL nor dashboard sharing links. Canonical URLs normalize host case/default ports and trailing slashes; a different scheme, host, port or base path identifies a different saved credential. Pair redemption and fleet RPC reject redirects so secrets cannot follow a redirect to another endpoint.
+
+## Pair one worker project
+
+1. On the owner hub machine, run `ym init` in the project, then `ym pair invite` (or `ym pair invite --project PROJECT_ID`). Optional `--ttl-ms N` changes invitation lifetime; `--credential-ttl-ms N` changes credential lifetime. The hub validates allowed ranges. Defaults are 10 minutes for the code and 90 days for the credential.
+2. Give the one-use code to the intended worker. In a clone sharing the same initial root commit, run `ym pair join CODE --hub https://hub.example`. Optional `--project PROJECT_ID` additionally checks the returned scope. For HTTP over an encrypted overlay, append `--private-network`.
+3. Run `ym worker --hub https://hub.example --repo /path/to/clone`. The worker uses the saved credential when no `--token` or `YARDMASTER_TOKEN` is present. A scoped channel advertises and claims exactly one project; start a separate channel per project. It validates `fleet.identity` against this machine ID and repo's project ID, then validates project access using `task.list`, never owner-only `project.resolve`.
+4. On the owner, use `ym pair list` (`--json` for metadata), then `ym pair revoke CREDENTIAL_ID` if access should end. `ym pair revoke INVITATION_ID --invitation` invalidates an unused invitation. Future authenticated requests fail after revocation; revocation is not a remote OS process kill and does not erase already downloaded data.
+
+Pairing exchanges only a project/machine-scoped worker credential, never an admin token or provider login. Only hashes of invitation codes and credentials are stored on the hub, with atomic one-use redemption. A failed response after successful redemption cannot recover the original token: create a new invitation and revoke any orphaned credential shown by `ym pair list`. Failed post-redemption scope/storage checks can likewise consume the code; the CLI never prints the returned token.
+
+The worker stores a versioned JSON credential in `$YARDMASTER_HOME/worker-credentials/<sha256>.json` (default `~/.yardmaster`), keyed by canonical hub URL plus project ID. Credential files use `0600`; the home and credential directory must be owner-only (`0700`). Storage rejects symlink files/directories, foreign ownership, public permissions, oversized/invalid documents, expired credentials and mismatched hub/machine/project. Existing unsafe storage fails closed. Protect the OS account and do not copy the machine-id/credential pair to unrelated machines. A declared machine ID is not hardware attestation.
+
+Explicit `--token` or `YARDMASTER_TOKEN` takes precedence over saved credentials. An invalid explicit credential fails; it never falls back to a saved or owner credential. An explicit legacy owner token still supports the previous multi-project worker path and prints a privileged-channel warning. `ym token` intentionally displays the owner secret for owner administration; use invitations for workers and keep that secret private. Remote owner pairing/list/revoke requires an explicit owner credential, or the known local hub endpoint. The normal onboarding path creates invitations locally on the owner.
+
+## Diagnose coverage and policy
+
+`ym doctor` reports the configured verification commands, whether review is required, detected executables, and each enabled configured agent's effort policy. It uses the same resolver as launches to report explicit choices below the floor. It does not execute project checks, inspect native config files, call a model, infer current model effort, or certify native cache reuse.
+
+For a configured agent, `minimumEffort: "high"` raises generated/routed defaults but rejects an explicit lower `effort`/`extraArgs` setting. `effortOwnership: "native"` avoids generated effort flags. Native/custom/unsupported effort paths with a floor require `attestedEffort` from the operator; it is not measured telemetry. Configure each agent separately. See [JEV.md](JEV.md) for supported values and limitations.
+
+With owner access, `ym doctor --hub URL` reports `registry.list` state counts and the returned coverage/unknown signals, including passive inventory truncation. With a saved worker credential it validates only the project-scoped connection; global registry access remains owner-only. Without a running/accessible hub, registry coverage stays unknown. Registry freshness is persisted heartbeat evidence, not proof of OS liveness; stop-request capability is not an OS-stop acknowledgment.
+
+Usage can be actual, estimated, mixed or unknown. Unknown usage is not free. Claude's supported native budget flag is distinct from the other adapters' admission/reactive limits; missing/delayed usage and concurrent work can overshoot. JEV classification charges are excluded from task totals. No concurrent reservation or universal hard billing-cap claim is made here. Doctor reports available configuration/coverage, not a fabricated budget guarantee.
+
+## Local evidence and remaining qualification
+
+`node --test --test-timeout=30000 test/onboarding.test.ts` uses isolated homes/repos and a loopback fake hub with real PairingStore, authorization and RPC dispatch. It covers CLI invitation/join/list/revoke, a saved-credential worker heartbeat/claim, revocation refusal, one-project and machine identity checks, owner legacy compatibility, unsafe URL/storage rejection, redirects, expiration, first-run setup/dry-run and doctor. It exits naturally without `--test-force-exit`; no real provider, private hub or installed native configuration is accessed.
+
+This is bounded onboarding evidence. Parent integration owns real TLS/overlay routing, two physical machines, artifact transfer/reconnect, process shutdown after revocation, supported native-host qualification, budget reservations, global tests/build/review and release. See [QUALITY-GATES.md](QUALITY-GATES.md); no complete-product readiness score follows from these tests.

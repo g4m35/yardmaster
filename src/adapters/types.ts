@@ -5,14 +5,21 @@ export type AgentEvent =
   | { type: 'tool'; name: string; input: unknown; write: boolean }
   | { type: 'tool_result'; ok: boolean; text: string }
   | { type: 'text'; text: string }
-  /** `id` identifies the API message: some CLIs repeat a message's usage once per content block, so count it once. */
-  | { type: 'usage'; tokensIn: number; tokensOut: number; cachedIn?: number; costUsd?: number; cumulative: boolean; id?: string }
+  /**
+   * `tokensIn` excludes cache reads (`cachedIn`) but includes cache writes; `cacheWriteIn` says how many of `tokensIn`
+   * were cache writes, when the CLI reports it (absent means unknown, not zero). `costUsd` is the CLI's own dollar
+   * figure; leave it absent when the CLI did not report one, so the cost is estimated rather than recorded as $0.
+   * `cumulative`: the event is a snapshot of the whole run so far (it replaces earlier events) rather than an increment.
+   * `id` identifies the API message: some CLIs repeat a message's usage once per content block, so count it once.
+   */
+  | { type: 'usage'; tokensIn: number; tokensOut: number; cachedIn?: number; cacheWriteIn?: number; costUsd?: number; cumulative: boolean; id?: string }
   /** The CLI's own session id, for resuming on retry. */
   | { type: 'session'; id: string }
   | { type: 'result'; ok: boolean; text: string }
   | { type: 'error'; text: string };
 
 export interface AdapterContext {
+  routedEffort?: import('../effort.ts').RoutedEffort;
   prompt: string;
   cwd: string;
   model: string | null;

@@ -1,5 +1,9 @@
 import { DatabaseSync } from 'node:sqlite';
 import { paths } from './paths.ts';
+import { migrationDDL as fleetMigrationDDL } from './pairing.ts';
+import { registryMigrationDDL } from './registry.ts';
+import { tx } from './transaction.ts';
+export { tx } from './transaction.ts';
 
 const MIGRATIONS: string[] = [
   `
@@ -90,6 +94,29 @@ const MIGRATIONS: string[] = [
   CREATE INDEX tasks_project_finished ON tasks(project_id, status, finished_at);
   CREATE INDEX tasks_race ON tasks(race_group);
   `,
+  `
+  ALTER TABLE tasks ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE runs ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;
+  `,
+  fleetMigrationDDL,
+  registryMigrationDDL,
+  `
+  ALTER TABLE tasks ADD COLUMN session_fingerprint TEXT;
+  ALTER TABLE runs ADD COLUMN phase TEXT;
+  ALTER TABLE runs ADD COLUMN effort TEXT;
+  ALTER TABLE runs ADD COLUMN effort_source TEXT;
+  ALTER TABLE runs ADD COLUMN launch_fingerprint TEXT;
+  ALTER TABLE runs ADD COLUMN verdict_sha TEXT;
+  ALTER TABLE runs ADD COLUMN usage_provenance TEXT NOT NULL DEFAULT 'unknown';
+  ALTER TABLE runs ADD COLUMN cache_read_tokens INTEGER;
+  ALTER TABLE runs ADD COLUMN cache_write_tokens INTEGER;
+  ALTER TABLE runs ADD COLUMN usage_seq INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE runs ADD COLUMN accounted_cost REAL NOT NULL DEFAULT 0;
+  ALTER TABLE runs ADD COLUMN accounted_in INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE runs ADD COLUMN accounted_out INTEGER NOT NULL DEFAULT 0;
+  UPDATE runs SET accounted_cost = cost_usd, accounted_in = tokens_in, accounted_out = tokens_out,
+    usage_provenance = CASE WHEN cost_usd > 0 THEN CASE WHEN cost_estimated = 1 THEN 'estimated' ELSE 'actual' END ELSE 'unknown' END;
+  `,
 ];
 
 export type Db = DatabaseSync;
@@ -154,17 +181,4 @@ function migrate(db: Db): void {
     }
     db.prepare("INSERT INTO meta(key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(String(version));
   });
-}
-
-export function tx<T>(db: Db, fn: () => T): T {
-  if (db.isTransaction) return fn();
-  db.exec('BEGIN IMMEDIATE');
-  try {
-    const out = fn();
-    db.exec('COMMIT');
-    return out;
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
-  }
 }

@@ -134,7 +134,7 @@ function hookEntry(): string {
 }
 
 export function hookPlan(agent: 'claude' | 'codex'): { file: string; hooks: Record<string, unknown[]> } {
-  const edit = agent === 'claude' ? 'Edit|Write|MultiEdit|NotebookEdit' : 'Edit|Write';
+  const edit = agent === 'claude' ? 'Edit|Write|MultiEdit|NotebookEdit' : 'Edit|Write|apply_patch|file_change';
   const h = (event: string, timeout: number) => ({ type: 'command', command: hookCommand(event), timeout });
   return {
     file: agent === 'claude' ? join(homedir(), '.claude', 'settings.json') : join(homedir(), '.codex', 'hooks.json'),

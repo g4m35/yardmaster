@@ -5,7 +5,7 @@ import { removeFast } from './fastfs.ts';
 import type { Coordinator } from './coordinator.ts';
 import { paths } from './paths.ts';
 import { git, gitOut, isAncestor, isClean, isLinkedWorktreeOf, listWorktrees, removeWorktree } from './git.ts';
-import { isAlive, killGroup, processStartTime } from './proc.ts';
+import { terminateRecordedProcess } from './proc.ts';
 import { TERMINAL_STATUSES, type Project } from './types.ts';
 import { clip } from './text.ts';
 import { dirBytes, dirOfLogs, findArtifacts, freeGb, gb } from './disk.ts';
@@ -22,6 +22,9 @@ export interface CleanItem {
   projectId?: string;
   /** For branches: the exact commit that was checked, so deletion fails if the branch moved since. */
   sha?: string;
+  taskId?: string;
+  generation?: number;
+  branch?: string | null;
 }
 
 export interface CleanPlan {
@@ -114,7 +117,7 @@ async function planProject(coord: Coordinator, project: Project, plan: CleanPlan
     if (wt.path.endsWith('/_integration')) continue;
     const taskId = wt.path.split('/').pop()!;
     const task = tasks.get(taskId);
-    const item = { kind: 'worktree' as const, target: wt.path, project: project.name, projectId: project.id };
+    const item = { kind: 'worktree' as const, target: wt.path, project: project.name, projectId: project.id, taskId, generation: task?.generation, sha: wt.head ?? undefined, branch: wt.branch };
     if (wt.prunable || !existsSync(wt.path)) continue;
     if (wt.locked) {
       plan.keep.push({ ...item, reason: 'worktree is locked (git worktree lock)' });
@@ -178,7 +181,7 @@ async function planProject(coord: Coordinator, project: Project, plan: CleanPlan
       continue;
     }
     const sha = await gitOut(project.root, ['rev-parse', `refs/heads/${branch}`]);
-    plan.remove.push({ ...item, sha, reason: `merged; task ${task.id} is ${task.status}` });
+    plan.remove.push({ ...item, taskId: task.id, generation: task.generation, sha, reason: `merged; task ${task.id} is ${task.status}` });
   }
 }
 
@@ -198,11 +201,22 @@ export async function runCleanup(coord: Coordinator, plan: CleanPlan): Promise<{
       switch (item.kind) {
         case 'worktree': {
           const root = rootOf(item.projectId);
-          // Re-check right before acting: work may have appeared since the plan was made.
+          const t = item.taskId ? coord.getTask(item.taskId) : null;
+          const current = (await listWorktrees(root)).find((w) => resolve(w.path) === resolve(item.target));
+          const guard = () => {
+            const fresh = item.taskId ? coord.getTask(item.taskId) : null;
+            if (!fresh || fresh.project_id !== item.projectId || fresh.generation !== item.generation || !TERMINAL_STATUSES.includes(fresh.status)) throw new Error('Task ownership/status changed since planning; kept');
+            if (coord.db.prepare("SELECT 1 FROM runs WHERE task_id = ? AND status = 'running' LIMIT 1").get(fresh.id)) throw new Error('An active process still owns this work; kept');
+          };
+          guard();
+          if (!t || !item.sha || !current || current.locked || current.head !== item.sha || current.branch !== item.branch ||
+              !underRoot(item.target, worktreeRootOf(coord.configFor(t.project_id))) || !isLinkedWorktreeOf(item.target, root)) throw new Error('Worktree identity/commit/lock changed since planning; kept');
+          const cfg = coord.configFor(t.project_id);
+          if (!(await isAncestor(root, item.sha, cfg.integration.branch).catch(() => false)) && !(await isAncestor(root, item.sha, coord.getProject(t.project_id)!.base_branch).catch(() => false))) throw new Error('Worktree is no longer merged; kept');
           if (!(await isClean(item.target))) throw new Error('changed since the plan was made; kept');
-          await removeWorktree(root, item.target);
-          const id = item.target.split('/').pop()!;
-          if (coord.getTask(id)) coord.updateTask(id, { worktree: null });
+          await removeWorktree(root, item.target, { expectedHead: item.sha, expectedBranch: item.branch, guard });
+          guard();
+          coord.updateTask(t.id, { worktree: null });
           break;
         }
         case 'prune':
@@ -221,15 +235,19 @@ export async function runCleanup(coord: Coordinator, plan: CleanPlan): Promise<{
         case 'branch': {
           const root = rootOf(item.projectId);
           if (!item.sha) throw new Error('no recorded commit; kept');
+          const task = item.taskId ? coord.getTask(item.taskId) : null;
+          if (!task || task.generation !== item.generation || !TERMINAL_STATUSES.includes(task.status)) throw new Error('Task changed since planning; branch kept');
+          if ((await listWorktrees(root)).some((w) => w.branch === item.target)) throw new Error('Branch is checked out; kept');
           await git(root, ['update-ref', '-d', `refs/heads/${item.target}`, item.sha]);
           break;
         }
         case 'lock':
-          coord.db.prepare('DELETE FROM locks WHERE id = ?').run(item.target);
+          coord.db.prepare('DELETE FROM locks WHERE id = ? AND lease_until <= ?').run(item.target, Date.now());
           break;
         case 'session': {
-          coord.db.prepare('DELETE FROM locks WHERE holder = ?').run(item.target);
-          coord.db.prepare('DELETE FROM sessions WHERE id = ?').run(item.target);
+          if (coord.db.prepare('SELECT 1 FROM sessions WHERE id = ? AND last_seen >= ?').get(item.target, Date.now() - 2 * 3600_000)) throw new Error('Session became active; kept');
+          coord.db.prepare('DELETE FROM locks WHERE holder = ? AND lease_until <= ?').run(item.target, Date.now());
+          coord.db.prepare('DELETE FROM sessions WHERE id = ? AND last_seen < ?').run(item.target, Date.now() - 2 * 3600_000);
           break;
         }
         case 'log':
@@ -258,6 +276,17 @@ function summarize(items: CleanItem[]): string {
  */
 export async function recover(coord: Coordinator, machineId: string, activeTaskIds: Set<string>, opts: { startup?: boolean } = {}): Promise<void> {
   const now = Date.now();
+  // A prior cleanup failure is a hold, not a permanent dead end. Only identity-proven local recovery clears it.
+  const held = coord.db.prepare("SELECT id, task_id, pid, proc_started FROM runs WHERE machine_id = ? AND status = 'cleanup_failed'").all(machineId) as { id: string; task_id: string; pid: number | null; proc_started: number | null }[];
+  for (const run of held) {
+    if (activeTaskIds.has(run.task_id) || !run.pid) continue;
+    const result = await terminateRecordedProcess({ pid: run.pid, startedAt: run.proc_started });
+    if (result.status === 'exited' || result.status === 'terminated') {
+      coord.updateRun(run.id, { status: 'stopped', pid: null, proc_started: null, phase: null, ended_at: Date.now(), stop_reason: 'process recovery confirmed group exit' });
+      const task = coord.getTask(run.task_id);
+      if (task?.status === 'needs_human') coord.updateTask(task.id, { attention: 'Process exit is now confirmed. Your work is preserved; retry when ready.' });
+    }
+  }
   if (opts.startup) {
     // A merge in flight when the hub stopped: put it back in the queue; the integrator rolls the worktree back.
     for (const t of coord.listTasks(null, ['merging'])) coord.updateTask(t.id, { status: 'ready' });
@@ -276,12 +305,20 @@ export async function recover(coord: Coordinator, machineId: string, activeTaskI
       const orphanRun = run && run.status === 'running' && run.machine_id === machineId;
       // No live runner in this process owns it: either an earlier hub process died, or a claim never started.
       if (!orphanRun && !(t.lease_until && t.lease_until < now)) continue;
-      if (orphanRun && run.pid && isAlive(run.pid)) {
-        // Kill only when we can prove the pid is still our agent (pid + start time); recycled pids are left alone.
-        const started = await processStartTime(run.pid);
-        if (run.proc_started && started && Math.abs(started - run.proc_started) < 2000) killGroup(run.pid, 'SIGTERM');
+      let uncertain = '';
+      for (const owned of coord.runsFor(t.id).filter((r) => r.status === 'running' && r.machine_id === machineId && r.generation === t.generation)) {
+        const result = owned.pid ? await terminateRecordedProcess({ pid: owned.pid, startedAt: owned.proc_started }) : { status: 'unverified', reason: 'No recorded process identity.' };
+        if (!['exited', 'terminated'].includes(result.status)) {
+          uncertain = result.reason ?? 'Could not prove that the old process stopped.';
+          coord.updateRun(owned.id, { status: 'cleanup_failed', stop_reason: uncertain });
+        } else coord.updateRun(owned.id, { status: 'lost', ended_at: Date.now(), stop_reason: 'hub restarted; process group exit confirmed' });
       }
-      if (orphanRun) coord.updateRun(run.id, { status: 'lost', ended_at: now, stop_reason: 'hub restarted' });
+      const fresh = coord.getTask(t.id);
+      if (!fresh || fresh.generation !== t.generation || fresh.assignee !== t.assignee || !['running', 'verifying'].includes(fresh.status)) continue;
+      if (uncertain) {
+        coord.updateTask(t.id, { status: 'needs_human', attention: `Process recovery is unverified: ${uncertain} Work is preserved and held; inspect the recorded process before retrying.`, lease_until: null });
+        continue;
+      }
       coord.updateTask(t.id, { status: 'queued', assignee: null, machine_id: null, lease_until: null, attempts: Math.max(0, t.attempts - 1) });
       coord.event(t.project_id, t.id, 'warn', 'task.recovered', `Recovered "${t.title}" after a restart; it will continue from its saved worktree.`);
       continue;

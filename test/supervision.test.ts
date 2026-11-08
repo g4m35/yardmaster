@@ -58,7 +58,7 @@ test('a stale attempt cannot write over a newer one', async () => {
   const s = await startHub({}, {}, { autostart: false });
   const [t] = s.add([{ title: 'Refactor the logger', prompt: 'x', agent: 'mock' }]);
   const claim = s.hub.coord.claimNext({ machineId: 'm-laptop', agents: ['mock'], repos: { [s.project.id]: s.repo }, runningByAgent: {} })!;
-  const owner = { attempt: claim.task.attempts, assignee: claim.task.assignee! };
+  const owner = { generation: claim.task.generation, attempt: claim.task.attempts, assignee: claim.task.assignee! };
   // The laptop goes to sleep; its lease expires and another machine takes the task.
   s.hub.coord.updateTask(t!.id, { status: 'queued', assignee: null, machine_id: null, lease_until: null, attempts: 0 });
   s.hub.coord.claimNext({ machineId: 'm-desktop', agents: ['mock'], repos: { [s.project.id]: s.repo }, runningByAgent: {} });
@@ -179,7 +179,8 @@ test('cleanup trims build output from kept worktrees but never their real work',
 test('hardening: run columns are whitelisted, ids validated, dangerous pids refused', async () => {
   const s = await startHub({}, {}, { autostart: false });
   const [t] = s.add([{ title: 'Some task here', prompt: 'x', agent: 'mock' }]);
-  const run = s.hub.coord.startRun(t!, 'm', 'mock', null, '/tmp/x');
+  const claim = s.hub.coord.claimNext({ machineId: 'm', agents: ['mock'], repos: { [s.project.id]: s.repo }, runningByAgent: {} })!;
+  const run = s.hub.coord.startRun(claim.task, 'm', 'mock', null, '/tmp/x');
   assert.throws(() => s.hub.coord.updateRun(run.id, { ['status = 1, pid' as 'pid']: 1 }), /Cannot update run column/);
   assert.throws(() => activityLogPath('../../etc/passwd'), /bad run id/);
   assert.equal(killGroup(1), false);
