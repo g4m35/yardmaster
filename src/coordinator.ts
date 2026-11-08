@@ -27,7 +27,7 @@ import { writeFileSync } from 'node:fs';
 import { paths } from './paths.ts';
 import type { TerminateResult } from './proc.ts';
 import type { UsageSnapshot } from './usage.ts';
-import { utilitiesStopped, utilities, recordUtility, runUtilityKey, forgetStoppedUtilities, taskHasPendingUtilities } from './utility-records.ts';
+import { utilitiesStopped, utilities, recordUtility, runUtilityKey, forgetStoppedUtilities, taskHasPendingUtilities, PENDING_UTILITY_SQL } from './utility-records.ts';
 import { attachRun, createAllowanceReader, describeBudgetHold, enforcementFor, listHeld, observedSpendUsd, readAllowance, recordUsageDelta, release, requireHeld, reserve, type AllowanceQuery, type Reservation } from './budgets.ts';
 
 type Row = Record<string, unknown>;
@@ -114,6 +114,8 @@ const OPEN_STATUSES: TaskStatus[] = TASK_STATUSES.filter((s: TaskStatus) => !TER
 export class Coordinator {
   readonly db: Db;
   private readonly processHoldQuery: ReturnType<Db['prepare']>;
+  private taskByIdQuery?: ReturnType<Db['prepare']>;
+  private latestImplementationRunQuery?: ReturnType<Db['prepare']>;
   private readonly configCache = new Map<string, { at: number; cfg: Config }>();
   /** Import graphs per project, refreshed by the hub in the background (see Hub.refreshGraphs). */
   readonly graphs = new Map<string, ImportGraph>();
@@ -123,9 +125,7 @@ export class Coordinator {
     this.db = db;
     this.processHoldQuery = db.prepare(`SELECT CASE WHEN r.status = 'cleanup_failed' THEN 'process' ELSE 'utility' END AS kind
       FROM runs r LEFT JOIN meta m ON m.key = 'utility:run:' || r.id WHERE r.task_id = ? AND
-      (r.status = 'cleanup_failed' OR (m.key IS NOT NULL AND (NOT json_valid(m.value) OR EXISTS (
-        SELECT 1 FROM json_each(CASE WHEN json_valid(m.value) THEN m.value ELSE '[]' END) child
-        WHERE COALESCE(json_extract(child.value, '$.state'), 'unknown') <> 'exited'))))
+      (r.status = 'cleanup_failed' OR (m.key IS NOT NULL AND ${PENDING_UTILITY_SQL}))
       ORDER BY r.status = 'cleanup_failed' DESC LIMIT 1`);
   }
 
@@ -368,7 +368,8 @@ export class Coordinator {
   }
 
   getTask(id: string): Task | null {
-    const r = this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as Row | undefined;
+    const query = this.taskByIdQuery ??= this.db.prepare('SELECT * FROM tasks WHERE id = ?');
+    const r = query.get(id) as Row | undefined;
     return r ? toTask(r) : null;
   }
 
@@ -943,10 +944,16 @@ export class Coordinator {
         return; // An acknowledged exit is replay-safe.
       }
       const matchedNoLaunch = noLaunchPhase !== undefined && run.pid === null && run.phase === noLaunchPhase && !noLaunchPhase.endsWith(':spawning');
-      if (noLaunchPhase !== undefined && !matchedNoLaunch) throw new Error('No-launch phase does not match this recorded run.');
+      // The model phase can already have acknowledged exit before a later utility is orphaned.
+      // Its released reservation is durable evidence of that earlier acknowledgment; every utility
+      // must still confirm exit above, and a recorded/spawning main child can never take this path.
+      const phaseAlreadyExited = !held && run.status === 'cleanup_failed' && run.pid === null && !run.phase?.endsWith(':spawning') &&
+        this.getMeta(`recovery:${runId}`) === 'remote_lease_expired' &&
+        !!this.db.prepare("SELECT 1 FROM budget_reservations WHERE run_id = ? AND state = 'released'").get(runId);
+      if (noLaunchPhase !== undefined && !matchedNoLaunch && !phaseAlreadyExited) throw new Error('No-launch phase does not match this recorded run.');
       const matchedProcess = process !== undefined && run.pid === process.pid && run.proc_started !== null && run.proc_started === process.startedAt;
       if (process && !matchedProcess) throw new Error('Exit process identity does not match this recorded run.');
-      if (run.status === 'cleanup_failed' && !matchedProcess && !matchedNoLaunch) throw new Error('Process cleanup failed; identity-proven recovery must confirm exit before releasing its budget.');
+      if (run.status === 'cleanup_failed' && !matchedProcess && !matchedNoLaunch && !phaseAlreadyExited) throw new Error('Process cleanup failed; identity-proven recovery must confirm exit before releasing its budget.');
       const remoteRecovery = run.status === 'cleanup_failed' && this.getMeta(`recovery:${run.id}`) === 'remote_lease_expired';
       if (['running', 'lost', 'cleanup_failed'].includes(run.status)) this.updateRun(run.id, { status: 'stopped', ended_at: Date.now(), phase: null, pid: null, proc_started: null });
       if (held) release(this.db, held.id, { kind: 'exited', runId });
@@ -1135,7 +1142,8 @@ export class Coordinator {
   }
 
   private latestRunUncached(taskId: string): Run | null {
-    const r = this.db.prepare("SELECT * FROM runs WHERE task_id = ? AND role = 'implement' ORDER BY started_at DESC, rowid DESC LIMIT 1").get(taskId) as Row | undefined;
+    const query = this.latestImplementationRunQuery ??= this.db.prepare("SELECT * FROM runs WHERE task_id = ? AND role = 'implement' ORDER BY started_at DESC, rowid DESC LIMIT 1");
+    const r = query.get(taskId) as Row | undefined;
     return r ? toRun(r) : null;
   }
 

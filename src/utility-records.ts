@@ -14,6 +14,10 @@ export type UtilityOperation =
   | { action: 'exit'; token: string; pid: number | null; startedAt: number | null; reaped: boolean };
 export const runUtilityKey = (runId: string) => `utility:run:${runId}`;
 export const integrationUtilityKey = (projectId: string) => `utility:integration:${projectId}`;
+/** Shared fail-closed predicate for a utility scope stored in meta under alias m. */
+export const PENDING_UTILITY_SQL = `(NOT json_valid(m.value) OR EXISTS (
+  SELECT 1 FROM json_each(CASE WHEN json_valid(m.value) THEN m.value ELSE '[]' END) child
+  WHERE COALESCE(json_extract(child.value, '$.state'), 'unknown') <> 'exited'))`;
 
 export function utilities(db: Db, key: string): UtilityRecord[] {
   const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as { value: string } | undefined;
@@ -24,9 +28,7 @@ export function utilitiesStopped(db: Db, key: string): boolean {
 }
 export function taskHasPendingUtilities(db: Db, taskId: string): boolean {
   return !!db.prepare(`SELECT 1 FROM runs r JOIN meta m ON m.key = 'utility:run:' || r.id
-    WHERE r.task_id = ? AND (NOT json_valid(m.value) OR EXISTS (
-      SELECT 1 FROM json_each(CASE WHEN json_valid(m.value) THEN m.value ELSE '[]' END) child
-      WHERE COALESCE(json_extract(child.value, '$.state'), 'unknown') <> 'exited')) LIMIT 1`).get(taskId);
+    WHERE r.task_id = ? AND ${PENDING_UTILITY_SQL} LIMIT 1`).get(taskId);
 }
 /** Exited tokens remain tombstones until the scope closes, so late PID registration cannot resurrect one. */
 export function applyUtilityOperation(previous: UtilityRecord[], op: UtilityOperation): UtilityRecord[] {

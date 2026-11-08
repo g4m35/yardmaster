@@ -1,6 +1,38 @@
 # Performance
 
-# Current local stress check
+## Current baseline comparison
+
+The dedicated [GitHub Actions run for `8213a76`](https://github.com/g4m35/yardmaster/actions/runs/42528394612) measured a regression against `028cc2a080f7962256d5feea2b93a79f4f17ab61`. The runner used Node 24.22.2, Linux x64, four logical CPUs and 16 GiB RAM. Its merge checkout `65a1e95` and PR head had the same runtime source tree (`c3778ff0638b8a907e385a9bf6abcf509243154e`); the downloaded artifact digest was verified.
+
+| Operation | Baseline | `8213a76` | Change |
+| --- | ---: | ---: | ---: |
+| Claim pass, no matching agent | 103.40 ms | 113.15 ms | +9.4% |
+| Board read | 121.55 ms | 139.55 ms | +14.8% |
+| Individual blockers outside a shared pass | 686.25 ms | 736.25 ms | +7.3% |
+
+Each entry is the median across four separate processes per revision, interleaved in alternating order. Every process seeds the same 1,000 tasks with 30 marked running, then performs one warmup and five timed calls per operation. The observed CPU idle fraction before each process was at least 96.4%. This isolates the comparison from the loaded-host measurements below; it does not promise these absolute times on another machine. The previous two dedicated runs also found slower claim/board reads (roughly 12–17%), so the regression is not dismissed as noise.
+
+End-of-process median RSS was 412.6 MiB for the baseline and 426.0 MiB for `8213a76` (+13.4 MiB, +3.2%); peak RSS had the same medians. This includes fixture construction and all three operations, and does not isolate memory by feature. The fixture contains no usage-ledger history, actual run rows, attached budget holds, provider/network calls, HTTP or browser rendering. It cannot establish scaling with a large ledger or many held runs, provider savings, or real-agent end-to-end latency.
+
+Reproduce the committed comparison harness from a clean candidate checkout after installing dependencies, with the baseline object fetched:
+
+```sh
+node bench/compare.mjs 028cc2a080f7962256d5feea2b93a79f4f17ab61 > performance.json
+```
+
+The command measures the checked-out candidate source and loads baseline modules from Git in memory. It records source revisions, CPU idle/load, all paired results, RSS and fixture-removal proof. The CI `performance` job runs this command against the PR base; it records results without enforcing a numerical threshold. The digest/source binding and raw eight-process results for the table are retained in `outputs/hillclimb-2026-11-07/ci-performance-8213-binding.json` and `ci-performance-8213/performance.json`.
+
+## Scheduler profiling and statement reuse
+
+CPU profiles of both immutable revisions on macOS arm64 / Node 24.22.2 identified SQLite statement preparation and task decoding as major costs. Across five board reads at `8213a76`, sampled self time in statement preparation was about 137 ms: 70.5 ms below `latestRunUncached` and 66.5 ms below `getTask` through `activeScopes`. Instrumented calls confirmed 1,000 latest-run preparations and 970 task-by-ID preparations per board read on both revisions. Expanded task/run schemas make repeated `SELECT *` preparation a plausible contributor to the newer revision's cost, but these profiles do not allocate the exact Linux regression among schema growth, recovery checks, budgeting and other changes.
+
+Four interleaved diagnostic triplets kept the original fixture and warmup/sample counts. Reusing only the two exact lookup statements reduced claim/board medians from 55.49/65.56 ms to 38.66/33.84 ms; individual blockers changed from 353.86 to 344.83 ms. Omitting the recovery-hold query only for diagnosis changed board reads to 60.56 ms and had smaller, inconsistent effects elsewhere. That unsafe omission is not a product change. These were busy-host measurements (CPU idle samples 44.8–74.8%), so their role is causal diagnosis, not quiet-runner certification or a precise accounting of the earlier regression.
+
+`getTask` and `latestRunUncached` now lazily retain those two prepared statements per coordinator. Every lookup still executes `.get()` with its current task ID; query text, run-role filter and timestamp/rowid ordering are unchanged. This removes repeated compilation while retaining fresh results, and keeps recovery/admission rights independent of display caches. Tests cover no-row warmup, different IDs, same-connection updates, external commits, savepoint rollback and equal-time run ordering. The resource tradeoff is two retained SQLite statements per coordinator, released with its database; no memory reduction is claimed. Quiet-CI qualification of this optimization is pending.
+
+A subsequent four-pair comparison loaded all candidate source bytes once into memory, including statement reuse and the concurrent recovery fix, and verified those bytes were unchanged at completion. Against the original baseline, claim/board medians were 42.63/34.83 ms versus 60.34/57.45 ms (0.71×/0.61×). Individual blockers were 344.02 versus 366.05 ms (0.94×), with two pairs slower and two faster. CPU idle samples were 44.7–71.1%, with substantial absolute variation. This supports the bounded optimization and does not supersede quiet-CI regression evidence or establish a production no-regression result. The complete source SHA-256 manifest, paired values, conditions and fixture-removal records are in `outputs/hillclimb-2026-11-07/optimized-baseline-comparison.json`; diagnostic scripts, profiles and raw ablations are adjacent. A fresh dedicated-runner comparison is required before accepting a quiet-load performance claim for this source.
+
+## Local stress check
 
 Run `node scripts/benchmark.ts` from a source checkout on Node 24. It creates and removes a disposable home/repository, seeds 1,000 tasks and 10,000 events, warms each operation five times, and measures 100 samples without provider calls. No personal hub is connected. Admission samples explicitly release their unattached allowance because no child is launched.
 
@@ -13,11 +45,11 @@ On macOS arm64, Node 24.22.2, during concurrent test/agent activity on 2026-11-0
 | Last 100 events | 0.14 ms | 0.41 ms |
 | Queue admission | 26.4 ms | 41.5 ms |
 
-End-of-run RSS was 245 MiB. These are in-process API dispatch measurements, excluding HTTP, browser rendering, provider latency and cold startup. There is no measured baseline comparison or cross-machine performance guarantee. Raw measurement is retained in the hillclimb evidence; rerun on the target machine for a meaningful comparison.
+End-of-run RSS was 245 MiB. These are in-process API dispatch measurements, excluding HTTP, browser rendering, provider latency and cold startup. This separate API stress run has no paired baseline; the scheduler comparison above uses a different fixture. Neither establishes a cross-machine performance guarantee. Raw measurement is retained in the hillclimb evidence; rerun on the target machine for a meaningful comparison.
 
 Registry history and passive machine/session inventories are bounded; live runs remain visible. SSE refreshes coalesce and serialize. Cleanup removes up to 1,000 expired project events per pass, using `cleanup.eventRetentionDays` (30 by default, `null` to retain indefinitely). Unfinished and process-held task evidence survives retention and stale cleanup plans. Accepted artifact refs are pruned only after terminal integration, ancestry validation and compare-and-delete; unmerged artifacts remain reachable.
 
-# Historical measurements
+## Historical measurements
 
 These earlier measurements are retained for context and have not been requalified by the current hillclimb. The current stress check above has a different dataset and load; it is not a direct regression comparison.
 

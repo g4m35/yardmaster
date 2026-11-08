@@ -6,7 +6,7 @@ import { LEASE_MS, type Coordinator } from './coordinator.ts';
 import { paths } from './paths.ts';
 import { git, gitOut, isAncestor, isClean, isLinkedWorktreeOf, listWorktrees, removeWorktree } from './git.ts';
 import { isAlive, processStartTime, terminateRecordedProcess } from './proc.ts';
-import { recoverUtilities, runUtilityKey, taskHasPendingUtilities, utilitiesStopped } from './utility-records.ts';
+import { recoverUtilities, runUtilityKey, taskHasPendingUtilities, utilitiesStopped, PENDING_UTILITY_SQL } from './utility-records.ts';
 import { tx } from './transaction.ts';
 import type { Run } from './types.ts';
 import type { TerminateResult } from './proc.ts';
@@ -401,11 +401,12 @@ export async function recover(coord: Coordinator, machineId: string, activeTaskI
   // A terminal result can precede run.exit. Attached allowance is unresolved until exit proof, in any task state.
   // Start from the indexed held rows instead of probing a reservation once per historical run.
   const held = coord.db.prepare(`SELECT id FROM runs WHERE machine_id = ? AND status = 'cleanup_failed' AND role <> 'plan'
-    UNION SELECT r.id FROM budget_reservations b JOIN runs r ON r.id = b.run_id WHERE b.state = 'held' AND r.role <> 'plan'`)
+    UNION SELECT r.id FROM budget_reservations b JOIN runs r ON r.id = b.run_id WHERE b.state = 'held' AND r.role <> 'plan'
+    UNION SELECT substr(m.key, 13) FROM meta m WHERE m.key GLOB 'utility:run:*' AND ${PENDING_UTILITY_SQL}`)
     .all(machineId) as { id: string }[];
   for (const candidate of held) {
     const run = coord.getRun(candidate.id);
-    if (!run) continue;
+    if (!run || run.role === 'plan') continue;
     const task = coord.getTask(run.task_id);
     // Current claims must recover and requeue together below; clearing their hold here could hide the orphan.
     if (task?.generation === run.generation && task.machine_id === run.machine_id && ['running', 'verifying'].includes(task.status)) continue;
@@ -417,11 +418,12 @@ export async function recover(coord: Coordinator, machineId: string, activeTaskI
       if (now - lastActivity <= LEASE_MS) continue;
       tx(coord.db, () => {
         const fresh = coord.getRun(run.id);
-        if (!fresh || fresh.machine_id !== run.machine_id || fresh.generation !== run.generation ||
-            !coord.db.prepare("SELECT 1 FROM budget_reservations WHERE run_id = ? AND state = 'held'").get(run.id)) return;
+        if (!fresh || fresh.machine_id !== run.machine_id || fresh.generation !== run.generation) return;
+        const allowanceHeld = coord.db.prepare("SELECT 1 FROM budget_reservations WHERE run_id = ? AND state = 'held'").get(run.id);
+        if (!allowanceHeld && utilitiesStopped(coord.db, runUtilityKey(run.id))) return;
         if (fresh.status === 'cleanup_failed' && coord.getMeta(`recovery:${run.id}`) === 'remote_lease_expired') return;
         coord.setMeta(`recovery:${run.id}`, 'remote_lease_expired');
-        coord.updateRun(run.id, { status: 'cleanup_failed', stop_reason: 'Remote exit acknowledgement is missing; the worker or owner must confirm process exit before releasing budget.' });
+        coord.updateRun(run.id, { status: 'cleanup_failed', stop_reason: 'Remote exit acknowledgement is missing; the worker or owner must confirm process exit before releasing held resources.' });
       });
       continue; // A remote PID or idle phase never authorizes local signaling or release.
     }

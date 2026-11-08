@@ -1,5 +1,5 @@
 import type { Db } from './db.ts';
-import { utilities, runUtilityKey, type UtilityRecord } from './utility-records.ts';
+import { utilities, runUtilityKey, PENDING_UTILITY_SQL, type UtilityRecord } from './utility-records.ts';
 
 /** Append alongside pairing.migrationDDL in the versioned migration list, never on a registry read. */
 export const registryMigrationDDL = `
@@ -116,7 +116,7 @@ export function buildRegistry(db: Db, options: {
   const filter = projectId === null ? '' : ' AND COALESCE(t.project_id, p.id) = ?';
   const args = projectId === null ? [] : [projectId];
   // Enumerate indexed status/utility owners once, rather than probing metadata for every historical run.
-  const currentIds = `SELECT id FROM runs WHERE status IN ('running','lost','cleanup_failed') UNION SELECT substr(m.key, 13) FROM meta m WHERE m.key GLOB 'utility:run:*' AND (NOT json_valid(m.value) OR EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(m.value) THEN m.value ELSE '[]' END) child WHERE COALESCE(json_extract(child.value, '$.state'), 'unknown') <> 'exited'))`;
+  const currentIds = `SELECT id FROM runs WHERE status IN ('running','lost','cleanup_failed') UNION SELECT substr(m.key, 13) FROM meta m WHERE m.key GLOB 'utility:run:*' AND ${PENDING_UTILITY_SQL}`;
   const currentRun = `r.id IN (${currentIds})`;
   const live = db.prepare(`${RUN_COLUMNS} WHERE ${currentRun}${filter} ORDER BY r.started_at DESC, r.id`)
     .all(...args) as unknown as RunRow[];
