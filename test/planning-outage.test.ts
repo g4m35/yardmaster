@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { chmodSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { buildMethods, localClient, type Client } from '../src/api.ts';
 import { listHeld, readAllowance } from '../src/budgets.ts';
@@ -101,6 +101,7 @@ for (const outage of ['final-unavailable', 'usage-ack-lost', 'finish-ack-lost'] 
   let client = clientFor(coord);
   let finalCalls = 0;
   let finishCalls = 0;
+  let spawnCalls = 0;
   let networkRestored = false;
   writeFileSync(join(box.home, 'machine-id'), 'm1\n');
   let child: ChildProcess | undefined;
@@ -111,6 +112,7 @@ for (const outage of ['final-unavailable', 'usage-ack-lost', 'finish-ack-lost'] 
       const parsed = JSON.parse(body);
       const method = standard ? req.url!.slice('/api/rpc/'.length) : parsed.method;
       const params = standard ? parsed : parsed.params;
+      if (method === 'plan.spawn') spawnCalls++;
       if (method === 'plan.usage') {
         const file = join(box.home, 'planning-receipts', receipts(box.home)[0]!);
         const durable = JSON.parse(readFileSync(file, 'utf8'));
@@ -137,6 +139,9 @@ for (const outage of ['final-unavailable', 'usage-ack-lost', 'finish-ack-lost'] 
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const address = server.address(); assert.ok(address && typeof address === 'object');
   const endpoint = `http://127.0.0.1:${address.port}`;
+  const slowPs = join(box.root, 'slow-identity-bin'); mkdirSync(slowPs);
+  writeFileSync(join(slowPs, 'ps'), '#!/bin/sh\n/bin/sleep 0.2\nexec /bin/ps "$@"\n');
+  chmodSync(join(slowPs, 'ps'), 0o755);
   const planner = join(box.root, 'agent.mjs');
   writeFileSync(planner, `for await(const c of process.stdin){}; console.log(JSON.stringify({type:'usage',costUsd:.3,tokensIn:30,tokensOut:3,cumulative:false})); console.log(JSON.stringify({type:'result',ok:true,text:JSON.stringify({tasks:[{title:'One task',prompt:'Implement one bounded task'}]})}));`);
   const source = (name: string) => pathToFileURL(join(import.meta.dirname, '../src', name)).href;
@@ -147,9 +152,11 @@ registerAdapter({name:'outage-fixture',label:'fixture',binary:process.execPath,b
 const client=new Proxy({}, {get:(_,method)=>async params=>{const r=await fetch(${JSON.stringify(endpoint)},{method:'POST',body:JSON.stringify({method,params})});const b=await r.json();if(b.error)throw new Error(b.error);return b.value;}});
 try {await planGoalManaged('goal',{cwd:${JSON.stringify(box.repo)},agent:'outage-fixture',config:loadConfig(${JSON.stringify(box.repo)}),client,hub:${JSON.stringify(endpoint)},projectId:${JSON.stringify(project.id)},machineId:'m1'});process.exitCode=2;}catch(e){if(!/unavailable|acknowledgment lost/.test(String(e)))throw e;}`);
   try {
-    child = spawn(process.execPath, [cli], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env } });
+    child = spawn(process.execPath, [cli], { stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, PATH: slowPs + delimiter + process.env.PATH } });
     let stderr = ''; child.stderr!.on('data', data => { stderr += data; });
     const [code] = await once(child, 'exit'); assert.equal(code, 0, stderr);
+    assert.equal(spawnCalls, 1, 'even a fast planner must register before receiving its prompt');
     assert.equal(finalCalls, 1);
     assert.equal(finishCalls, outage === 'finish-ack-lost' ? 1 : 0);
     assert.equal(receipts(box.home).length, 1, 'unacknowledged completion must remain durable');

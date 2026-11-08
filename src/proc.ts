@@ -257,7 +257,7 @@ export interface OwnedRunOptions {
   cwd: string;
   env: NodeJS.ProcessEnv;
   shell?: boolean;
-  /** Written to stdin, which is then closed. Without it stdin is ignored. */
+  /** Written after onSpawn registration succeeds, then closed. Without it stdin is ignored. */
   stdin?: string;
   signal?: AbortSignal;
   timeoutMs?: number;
@@ -399,7 +399,6 @@ export function startOwnedProcess(command: string, args: readonly string[], opts
     if (c.stdin) {
       // EPIPE when the child exits without reading: its exit status decides the outcome, not the write.
       c.stdin.on('error', () => undefined);
-      c.stdin.end(opts.stdin);
     }
     const pid = c.pid ?? null;
     if (pid === null) {
@@ -434,6 +433,13 @@ export function startOwnedProcess(command: string, args: readonly string[], opts
           timers.delete(hookTimer);
         }
       }
+    }
+
+    // Fast prompt-driven clients must not finish before their identity/owner record is durable. Keep stdin open
+    // during registration; no prompt is sent after a rejected, timed-out or canceled hook begins stopping the child.
+    if (c.stdin) {
+      if (stopEnd) c.stdin.destroy();
+      else c.stdin.end(opts.stdin);
     }
 
     await settled;
