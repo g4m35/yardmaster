@@ -1,0 +1,25 @@
+{
+  "checks": [
+    "project picker appears for two real registered projects",
+    "project repo hides the other project tasks",
+    "project documentation hides the other project tasks",
+    "native dialog contains Tab 0",
+    "native dialog contains Tab 1",
+    "native dialog contains Tab 2",
+    "native dialog contains Tab 3",
+    "native dialog contains Tab 4",
+    "native dialog contains Tab 5",
+    "native dialog contains Tab 6",
+    "native dialog contains Tab 7",
+    "native dialog contains Tab 8",
+    "native dialog contains Tab 9",
+    "Escape restores the originating Inspect control",
+    "real Hub fits 390px without horizontal overflow",
+    "accessibility tree exposes app heading and a named project selector"
+  ],
+  "errors": [],
+  "transport": "real isolated Hub HTTP via ephemeral cloud tunnel",
+  "browser": "Browserbase cloud",
+  "sourceHead": "4b4a765 plus round4 working diff",
+  "phase": "populated"
+}

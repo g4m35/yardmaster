@@ -7,7 +7,7 @@ import { sandbox } from './helpers.ts';
 import { Coordinator } from '../src/coordinator.ts';
 import { openDb } from '../src/db.ts';
 import { buildMethods, localClient } from '../src/api.ts';
-import { runUtilityKey, utilities, taskHasPendingUtilities } from '../src/utility-records.ts';
+import { runUtilityKey, utilities, taskHasPendingUtilities, recordUtility } from '../src/utility-records.ts';
 import { processStartTime, terminateOwnedGroup, groupAlive } from '../src/proc.ts';
 import { recover } from '../src/janitor.ts';
 
@@ -37,6 +37,23 @@ test('concurrent utility tokens gate exit and late registration cannot resurrect
     await exit(); await exit();
     assert.equal(s.coord.getMeta(runUtilityKey(s.run.id)), null);
     await assert.rejects(s.utility({ action: 'spawn', token: 'a', pid: 424242, startedAt: 100 }), /live spawn intent/);
+  } finally { s.coord.db.close(); }
+});
+
+test('scheduling holds remain fresh across direct journal writes and savepoint rollback within one pass', async () => {
+  const s = await fixture();
+  try {
+    s.coord.pass(() => {
+      assert.doesNotMatch(s.coord.blocker(s.task) ?? '', /utility|process.*recovery/);
+      s.coord.db.exec('SAVEPOINT child');
+      recordUtility(s.coord.db, runUtilityKey(s.run.id), { action: 'intent', token: 'rollback', command: 'git' });
+      assert.match(s.coord.blocker(s.task)!, /utility/);
+      s.coord.db.exec('ROLLBACK TO child');
+      assert.doesNotMatch(s.coord.blocker(s.task) ?? '', /utility|process.*recovery/);
+      s.coord.db.exec('RELEASE child');
+      s.coord.updateRun(s.run.id, { status: 'cleanup_failed' });
+      assert.match(s.coord.blocker(s.task)!, /process.*recovery/);
+    });
   } finally { s.coord.db.close(); }
 });
 

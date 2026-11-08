@@ -1,4 +1,5 @@
 import type { Db } from './db.ts';
+import { utilities, runUtilityKey, type UtilityRecord } from './utility-records.ts';
 
 /** Append alongside pairing.migrationDDL in the versioned migration list, never on a registry read. */
 export const registryMigrationDDL = `
@@ -22,6 +23,9 @@ export interface RegistryEntry {
   effortSource?: string | null;
   launchFingerprint?: string | null;
   usage?: { costUsd: number; tokensIn: number; tokensOut: number; provenance: string };
+  /** Persisted ownership records, not a claim of current OS liveness. */
+  utilityChildren?: UtilityRecord[];
+  utilityChildrenTruncated?: boolean;
   cache: { readTokens: number | null; writeTokens: number | null };
   machineId: string | null;
   machineName: string | null;
@@ -150,9 +154,11 @@ export function buildRegistry(db: Db, options: {
       (r.task_status === 'ready' || (r.task_lease !== null && r.task_lease > now)));
     const pid = number(r.pid);
     const processStartedAt = number(r.proc_started);
+    const children = utilities(db, runUtilityKey(r.id)).filter(child => child.state !== 'exited');
     entries.push({ id: `run:${r.id}`, source: 'run', state: active && (!current || f.freshness !== 'fresh') ? 'stale' : 'managed',
       agent: text(r.agent), model: text(r.model), role: text(r.role), phase: text(r.phase), effort: text(r.effort),
       effortSource: text(r.effort_source), launchFingerprint: text(r.launch_fingerprint),
+      utilityChildren: children.slice(0, 50), utilityChildrenTruncated: children.length > 50,
       usage: { costUsd: r.cost_usd, tokensIn: r.tokens_in, tokensOut: r.tokens_out, provenance: r.usage_provenance },
       cache: { readTokens: number(r.cache_read_tokens), writeTokens: number(r.cache_write_tokens) }, ...base(r.machine_id), projectId: r.project_id,
       taskId: planning ? null : r.task_id, runId: r.id, sessionId: null, generation: number(r.generation),

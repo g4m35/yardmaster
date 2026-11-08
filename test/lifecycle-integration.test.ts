@@ -25,6 +25,41 @@ async function fixture(config: Record<string, unknown> = {}, prompt = '@mock wri
   return { ...box, db, hub, project, task, claim, ctx };
 }
 
+for (const phase of ['prepare', 'collect', 'verify', 'review_wait']) {
+  for (const action of ['stop', 'redirect', 'stop-pause', 'cancel'] as const) test(`${action} at the first ${phase} utility stays an ordinary owner control`, async () => {
+    const s = await fixture({ review: { mode: 'always', reviewers: ['mock'], crossFamily: false } });
+    let fired = false;
+    const api = new Proxy(s.hub.client, { get(target, key: keyof Client) {
+      if (key !== 'run.utility') return target[key];
+      return async (p: Parameters<Client['run.utility']>[0]) => {
+        if (!fired && p.operation.action === 'intent' && s.hub.coord.getRun(p.runId)?.phase === phase) {
+          fired = true;
+          if (action === 'stop-pause') s.hub.coord.updateTask(s.task.id, { control: 'stop-pause' });
+          else s.hub.coord.control(s.task.id, action, 'test', action === 'redirect' ? 'GUIDE99 preserve the result' : undefined);
+        }
+        return target['run.utility'](p);
+      };
+    } });
+    try {
+      const outcome = await runAttempt({ ...s.ctx, api });
+      assert.equal(fired, true, `the ${phase} registration boundary must be exercised`);
+      assert.equal(outcome.status, action === 'cancel' ? 'canceled' : action === 'stop' ? 'needs_human' : 'queued');
+      assert.equal(s.hub.coord.runsFor(s.task.id).some(run => ['cleanup_failed', 'running'].includes(run.status)), false);
+      const final = s.hub.coord.getTask(s.task.id)!;
+      if (action === 'stop') assert.equal(final.attention, 'Stopped on request.');
+      if (action === 'stop-pause') assert.equal(final.attempts, s.ctx.task.attempts - 1);
+      if (action === 'redirect') {
+        assert.match(final.retry_note!, /GUIDE99/);
+        const claim = s.hub.coord.claimNext({ machineId: 'm-fixture', agents: ['mock'], repos: { [s.project.id]: s.repo }, runningByAgent: {} });
+        assert.ok(claim, s.hub.coord.blocker(final) ?? 'must reclaim redirected work');
+        assert.equal((await runAttempt({ ...s.ctx, task: claim.task, api: s.hub.client })).status, 'ready');
+        await s.hub.integrator.step(s.project.id);
+        assert.equal(s.hub.coord.getTask(s.task.id)!.status, 'done');
+      }
+    } finally { s.db.close(); }
+  });
+}
+
 test('PID registration rejection reaps the coding process and closes the attempt naturally', async () => {
   const s = await fixture({}, '@mock sleep 10000\n@mock write late.txt forbidden');
   let pid = 0;

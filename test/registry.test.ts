@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { openDb } from '../src/db.ts';
 import { buildRegistry, registryMigrationDDL } from '../src/registry.ts';
+import { recordUtility, runUtilityKey } from '../src/utility-records.ts';
 
 const now = 1_800_000_000_000;
 function fixture() {
@@ -35,6 +36,24 @@ function fixture() {
   };
   return { db, machine, task, run, session };
 }
+
+test('registry exposes bounded owned-child facts without commands arguments or inferred OS liveness', () => {
+  const f = fixture();
+  try {
+    f.machine('m-one', ['p-one'], ['codex']); f.task('t-one', 'p-one', 'm-one'); f.run('r-one', 't-one', 'm-one');
+    for (let i = 0; i < 51; i++) recordUtility(f.db, runUtilityKey('r-one'), { action: 'intent', token: `u-${i}`, command: '/usr/bin/git' });
+    recordUtility(f.db, runUtilityKey('r-one'), { action: 'spawn', token: 'u-0', pid: 444, startedAt: now - 2000 });
+    recordUtility(f.db, runUtilityKey('r-one'), { action: 'intent', token: 'finished', command: 'cp' });
+    recordUtility(f.db, runUtilityKey('r-one'), { action: 'exit', token: 'finished', pid: null, startedAt: null, reaped: true });
+    const run = buildRegistry(f.db, { projectId: 'p-one', now }).entries.find(e => e.runId === 'r-one')!;
+    assert.equal(run.utilityChildren!.length, 50);
+    assert.equal(run.utilityChildrenTruncated, true);
+    assert.equal(run.utilityChildren![0]!.command, 'git');
+    assert.equal(run.utilityChildren![0]!.pid, 444);
+    assert.equal(run.utilityChildren![0]!.state, 'live', 'this is the persisted registration state');
+    assert.equal(run.utilityChildren!.some(child => child.token === 'finished'), false);
+  } finally { f.db.close(); }
+});
 
 test('planning is visible without an invented task or task-stop capability', () => {
   const f = fixture();

@@ -11,6 +11,8 @@ import { Semaphore } from '../src/runner.ts';
 import { httpTransport } from '../src/transport.ts';
 import { WorkerLoop, type BranchTransport } from '../src/worker.ts';
 import { WorkerJournal } from '../src/worker-journal.ts';
+import { recover } from '../src/janitor.ts';
+import { listHeld } from '../src/budgets.ts';
 import type { Task } from '../src/types.ts';
 import { sandbox, sh, settleTasks, until } from './helpers.ts';
 
@@ -83,6 +85,67 @@ function latch() {
   const promise = new Promise<void>(resolve => { release = resolve; });
   return { promise, release };
 }
+
+test('real paired HTTP recovery survives sleep-past-lease and A to B to A ownership in every idle phase', { timeout: 45_000 }, async () => {
+  const f = await fleet();
+  try {
+    const [a, b] = f.machines; assert.ok(a && b);
+    for (const phase of ['prepare', 'route', 'collect', 'verify', 'review_wait']) {
+      const task = f.hub.coord.addTasks(f.project.id, [{ title: `Recover ${phase} across machines`, agent: 'mock', files: [`${phase}/**`] }], 'fleet recovery').created[0]!;
+      const generations: number[] = [];
+      for (const machine of [a, b]) {
+        const claim = await machine.client['worker.claim']({ machineId: machine.machineId, agents: ['mock'], repos: { [f.project.id]: machine.repo } });
+        assert.equal(claim?.task.id, task.id);
+        const owner = { generation: claim!.task.generation, assignee: claim!.task.assignee! };
+        generations.push(owner.generation);
+        const journal = new WorkerJournal(machine.machineId); const client = journal.wrap(machine.client);
+        const runId = await client['run.start']({ taskId: task.id, machineId: machine.machineId, agent: 'mock', logPath: '', owner });
+        await client['run.update']({ runId, owner, patch: { phase, pid: null } });
+        // A suspended machine sends no heartbeat; expire its stored lease without a 90-second test delay.
+        f.hub.coord.updateTask(task.id, { lease_until: Date.now() - 1 });
+        await recover(f.hub.coord, 'm-hub', new Set());
+        assert.equal(f.hub.coord.getRun(runId)!.status, 'cleanup_failed');
+        assert.equal((await new WorkerJournal(machine.machineId).recover(machine.client)).size, 0);
+        assert.equal(f.hub.coord.getTask(task.id)!.status, 'queued');
+        assert.equal(listHeld(f.hub.coord.db).length, 0);
+        await assert.rejects(client['task.update']({ id: task.id, owner, patch: { summary: 'stale owner must fail' } }));
+      }
+      const returning = await a.client['worker.claim']({ machineId: a.machineId, agents: ['mock'], repos: { [f.project.id]: a.repo } });
+      assert.equal(returning?.task.id, task.id);
+      assert.ok(returning!.task.generation > generations[1]! && generations[1]! > generations[0]!);
+      await f.owner['task.control']({ id: task.id, action: 'cancel' });
+    }
+  } finally { await f.close(); }
+});
+
+test('a real paired upload is acknowledged while the integration lock is held', { timeout: 30_000 }, async () => {
+  const f = await fleet(); const unlock = latch(); let lockOperation: Promise<void> | undefined;
+  try {
+    const machine = f.machines[0]!;
+    let uploadMs: number | null = null;
+    let holding = false;
+    const worker = machine.createWorker({ fetchBase: (...args) => machine.transport.fetchBase(...args),
+      async uploadBranch(task, ...args) {
+        const entered = latch();
+        lockOperation = f.hub.integrator.withLock(f.project.id, async () => { holding = true; entered.release(); await unlock.promise; holding = false; });
+        await entered.promise;
+        const start = Date.now();
+        try {
+          const result = await machine.transport.uploadBranch(task, ...args);
+          uploadMs = Date.now() - start;
+          assert.equal(holding, true, 'receipt did not wait for integration verification');
+          assert.ok(uploadMs < 5000, `private fixture upload took ${uploadMs} ms`);
+          return result;
+        } finally { unlock.release(); await lockOperation; }
+      },
+    });
+    const task = f.hub.coord.addTasks(f.project.id, [{ title: 'Upload beside integration', prompt: '@mock write upload.txt accepted', agent: 'mock' }], 'upload latency').created[0]!;
+    await worker.tick(); f.pump(worker);
+    await until(() => uploadMs, ms => ms !== null, 15_000, 'upload without waiting for integration lock');
+    assert.equal((await settleTasks(f.hub.coord, [task.id], f.root, 15_000))[0]!.status, 'done');
+    console.log(JSON.stringify({ kind: 'upload-during-integration-lock', uploadMs, integrationLockHeldUntilReceipt: true, inference: 'mock' }));
+  } finally { unlock.release(); await lockOperation; await f.close(); }
+});
 
 test('paired machines verify and integrate disjoint work, then fetch a dependency from the hub', { timeout: 60_000 }, async () => {
   const f = await fleet();

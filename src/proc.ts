@@ -523,7 +523,8 @@ export class UtilityProcessError extends Error {
 
 /**
  * Own all run() utilities in an attempt/integration operation without threading hooks through every Git helper.
- * A failed registration, abort or incomplete reap poisons this scope, even if a best-effort helper catches it.
+ * A failure after launch or incomplete reap poisons this scope, even if a best-effort helper catches it.
+ * A rejected intent never started a child and remains an ordinary command error.
  * Return only after all started utilities have been reaped and their exit records acknowledged.
  */
 export async function withProcessScope<T>(options: ProcessScopeOptions, fn: () => Promise<T>): Promise<T> {
@@ -600,6 +601,16 @@ function scopedUtility(scope: UtilityScope, command: string, args: string[], opt
         onStdout: (d) => append('stdout', d), onStderr: (d) => append('stderr', d),
       });
     } catch (err) {
+      // Intent rejection (including a pending owner control or a temporary RPC outage)
+      // cannot leave a child behind. In particular, do not stop a coding sibling here.
+      // Still acknowledge the no-launch exit: the intent request may have reached its
+      // server even if its response was lost. Remote journals retain that acknowledgment.
+      if (!launchAttempted) {
+        const noLaunch: OwnedRunResult = { end: signal.aborted ? 'aborted' : 'hook_failed', code: null, signal: null, pid: null, startedAt: null,
+          launchedAt, endedAt: Date.now(), pipeHeld: false, reap: { status: 'exited' }, reaped: true, error: errText(err) };
+        try { if (scope.options.onExit) await utilityHook(scope, () => scope.options.onExit!(token, noLaunch)); } catch { /* no child; durable journal retries the exit */ }
+        throw err;
+      }
       result = { end: signal.aborted ? 'aborted' : 'hook_failed', code: null, signal: null, pid: null, startedAt: null,
         launchedAt, endedAt: Date.now(), pipeHeld: false, reap: launchAttempted ? { status: 'unverified', reason: 'utility supervisor threw after launch was attempted' } : { status: 'exited' }, reaped: !launchAttempted, error: errText(err) };
     }

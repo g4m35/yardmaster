@@ -162,3 +162,19 @@ Validation for this bounded change: typecheck, build and all 299 tests passed; t
 The production test command now logs its executable, Node/platform, arguments and completion code and exits naturally; `npm test` no longer uses `--test-force-exit`. Package smoke verification (`node scripts/package-smoke.mjs`, after building) creates a temporary tarball install and checks version, help, packaged dashboard and doctor without a personal hub. `YM_SMOKE_NODE=/path/to/node` selects the installed runtime to test. Both Node22.23.4 and24.22.2 passed this check. Test directories are removed in finally cleanup.
 
 A separate stress-fixture failure exposed collisions in millisecond/three-character IDs. New short IDs use 64 bits of cryptographic randomness, retaining existing prefixes; a fixed-clock/fixed-weak-RNG regression exercises tight creation without duplicate IDs.
+
+## Round-4 paired check against the original baseline
+
+The recovery-hold guard now reuses one prepared query and reads fresh results for every decision. It combines process and utility holds without caching admission rights; a savepoint-rollback regression protects this boundary. This removes two statement preparations per queued task without changing the ownership policy.
+
+Four interleaved pairs used the original `028cc2a` scheduler benchmark text on both revisions, Node 24.22.2, 1,000 tasks and the same ten-core/16 GiB host. The original product modules were loaded from Git objects in memory, with no copied checkout. Both seeders retried only the old ID collision before timing. One warmup and five timed repetitions were unchanged; each reported pair was a separate process.
+
+| Operation | Original median across four runs | Round-4 median | Ratio |
+|---|---:|---:|---:|
+| Claim pass, no matching agent | 52.75 ms | 58.35 ms | 1.11× |
+| Board read | 55.25 ms | 63.80 ms | 1.15× |
+| Individual blockers outside a shared pass | 326.20 ms | 360.15 ms | 1.10× |
+
+The new fencing, recovery and reservation work has measurable overhead. This sample falls within the review's 1.25× target; it is not a universal speed claim. Host load ranged roughly 8–10 and reported free memory was low; other applications were not controlled, so this is a balanced loaded-host comparison, not a low-load certification. These fixtures have no large usage ledger or many historical held runs. Raw invocation/conditions and all eight results are in `outputs/hillclimb-2026-11-07/round4-paired-benchmark.log`; the in-memory loader removes its exact benchmark temp root on process exit.
+
+A separate real paired HTTP test held the integration lock while uploading a verified fixture branch. Receipt completed in 138 ms before that lock was released. Imports now use independent owned quarantine scopes with at most two concurrent Git imports, preserving generation checks and shutdown/restart process ownership. They no longer queue behind integration checks. This is a small local bundle measurement, not remote-network throughput evidence.

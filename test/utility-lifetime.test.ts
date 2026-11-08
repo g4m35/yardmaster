@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tempDir } from './helpers.ts';
 import { git } from '../src/git.ts';
 import { cloneTree } from '../src/fastfs.ts';
-import { groupAlive, isAlive, run, UtilityProcessError, withProcessScope, type OwnedRunResult, type ProcessScopeOptions } from '../src/proc.ts';
+import { currentProcessScopeSignal, groupAlive, isAlive, run, runOwnedProcess, UtilityProcessError, withProcessScope, type OwnedRunResult, type ProcessScopeOptions } from '../src/proc.ts';
 
 const dir = tempDir('ym-utility-life-');
 const fixture = join(dir, 'fixture.mjs');
@@ -122,6 +122,22 @@ test('before-spawn failure cannot create a child', async () => {
   })), /intent store unavailable/);
   assert.equal(existsSync(file), false);
   assert.equal(r.exits[0]?.pid, null);
+});
+
+for (const exitOffline of [false, true]) test(`a refused utility intent does not abort coding, even when exit acknowledgment is offline=${exitOffline}`, async () => {
+  let attempted = 0;
+  let spawned = 0;
+  await withProcessScope({
+    beforeSpawn: () => { attempted++; throw new Error('connect ECONNREFUSED'); },
+    onSpawn: () => { spawned++; },
+    onExit: (_token, result) => { assert.equal(result.pid, null); assert.equal(result.reaped, true); if (exitOffline) throw new Error('still offline'); },
+  }, async () => {
+    const coding = runOwnedProcess(process.execPath, ['-e', 'setTimeout(()=>{},250)'], { signal: currentProcessScopeSignal() });
+    await assert.rejects(run(process.execPath, ['-e', 'throw new Error("must not start")']), error => error instanceof Error && !(error instanceof UtilityProcessError) && /ECONNREFUSED/.test(error.message));
+    assert.equal(currentProcessScopeSignal()!.aborted, false);
+    assert.equal((await coding).end, 'exit');
+  });
+  assert.equal(attempted, 1); assert.equal(spawned, 0);
 });
 
 test('parallel utility tokens both survive registration until both groups are reaped', async () => {

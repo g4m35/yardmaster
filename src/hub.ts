@@ -121,6 +121,7 @@ export class Hub {
   }
 
   private async startLocked(): Promise<string> {
+    await this.integrator.recoverTransfers();
     this.plugins = await loadPlugins();
     for (const e of this.plugins.errors) this.coord.event(null, null, 'warn', 'plugin.error', `Plugin in ${e.dir} failed to load: ${e.error}`);
     this.lastNotified = this.coord.lastEventId();
@@ -446,7 +447,7 @@ export class Hub {
       // Into a private namespace: never clobbers a branch that is checked out on the hub.
       // Isolate generations and concurrent requests; a stale stream cannot overwrite another delivery.
       const ref = `refs/yardmaster/receiving/${taskId}/${generation}/${shortId('u')}`;
-      return await this.integrator.withLock(project.id, async () => {
+      return await this.integrator.withTransfer(project.id, async () => {
       try {
       const r = await git(project.root, ['fetch', '--no-tags', file, `+refs/heads/${branch}:${ref}`], { allowFail: true });
       guard();

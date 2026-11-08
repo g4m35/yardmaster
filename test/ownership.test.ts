@@ -136,14 +136,14 @@ test('finishing one session task preserves another claim and unrelated manual re
   } finally { s.coord.db.close(); }
 });
 
-test('interactive branch handoff fails promptly without accepting an unverified artifact', async () => {
+test('interactive branch handoff requires registered local source and never accepts an unverified artifact', async () => {
   const s = await fixture();
   try {
     const task = s.add();
     const claim = s.coord.claimForSession('session:branch', s.project.id, task.id)!;
     const branch = `yardmaster/${task.id}`;
     sh(s.repo, 'git', ['branch', branch]);
-    await assert.rejects(s.client['session.finish']({ sessionId: claim.assignee!, taskId: task.id, generation: claim.generation, summary: 'done', branch }), /Unsupported interactive branch handoff.*No artifact was accepted/);
+    await assert.rejects(s.client['session.finish']({ sessionId: claim.assignee!, taskId: task.id, generation: claim.generation, summary: 'done', branch }), /Register this native session/);
     const current = s.coord.getTask(task.id)!;
     assert.equal(current.status, 'running');
     assert.equal(current.head_sha, null);

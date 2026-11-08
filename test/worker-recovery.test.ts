@@ -91,6 +91,24 @@ async function sleeper() {
   return child;
 }
 
+for (const wrongIdentity of [false, true]) test(`returning worker checks its recorded child after owner attestation (wrong identity=${wrongIdentity})`, async () => {
+  const s = await fixture(); const child = await sleeper();
+  try {
+    const journal = new WorkerJournal('m-worker'); const api = journal.wrap(s.client);
+    const runId = await api['run.start']({ taskId: s.task.id, machineId: 'm-worker', agent: 'mock', logPath: '', owner: s.owner });
+    const startedAt = (await processStartTime(child.pid!))! - (wrongIdentity ? 60_000 : 0);
+    await api['run.update']({ runId, owner: s.owner, patch: { phase: 'agent', pid: child.pid!, proc_started: startedAt } });
+    s.coord.updateTask(s.task.id, { lease_until: Date.now() - 1 });
+    await recover(s.coord, 'm-hub', new Set());
+    await s.client['task.control']({ id: s.task.id, action: 'confirm-stopped', remote: true, note: 'Remote worker was inspected and all children were stopped.' });
+    const held = await new WorkerJournal('m-worker').recover(s.client);
+    assert.equal(held.has(s.task.id), wrongIdentity);
+    assert.equal(groupAlive(child.pid!), wrongIdentity);
+    assert.equal(Object.keys(new WorkerJournal('m-worker').runs).length, wrongIdentity ? 1 : 0);
+    assert.equal(s.coord.getTask(s.task.id)!.status, 'needs_human', 'recovery never silently retries an attested task');
+  } finally { await terminateOwnedGroup(child.pid!, { graceMs: 20 }); s.coord.db.close(); }
+});
+
 test('remote restart reaps recorded TERM-resistant orphan before its first claim and clears run hold', async () => {
   const s = await fixture();
   const child = await sleeper();

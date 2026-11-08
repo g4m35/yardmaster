@@ -1,0 +1,26 @@
+{
+  "sourceFile": "src/dashboard/index.html",
+  "sourceSha256": "1b7ca7e9458be11d4674874988a0611e23adbbfdecba7a54e9ce52cc0f33444e",
+  "browser": "Browserbase cloud",
+  "transport": "isolated real Hub HTTP through task-owned ephemeral tunnel",
+  "fixtures": "disposable homes, two repositories, fake machine names, no provider inference",
+  "coverage": [
+    "onboarding zero counts",
+    "two-project isolation",
+    "1440 and 390px",
+    "native dialog keyboard and focus",
+    "accessibility tree labels",
+    "real 401 key removal"
+  ],
+  "limits": [
+    "no physical screen-reader output",
+    "no actual provider cache-hit measurement"
+  ],
+  "checks": [
+    "empty-checks.json",
+    "populated-checks.json",
+    "auth-checks.json"
+  ],
+  "note": "populated-checks has successful project/keyboard/responsive/AX checks; its initial reload wait timed out. auth-checks records the separately completed real-401 case. Diagnostic preserved in outputs.",
+  "sessionsClosed": true
+}

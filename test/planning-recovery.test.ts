@@ -188,3 +188,19 @@ test('expired no-launch plan recovers automatically, and an exact recorded proce
     assert.equal(s.coord.getRun(admitted.runId)!.status, 'failed');
   } finally { if (child?.pid) await terminateOwnedGroup(child.pid, { graceMs: 50 }); s.coord.db.close(); }
 });
+
+test('owner can release an expired remote planning no-launch hold through the supported recovery method', async () => {
+  const s = await fixture();
+  try {
+    const { runId } = await admit(s, 'remote');
+    expire(s, runId);
+    await recover(s.coord, 'm1', new Set());
+    assert.equal(s.coord.getRun(runId)!.status, 'cleanup_failed');
+    assert.equal(s.coord.getRun(runId)!.pid, null);
+    assert.equal(s.coord.getRun(runId)!.phase, 'plan');
+    await s.client['plan.confirmStopped']({ runId, note: 'Remote invocation exited before launching any planner process.' });
+    assert.equal(s.coord.getRun(runId)!.status, 'stopped');
+    assert.equal(listHeld(s.coord.db).length, 0);
+    assert.ok(s.coord.eventsSince(0, s.project.id, 100).some(event => event.kind === 'process.owner_confirmed_stopped'));
+  } finally { s.coord.db.close(); }
+});

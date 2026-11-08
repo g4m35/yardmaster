@@ -12,6 +12,7 @@ import { runShell, terminateRecordedProcess, withProcessScope, UtilityProcessErr
 import { integrationUtilityKey, utilityHooks, recoverUtilities, forgetStoppedUtilities, taskHasPendingUtilities, utilitiesStopped } from './utility-records.ts';
 import { lockHash, refreshDeps, siblingWorktrees } from './warmstart.ts';
 import { clip, errorFingerprint, tail } from './text.ts';
+import { randomUUID } from 'node:crypto';
 import type { Config } from './config.ts';
 import type { Project, Task } from './types.ts';
 
@@ -42,6 +43,7 @@ interface IntegrationProcess { phase: string; pid: number | null; startedAt: num
 export class Integrator {
   private readonly coord: Coordinator;
   private readonly verifySlots: Semaphore;
+  private readonly transferSlots = new Semaphore(2);
   private readonly lock = new KeyedMutex();
   private readonly busy = new Set<string>();
   private readonly lastGood = new Map<string, string>();
@@ -200,6 +202,25 @@ export class Integrator {
     return this.lock.run(projectId, () => this.owned(projectId, fn));
   }
 
+  /** Imports only touch unique quarantine refs, so they need no integration-worktree lock. */
+  withTransfer<T>(projectId: string, fn: () => Promise<T>): Promise<T> {
+    const key = `utility:transfer:${projectId}:${randomUUID()}`;
+    const operation = this.transferSlots.use(() => withProcessScope({ ...utilityHooks(this.coord.db, key), signal: this.lifetime.signal }, fn), this.lifetime.signal)
+      .finally(() => { if (utilitiesStopped(this.coord.db, key)) forgetStoppedUtilities(this.coord.db, key); });
+    this.pending.add(operation);
+    void operation.finally(() => this.pending.delete(operation)).catch(() => undefined);
+    return operation;
+  }
+
+  /** Only called before serving requests, never against an active transfer. */
+  async recoverTransfers(): Promise<void> {
+    const rows = this.coord.db.prepare("SELECT key FROM meta WHERE key GLOB 'utility:transfer:*'").all() as { key: string }[];
+    for (const { key } of rows) {
+      if (await recoverUtilities(this.coord.db, key)) forgetStoppedUtilities(this.coord.db, key);
+      else this.coord.event(null, null, 'warn', 'transfer.process_hold', 'A previous bundle-import process has unverified ownership. Its private quarantine is preserved.', { key });
+    }
+  }
+
   /** Explicit owner recovery preserves the inspected commit as the base, then re-verifies queued artifacts. */
   async adopt(projectId: string, expectedHead: string, by: string, note: string): Promise<void> {
     if (note.trim().length < 12) throw new Error('Describe the inspected integration state (at least 12 characters).');
@@ -305,7 +326,8 @@ export class Integrator {
           const ok = await this.lock.run(projectId, () => this.owned(projectId, () => this.integrateTrain(project, train, config)));
           if (ok) return true;
         } catch (err) {
-          if (err instanceof IntegrationHeld || err instanceof UtilityProcessError) return false;
+          if (err instanceof UtilityProcessError) { this.coord.event(projectId, null, 'warn', 'integration.process_error', `Batch integration stopped: ${clip(err.message, 300)}. Work is preserved; the next pass recovers recorded processes before inspecting the checkout.`); return false; }
+          if (err instanceof IntegrationHeld) return false;
           this.coord.event(projectId, null, 'warn', 'integration.train_error', `Batch merge failed (${clip((err as Error).message, 200)}); merging one at a time.`);
           for (const t of train) this.trainFailed.add(t.id);
         } finally {
@@ -324,7 +346,8 @@ export class Integrator {
     try {
       await this.lock.run(projectId, () => this.owned(projectId, () => this.integrate(project, task!, config)));
     } catch (err) {
-      if (err instanceof IntegrationHeld || err instanceof UtilityProcessError) return false;
+      if (err instanceof UtilityProcessError) { this.coord.event(projectId, task.id, 'warn', 'integration.process_error', `Integration stopped: ${clip(err.message, 300)}. Work is preserved; the next pass recovers recorded processes before inspecting the checkout.`); return false; }
+      if (err instanceof IntegrationHeld) return false;
       this.transition(task, ['ready', 'merging'], { status: 'needs_human', attention: `Merging failed unexpectedly: ${clip((err as Error).message, 400)}` });
       this.coord.event(projectId, task.id, 'error', 'integration.error', `Could not merge "${task.title}": ${(err as Error).message}`);
     } finally {

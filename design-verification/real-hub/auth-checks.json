@@ -1,0 +1,11 @@
+{
+  "checks": [
+    "real HTTP 401 removes cached key and private dashboard controls",
+    "no uncaught browser exceptions"
+  ],
+  "errors": [],
+  "transport": "real isolated Hub HTTP via ephemeral cloud tunnel",
+  "browser": "Browserbase cloud",
+  "sourceHead": "4b4a765 plus round4 working diff",
+  "phase": "auth"
+}

@@ -1,3 +1,4 @@
+import { assertNativeSource, materializeNativeArtifact, parseHandoff, type NativeHandoff } from './handoff.ts';
 import { createWriteStream, existsSync, readFileSync, type WriteStream } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
@@ -291,7 +292,8 @@ export async function runAttempt(ctx: RunContext): Promise<RunOutcome> {
     } });
   } catch (err) {
     const control = /Task control pending: (.+)/.exec((err as Error)?.message ?? '')?.[1];
-    if (control) stopTask(control === 'redirect' ? 'redirected' : control === 'stop-pause' ? 'shutdown' : 'stopped', 'Stopped before the next phase or acceptance.');
+    if (control) stopTask(control === 'cancel' ? 'canceled' : control === 'redirect' ? 'redirected' : control === 'stop-pause' ? 'shutdown' : 'stopped',
+      control === 'cancel' ? 'Canceled on request.' : control === 'redirect' ? 'Restarting with your new guidance.' : control === 'stop-pause' ? 'Paused; work is preserved.' : 'Stopped on request.');
     if (isStale(err)) return { status: 'superseded', message: (err as Error).message };
     const pending = stopped as { reason: StopReason; message: string } | null;
     if (pending) {
@@ -333,8 +335,8 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
     phases[name] = (phases[name] ?? 0) + (now - phaseStart);
     phaseStart = now;
   };
-  const adapter = getAdapter(ctx.agent, config);
-  if (!adapter) return finishNeedsHuman(ctx, `No adapter for agent "${ctx.agent}".`);
+  const adapter = getAdapter(ctx.agent, config)!;
+  if (!adapter && !task.native_handoff) return finishNeedsHuman(ctx, `No adapter for agent "${ctx.agent}".`);
 
   const rawLog = join(paths.logs(), `${task.id}-${task.generation}.jsonl`);
   const runId = await api['run.start']({ taskId: task.id, machineId: ctx.machineId, agent: ctx.agent, model: ctx.model, logPath: rawLog });
@@ -352,6 +354,7 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   const log = new LogBuffer(api, runId);
   ctx.cleanup?.(() => log.close());
   await api['run.update']({ runId, patch: { phase: 'prepare' } });
+  if (task.native_handoff) return runNativeArtifact(ctx, runId, log, phase, value => { attemptReaped = value; });
   const prepareState = await api['task.peek']({ id: task.id });
   if (prepareState.status !== 'running' || prepareState.generation !== task.generation || prepareState.assignee !== task.assignee) {
     ctx.stopTask?.(prepareState.status === 'canceled' ? 'canceled' : 'lost', 'Claim changed before preparation.');
@@ -386,6 +389,7 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
     }
     baseSha ??= (await revParse(wt, 'HEAD')) ?? ctx.startPoint;
   } catch (err) {
+    if (/Task control pending:/.test((err as Error)?.message ?? '')) throw err;
     return finishNeedsHuman(ctx, `Could not prepare a git worktree: ${(err as Error).message}`);
   }
   await update(ctx, { worktree: wt, branch, base_sha: baseSha, pending_rebase: false });
@@ -755,10 +759,73 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
     await finishRun('failed');
     return retryOrStop(ctx, totals, `The agent said it was finished but no files changed. Its last message: "${clip(summary, 300)}"`, 'no_changes', { backoff: false });
   }
+  return acceptArtifact(ctx, wt, baseSha!, files, summary, runId, log, phase, finishRun, cost, totals, value => { attemptReaped = value; });
+    });
+  } catch (error) {
+    if (!(error instanceof UtilityProcessError)) throw error;
+    if (task.native_handoff && error.result.reaped && attemptReaped && !ctx.stopReason?.()) {
+      // A synchronous cancel/expiry can reject a utility intent before the control poll observes it.
+      const current = await api['task.peek']({ id: task.id });
+      if (current.generation !== task.generation || current.assignee !== task.assignee || current.status === 'canceled' || current.control || (current.lease_until !== null && current.lease_until <= Date.now())) {
+        ctx.stopTask?.(current.status === 'canceled' ? 'canceled' : 'lost', 'Native handoff no longer owns the artifact verification.');
+      }
+    }
+    if (ctx.stopReason?.() && error.result.reaped && attemptReaped) {
+      // Expected cancellation is safe only after every child exit is durably acknowledged.
+      await api['run.exit']({ runId, taskId: task.id, owner: claimOwner(task), reaped: true });
+      throw error;
+    }
+    attemptReaped = false;
+    await api['run.update']({ runId, patch: { status: 'cleanup_failed', stop_reason: 'Utility process ownership requires recovery.' } }).catch(() => undefined);
+    return finishNeedsHuman(ctx, 'A Git or copy process could not finish its ownership checks. Work is preserved and held for recovery.');
+  }
+}
+
+/** Artifact-only path: never constructs an implementation prompt or launches a coding adapter/JEV. */
+async function runNativeArtifact(ctx: RunContext, runId: string, log: LogBuffer, phase: (name: string) => void, setAttemptReaped: (value: boolean) => void): Promise<RunOutcome> {
+  const { task, api, config } = ctx;
+  const data = parseHandoff(task.native_handoff)!;
+  const branch = `yardmaster/native-${task.id}-${task.generation}`;
+  const wt = worktreePathFor(config, ctx.project, `${task.id}-native-${task.generation}`);
+  // Persist the owned destination before creating any files; recovery never targets the native source.
+  await update(ctx, { worktree: wt, branch, base_sha: ctx.startPoint });
+  await materializeNativeArtifact(ctx.repoPath, task, wt, branch);
+  if (!(await isAncestor(wt, ctx.startPoint, data.sha!))) return finishNeedsHuman(ctx, 'Native commit must contain the current integration base. Rebase/merge in the native client and resubmit.', runId);
+  await warmStart(ctx.repoPath, wt, config, { candidates: siblingWorktrees(wt) });
+  for (const command of config.worktree.setup) {
+    await api['run.update']({ runId, patch: { phase: 'setup:spawning' } });
+    setAttemptReaped(false);
+    const result = await runShell(command, { cwd: wt, timeoutMs: config.verifyTimeoutMinutes * 60_000, signal: ctx.signal,
+      onSpawn: async ({ pid, startedAt }) => { await api['run.update']({ runId, patch: { phase: 'setup', pid, proc_started: startedAt } }); } });
+    setAttemptReaped(result.reaped);
+    if (!result.reaped) { await api['run.update']({ runId, patch: { status: 'cleanup_failed' } }); return finishNeedsHuman(ctx, 'Native setup process requires recovery.'); }
+    await api['run.update']({ runId, patch: { phase: 'prepare', pid: null, proc_started: null } });
+    if (result.code !== 0) return finishNeedsHuman(ctx, `Native artifact setup failed: ${tail(result.stdout, 20, 1500)}`, runId);
+  }
+  if (await revParse(wt, 'HEAD') !== data.sha || !(await isClean(wt))) return finishNeedsHuman(ctx, 'Setup mutated the captured native artifact; preserve and inspect the verification checkout.', runId);
+  const files = await changedFiles(wt, ctx.startPoint);
+  if (!files.length && !task.allow_no_changes) return finishNeedsHuman(ctx, 'Native artifact contains no changes against integration.', runId);
+  const overlap = await api['task.touched']({ taskId: task.id, runId, files });
+  if (overlap) return finishNeedsHuman(ctx, `Native artifact overlaps active work in ${overlap.file}; source preserved.`, runId);
+  const finishRun = async (status: string, reason?: string) => {
+    await log.close();
+    await api['run.update']({ runId, patch: { status, phase: null, ended_at: Date.now(), stop_reason: reason ?? null } });
+  };
+  return acceptArtifact({ ...ctx, agent: data.agent }, wt, ctx.startPoint, files, task.summary ?? 'Native artifact submitted', runId,
+    log, phase, finishRun, 0, {}, setAttemptReaped, data);
+}
+
+/** Shared immutable checks/review gate for managed implementation and native artifacts. */
+async function acceptArtifact(ctx: RunContext, wt: string, baseSha: string, files: string[], summary: string, runId: string,
+  log: LogBuffer, phase: (name: string) => void, finishRun: (status: string, reason?: string) => Promise<void>,
+  cost: number, totals: TaskPatch, setAttemptReaped: (value: boolean) => void, native?: NativeHandoff): Promise<RunOutcome> {
+  const { api, task, config } = ctx;
+  const artifactFailure = (message: string, fingerprint: string, options: { backoff?: boolean }) => native
+    ? finishNeedsHuman(ctx, message, runId) : retryOrStop(ctx, totals, message, fingerprint, options);
   const markers = await hasConflictMarkers(wt, files);
   if (markers.length) {
     await finishRun('failed');
-    return retryOrStop(ctx, totals, `Unresolved merge conflict markers remain in ${markers.join(', ')}.`, errorFingerprint(markers.join(',')), { backoff: false });
+    return artifactFailure(`Unresolved merge conflict markers remain in ${markers.join(', ')}.`, errorFingerprint(markers.join(',')), { backoff: false });
   }
   const hot = files.filter((f) => config.hotFiles.some((h) => matches(f, h)));
   const outside = task.scope.length ? files.filter((f) => !inScope(f, task.scope)) : [];
@@ -766,14 +833,15 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
     const msg = `Changed files outside its declared scope: ${outside.slice(0, 8).join(', ')}${outside.length > 8 ? '…' : ''}`;
     if (config.scopeEnforcement === 'block') {
       await finishRun('failed');
-      return retryOrStop(ctx, totals, `${msg}. Only change ${task.scope.join(', ')}.`, errorFingerprint(outside.join(',')), { backoff: false });
+      return artifactFailure(`${msg}. Only change ${task.scope.join(', ')}.`, errorFingerprint(outside.join(',')), { backoff: false });
     }
     await event(ctx, 'warn', 'task.scope', msg);
   }
   if (hot.length) await event(ctx, 'info', 'task.hotfiles', `Touches shared files (${hot.join(', ')}); it will be merged on its own.`);
 
   // ---- verify: "done" is measured, not claimed ----
-  const commands = taskChecks(task, config, files);
+  const commands = native ? verifyCommands(task, config) : taskChecks(task, config, files);
+  if (native && !commands.length) return finishNeedsHuman(ctx, 'Native handoff requires configured full verification commands.', runId);
   const head = await revParse(wt, 'HEAD');
   await update(ctx, { status: 'verifying', head_sha: head, summary });
   if (commands.length) {
@@ -784,23 +852,23 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
       async ({ pid, startedAt }) => { await api['run.update']({ runId, patch: { phase: 'verify', pid, proc_started: startedAt } }); }, {
         beforeSpawn: async () => {
           await api['run.update']({ runId, patch: { phase: 'verify:spawning' } });
-          attemptReaped = false;
+          setAttemptReaped(false);
         },
         onExit: async (reaped) => {
-          attemptReaped = reaped;
+          setAttemptReaped(reaped);
           if (reaped) await api['run.update']({ runId, patch: { phase: 'verify', pid: null, proc_started: null } });
         },
       }), ctx.signal);
     phase('verify');
     if (!result.ok) {
       if (!result.reaped) {
-        attemptReaped = false;
+        setAttemptReaped(false);
         await api['run.update']({ runId, patch: { status: 'cleanup_failed' } });
         return finishNeedsHuman(ctx, result.output);
       }
       await finishRun('failed');
       log.push(`verify failed`);
-      return retryOrStop(ctx, totals, `Checks failed (\`${result.command}\`):\n${tail(result.output, 40, 2500)}`, errorFingerprint(result.output), { backoff: false });
+      return artifactFailure(`Checks failed (\`${result.command}\`):\n${tail(result.output, 40, 2500)}`, errorFingerprint(result.output), { backoff: false });
     }
     log.push('verify passed');
     await api['run.update']({ runId, patch: { phase: 'collect', pid: null, proc_started: null } });
@@ -865,10 +933,11 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
     if ('skipped' in outcome) {
       log.push(`review skipped: ${outcome.skipped}`);
       await event(ctx, 'warn', 'task.review_skipped', `Review skipped: ${outcome.skipped}.`);
-      if (outcome.required) return finishNeedsHuman(ctx, `Required review did not complete: ${outcome.skipped}`, runId);
+      if (native || outcome.required) return finishNeedsHuman(ctx, `Required review did not complete: ${outcome.skipped}`, runId);
     } else {
       const issues = formatIssues(outcome.blocking);
       log.push(`review by ${outcome.reviewer}: ${outcome.review.verdict}${issues.length ? ` (${issues.length} issue${issues.length > 1 ? 's' : ''})` : ''}`);
+      if (issues.length && native) return finishNeedsHuman(ctx, `Native artifact review requested changes: ${clip(issues.join(' '), 1500)}`, runId);
       if (issues.length && task.review_rounds < config.review.maxRounds) {
         await finishRun('succeeded');
         await event(ctx, 'warn', 'task.review_changes', `${outcome.reviewer} asked for changes to "${task.title}": ${clip(issues.join(' '), 200)}`);
@@ -889,6 +958,10 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
     }
   }
 
+  if (native) {
+    await assertNativeSource(ctx.repoPath, native);
+    if (await revParse(wt, 'HEAD') !== native.sha || !(await isClean(wt))) return finishNeedsHuman(ctx, 'Native accepted artifact changed after checks/review.', runId);
+  }
   await finishRun('succeeded');
   // Learn from this attempt: what fixed an earlier failure, which review points were addressed.
   // Every earlier review point counts as resolved now, except the latest one if it was waved through unresolved.
@@ -910,18 +983,6 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   });
   await event(ctx, 'success', 'task.ready', `"${task.title}" passed checks (${files.length} file${files.length === 1 ? '' : 's'} changed, ${formatUsd(task.cost_usd + cost)})${needsApproval ? '. Waiting for your approval to merge.' : ''}`);
   return { status: 'ready', message: summary };
-    });
-  } catch (error) {
-    if (!(error instanceof UtilityProcessError)) throw error;
-    if (ctx.stopReason?.() && error.result.reaped && attemptReaped) {
-      // Expected cancellation is safe only after every child exit is durably acknowledged.
-      await api['run.exit']({ runId, taskId: task.id, owner: claimOwner(task), reaped: true });
-      throw error;
-    }
-    attemptReaped = false;
-    await api['run.update']({ runId, patch: { status: 'cleanup_failed', stop_reason: 'Utility process ownership requires recovery.' } }).catch(() => undefined);
-    return finishNeedsHuman(ctx, 'A Git or copy process could not finish its ownership checks. Work is preserved and held for recovery.');
-  }
 }
 
 export { runVerify };

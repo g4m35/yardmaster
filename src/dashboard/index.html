@@ -566,7 +566,7 @@
     const items = [...board.active, ...board.recentDone.map((d) => ({ ...d, status: 'done' }))];
     const root = $('board');
     if (!items.length && !board.attention.length) {
-      root.replaceChildren(...STATIONS.map(stationHead), el('p', { class: 'board-empty' }, 'Nothing queued. Choose “Add work”, or ask your coding agent to split a job into parallel tasks with Yardmaster.'));
+      root.replaceChildren(...STATIONS.map(st => stationHead(st, 0)), el('p', { class: 'board-empty' }, 'Nothing queued. Choose “Add work”, or ask your coding agent to split a job into parallel tasks with Yardmaster.'));
       return;
     }
     root.replaceChildren(...STATIONS.map((st) => {
@@ -627,6 +627,7 @@
       ['Agent', unknown(e.agent)], ['Model', unknown(e.model)], ['Role', unknown(e.role)],
       ['Phase', unknown(e.phase)], ['Effort', unknown(e.effort)], ['PID', unknown(e.pid)],
       ['Process start', e.processStartedAt == null ? 'Unknown' : new Date(e.processStartedAt).toLocaleString()],
+      ['Owned utility children', e.utilityChildren == null ? 'Unknown' : e.utilityChildren.length ? e.utilityChildren.map(child => `${child.command}: ${child.state}${child.pid == null ? ' (no recorded PID)' : ` (PID ${child.pid})`}`).join('; ') + (e.utilityChildrenTruncated ? '; more records omitted' : '') : 'None recorded'],
       ['Task', unknown(e.taskId)], ['Run', unknown(e.runId)], ['Session', unknown(e.sessionId)],
       ['Generation', unknown(e.generation)], ['Freshness', unknown(e.freshness) + ' · ' + age(e.lastSeenAt)],
       ['Last activity', unknown(e.lastActivity)],

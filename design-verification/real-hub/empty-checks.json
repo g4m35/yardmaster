@@ -1,0 +1,13 @@
+{
+  "checks": [
+    "real empty Hub gives executable first-project guidance",
+    "empty registry does not invent agents",
+    "empty board displays five truthful zero counts",
+    "no uncaught browser exceptions"
+  ],
+  "errors": [],
+  "transport": "real isolated Hub HTTP via ephemeral cloud tunnel",
+  "browser": "Browserbase cloud",
+  "sourceHead": "4b4a765 plus round4 working diff",
+  "phase": "empty"
+}

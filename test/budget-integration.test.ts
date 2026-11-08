@@ -186,7 +186,8 @@ test('released schema5 upgrades preserve usage, live reservations and rows acros
   s.coord.db.close();
   const db = openDb(s.file);
   try {
-    assert.equal(SCHEMA_VERSION, 10); const coord = new Coordinator(db);
+    assert.equal(SCHEMA_VERSION, 11); const coord = new Coordinator(db);
+    assert.equal(coord.getTask(task.id)!.native_handoff, null);
     assert.equal(coord.getRun(run.id)!.log_path, '/fixture/log'); assert.equal(coord.getTask(task.id)!.cost_usd, .7);
     assert.equal(coord.spentToday(), .7); assert.equal(listHeld(db)[0]!.amountUsd, 3);
     assert.equal(readAllowance(db, { taskId: task.id, taskCapUsd: 3, dailyCapUsd: 5 }).taskRemainingUsd, 0);

@@ -119,6 +119,7 @@ const MIGRATIONS: string[] = [
     usage_provenance = CASE WHEN cost_usd > 0 THEN CASE WHEN cost_estimated = 1 THEN 'estimated' ELSE 'actual' END ELSE 'unknown' END;
   `,
   budgetMigrationDDL,
+  `ALTER TABLE tasks ADD COLUMN native_handoff TEXT;`,
 ];
 
 export type Db = DatabaseSync;

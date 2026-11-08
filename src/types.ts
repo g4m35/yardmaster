@@ -34,6 +34,8 @@ export interface Task {
   scope_inferred: boolean;
   verify: string[] | null;
   allow_no_changes: boolean;
+  /** Durable native artifact capture; internal JSON, never a worker-writable field. */
+  native_handoff: string | null;
   /** Durable claim identity; never decremented with retry accounting. */
   generation: number;
   attempts: number;

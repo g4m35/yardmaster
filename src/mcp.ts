@@ -123,12 +123,17 @@ export function buildMcpServer(ctx: Ctx): McpServer {
     return `You have ${t.id}: ${t.title}\n${t.prompt !== t.title ? t.prompt + '\n' : ''}${t.scope.length ? `Files: ${t.scope.join(', ')}\n` : ''}When finished call yard_finish_task with a short summary.`;
   });
 
-  tool('yard_finish_task', 'Report a task this connection took as finished (or failed). Branch handoff is currently unsupported; use managed tasks for automated verification and integration.', z.object({ id: z.string(), summary: z.string(), outcome: z.enum(['done', 'failed']).default('done'), branch: z.string().optional() }), async (a) => {
+  tool('yard_finish_task', 'Report a task this connection took as finished (or failed). An optional local branch queues its committed clean artifact for full checks, review and integration without rerunning coding. Remote native export is unsupported.', z.object({ id: z.string(), summary: z.string(), outcome: z.enum(['done', 'failed']).default('done'), branch: z.string().optional() }), async (a) => {
     const generation = claims.get(a.id);
     if (generation === undefined) throw new Error('This connection has no captured claim for that task. Do not finish a claim owned by another or restarted connection; retry/reclaim it through Yardmaster first.');
-    const t = await ctx.client['session.finish']({ sessionId: ctx.identity, taskId: a.id, generation, summary: a.summary, outcome: a.outcome, branch: a.branch });
+    const t = await ctx.client['session.finish']({ sessionId: ctx.identity, taskId: a.id, generation, summary: a.summary, outcome: a.outcome, branch: a.branch }).catch(async error => {
+      // A rejected capture may have durably retired this generation. Never borrow a new one on retry/restart.
+      const current = await ctx.client['task.peek']({ id: a.id }).catch(() => null);
+      if (current && (current.generation !== generation || current.assignee !== ctx.identity || current.status !== 'running')) claims.delete(a.id);
+      throw error;
+    });
     claims.delete(a.id);
-    return `${t.id} is now ${t.status}.`;
+    return `${t.id} is now ${t.status}.${a.branch ? ' Native artifact submitted; checks/review and integration are still pending. Source branch/worktree are preserved.' : ' Reported outcome only; no automated verification claimed.'}`;
   });
 
   tool('yard_send', 'Leave a short note for a task id, a session, or "*" for everyone (handoffs, warnings about shared APIs).', z.object({ to: z.string(), body: z.string().max(2000), taskId: z.string().optional(), ...repoArg }), async (a) => {

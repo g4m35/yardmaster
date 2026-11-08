@@ -1,3 +1,4 @@
+import { parseHandoff, type NativeHandoff } from './handoff.ts';
 import { tx, type Db } from './db.ts';
 import { loadConfig, routingFor, type Config, type Tier } from './config.ts';
 import { findCycle } from './graph.ts';
@@ -112,6 +113,7 @@ const OPEN_STATUSES: TaskStatus[] = TASK_STATUSES.filter((s: TaskStatus) => !TER
 
 export class Coordinator {
   readonly db: Db;
+  private readonly processHoldQuery: ReturnType<Db['prepare']>;
   private readonly configCache = new Map<string, { at: number; cfg: Config }>();
   /** Import graphs per project, refreshed by the hub in the background (see Hub.refreshGraphs). */
   readonly graphs = new Map<string, ImportGraph>();
@@ -119,6 +121,12 @@ export class Coordinator {
 
   constructor(db: Db) {
     this.db = db;
+    this.processHoldQuery = db.prepare(`SELECT CASE WHEN r.status = 'cleanup_failed' THEN 'process' ELSE 'utility' END AS kind
+      FROM runs r LEFT JOIN meta m ON m.key = 'utility:run:' || r.id WHERE r.task_id = ? AND
+      (r.status = 'cleanup_failed' OR (m.key IS NOT NULL AND (NOT json_valid(m.value) OR EXISTS (
+        SELECT 1 FROM json_each(CASE WHEN json_valid(m.value) THEN m.value ELSE '[]' END) child
+        WHERE COALESCE(json_extract(child.value, '$.state'), 'unknown') <> 'exited'))))
+      ORDER BY r.status = 'cleanup_failed' DESC LIMIT 1`);
   }
 
   /**
@@ -549,7 +557,7 @@ export class Coordinator {
         if (this.configFor(t.project_id).learning.lessons) addLesson(this, t.project_id, text, 'you', widenScope(t.scope), t.id);
         if (TERMINAL_STATUSES.includes(t.status)) throw new Error(`${id} is ${t.status}; retry it instead.`);
         const guidance = clip(`${by} says: ${text}`, 2000);
-        const running = t.status === 'running';
+        const running = ['running', 'verifying'].includes(t.status);
         const next = this.updateTask(id, {
           retry_note: guidance,
           control: running ? 'redirect' : t.control,
@@ -720,10 +728,18 @@ export class Coordinator {
     return this.memo('budget-display', () => createAllowanceReader(this.db))(query);
   }
 
+  private processHold(taskId: string): 'process' | 'utility' | null {
+    // Reuse the prepared query, never its result: holds remain fresh through external
+    // connections, direct journal writes and transaction/savepoint rollbacks.
+    const row = this.processHoldQuery.get(taskId) as { kind: 'process' | 'utility' } | undefined;
+    return row?.kind ?? null;
+  }
+
   /** Why a queued task is not running yet, in plain language. Null means it can start now. */
   blocker(task: Task, now = Date.now(), reservationHolder?: string): string | null {
-    if (this.db.prepare("SELECT 1 FROM runs WHERE task_id = ? AND status = 'cleanup_failed' LIMIT 1").get(task.id)) return 'An earlier owned process has not been confirmed stopped. Worktree is held for recovery.';
-    if (taskHasPendingUtilities(this.db, task.id)) return 'An earlier Git or copy utility has not confirmed exit. Work is held for recovery.';
+    const hold = this.processHold(task.id);
+    if (hold === 'process') return 'An earlier owned process has not been confirmed stopped. Worktree is held for recovery.';
+    if (hold === 'utility') return 'An earlier Git or copy utility has not confirmed exit. Work is held for recovery.';
     const pause = this.pausedState(task.project_id);
     if (pause.paused) return `Paused by ${pause.by ?? 'you'}. Resume to start new work.`;
     if (task.not_before && task.not_before > now) return `Retrying in ${Math.ceil((task.not_before - now) / 1000)}s`;
@@ -778,6 +794,9 @@ export class Coordinator {
       queued.sort((a, b) => b.priority - a.priority || cp(b) - cp(a) || a.created_at - b.created_at);
       for (const task of queued) {
         if (!req.repos[task.project_id]) continue;
+        const native = parseHandoff(task.native_handoff);
+        if (native && !native.sha) { this.updateTask(task.id, { status: 'needs_human', attention: 'Native capture was interrupted; retry and reclaim in the native client to resubmit.' }); continue; }
+        if (native && native.machineId !== req.machineId) continue;
         if (req.activeTaskIds?.includes(task.id) || this.blocker(task, now)) continue;
         // Retries go back to the machine that has the task's worktree (and its partial work), while it is online.
         const prev = this.latestRun(task.id);
@@ -790,7 +809,7 @@ export class Coordinator {
           if (homeCanRun) continue;
         }
         const cfg = this.configFor(task.project_id);
-        const route = chooseAgent({
+        const route = native ? { agent: 'native', model: null, reason: 'Verify the submitted native artifact without coding inference' } : chooseAgent({
           config: cfg, tier: task.tier, forced: task.agent, installed: req.agents,
           runningByAgent: req.runningByAgent, stats: this.agentStats(task.project_id),
         });
@@ -960,7 +979,6 @@ export class Coordinator {
       if (!run || String(run.role) !== 'plan' || run.status !== 'cleanup_failed') throw new Error('No planning process recovery hold exists.');
       const invocation = this.getPlanInvocation(runId);
       if (invocation && invocation.leaseUntil > Date.now()) throw new Error('Planning invocation still has an active lease.');
-      if (run.pid === null && !run.phase?.endsWith(':spawning')) throw new Error('No planning spawn-window or recorded-process hold exists.');
       if (note.trim().length < 12) throw new Error('Describe how you verified all planning processes stopped (at least 12 characters).');
       const held = listHeld(this.db).find(r => r.runId === runId);
       this.updateRun(runId, { status: 'stopped', phase: null, pid: null, proc_started: null, ended_at: Date.now(), stop_reason: `Owner ${by} attested stopped: ${clip(note, 1000)}` });
@@ -1198,7 +1216,7 @@ export class Coordinator {
     const id = existing?.id ?? `session:${name}`;
     this.db.prepare(
       `INSERT INTO sessions (id, name, agent, project_id, cwd, machine_id, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen, cwd = excluded.cwd, agent = excluded.agent`,
+       ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen, cwd = excluded.cwd, agent = excluded.agent, machine_id = excluded.machine_id`,
     ).run(id, name, agent, projectId, cwd, machineId, Date.now());
     // Registration is identity discovery, not evidence that this caller holds any current task generation.
     return id;
@@ -1219,6 +1237,7 @@ export class Coordinator {
       const candidates = taskId ? [this.getTask(taskId)].filter((t): t is Task => !!t) : this.listTasks(projectId, ['queued']).sort((a, b) => b.priority - a.priority);
       for (const t of candidates) {
         if (t.project_id !== projectId) throw new Error(`${t.id} belongs to a different project.`);
+        if (t.native_handoff && !taskId) continue;
         if (t.status !== 'queued') {
           if (taskId) throw new Error(`${t.id} is ${t.status}, not available.`);
           continue;
@@ -1227,6 +1246,10 @@ export class Coordinator {
         if (why) {
           if (taskId) throw new Error(`${t.id} cannot start yet: ${why}`);
           continue;
+        }
+        if (t.native_handoff) {
+          // Only explicit native reclaim retires a prior submitted artifact. No files/refs are removed.
+          this.db.prepare('UPDATE tasks SET native_handoff = NULL WHERE id = ?').run(t.id);
         }
         this.advanceGeneration(t.id);
         const claimed = this.updateTask(t.id, { status: 'running', assignee: sessionId, machine_id: null, attempts: t.attempts + 1, started_at: Date.now(), lease_until: Date.now() + 60 * 60_000 });
@@ -1237,18 +1260,53 @@ export class Coordinator {
     });
   }
 
+  /** Atomic retirement of the captured native generation into ordinary hub run ownership. */
+  beginSessionHandoff(sessionId: string, taskId: string, generation: number | undefined, branch: string, machineId: string, summary: string): { task: Task; run: Run | null } {
+    return tx(this.db, () => {
+      const previous = this.getTask(taskId);
+      const replay = parseHandoff(previous?.native_handoff);
+      if (previous && replay?.sessionId === sessionId && replay.sessionGeneration === generation && replay.branch === branch) return { task: previous, run: null };
+      const task = this.assertTaskOwner(taskId, { generation, assignee: sessionId, statuses: ['running'] });
+      if (task.control) throw new Error(`Task control pending: ${task.control}`);
+      const session = this.db.prepare('SELECT cwd, machine_id, agent, project_id FROM sessions WHERE id = ?').get(sessionId) as { cwd: string | null; machine_id: string | null; agent: string | null; project_id: string | null } | undefined;
+      if (!session?.cwd || session.project_id !== task.project_id) throw new Error('Register this native session with its project and source checkout before branch handoff.');
+      if (session.machine_id !== machineId) throw new Error('Unsupported remote native handoff: source checkout must be on the hub/shared repository and registered with the hub machine ID. Native binary export is not implemented; scoped worker credentials cannot submit sessions. Managed remote workers remain supported.');
+      const data: NativeHandoff = { sessionId, sessionGeneration: task.generation, branch, cwd: session.cwd, machineId, agent: session.agent ?? 'native', sha: null };
+      this.advanceGeneration(taskId);
+      this.db.prepare('UPDATE tasks SET native_handoff = ? WHERE id = ?').run(JSON.stringify(data), taskId);
+      const owned = this.updateTask(taskId, { assignee: `machine:${machineId}`, machine_id: machineId, summary: clip(summary, 1200), lease_until: Date.now() + LEASE_MS, attention: 'Capturing native artifact; no checks accepted', head_sha: null, ready_at: null });
+      const run = this.startRun(owned, machineId, 'native', null, '');
+      this.releaseSessionTaskLocks(task, sessionId);
+      return { task: owned, run };
+    });
+  }
+
+  queueSessionHandoff(task: Task, data: NativeHandoff): Task {
+    return tx(this.db, () => {
+      this.assertTaskOwner(task.id, { generation: task.generation, assignee: task.assignee! });
+      if (!data.sha) throw new Error('Native handoff has no captured commit.');
+      this.db.prepare('UPDATE tasks SET native_handoff = ? WHERE id = ?').run(JSON.stringify(data), task.id);
+      const next = this.updateTask(task.id, { status: 'queued', assignee: null, machine_id: null, worktree: null, branch: null, base_sha: null, head_sha: data.sha, lease_until: null, attention: 'Native artifact queued for full checks and review' });
+      this.releaseSessionTaskLocks(task, data.sessionId);
+      this.event(task.project_id, task.id, 'info', 'session.handoff', `Native commit ${data.sha} queued for verification; source checkout preserved.`);
+      return next;
+    });
+  }
+
+  private releaseSessionTaskLocks(task: Task, sessionId: string): void {
+    const others = this.listTasks(task.project_id, ['running', 'verifying', 'ready', 'merging']).filter(other => other.id !== task.id && other.assignee === sessionId);
+    const releasable = task.scope.filter(pattern => !others.some(other => scopesOverlap([pattern], other.scope).length));
+    if (releasable.length) this.releaseLocks(task.project_id, sessionId, releasable);
+  }
+
   finishForSession(sessionId: string, taskId: string, summary: string, outcome: 'done' | 'failed', branch?: string, generation?: number): Task {
     return tx(this.db, () => {
       const t = this.assertTaskOwner(taskId, { generation, assignee: sessionId, statuses: ['running'] });
       if (branch) {
-        throw new Error('Unsupported interactive branch handoff: automated collection, immutable commit verification and review are not available for session.finish. No artifact was accepted; the task remains running. Use a managed worker for verified integration.');
+        throw new Error('Branch submission requires the asynchronous session.finish API capture; no artifact accepted by direct finishForSession.');
       }
       const next = this.updateTask(taskId, { status: outcome, summary: clip(summary, 1200), finished_at: Date.now(), lease_until: null, attention: null });
-      const otherClaims = this.listTasks(t.project_id, ['running', 'verifying', 'ready']).filter(other => other.id !== t.id && other.assignee === sessionId);
-      const releasable = t.scope.filter(pattern => !otherClaims.some(other => scopesOverlap([pattern], other.scope).length));
-      // A session may be editing unrelated work or own another task. Its manual reservations
-      // are independent; finishing one task only releases that task's unshared scope patterns.
-      if (releasable.length) this.releaseLocks(t.project_id, sessionId, releasable);
+      this.releaseSessionTaskLocks(t, sessionId);
       this.event(t.project_id, taskId, outcome === 'done' ? 'success' : 'error', `task.${outcome}`, `${sessionId.replace('session:', '')} finished "${t.title}": ${clip(summary, 160)}`);
       return next;
     });

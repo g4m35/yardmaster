@@ -147,6 +147,15 @@ function harness(options: { token?: string | null; hash?: string } = {}) {
   };
 }
 
+test('empty work view displays zero counts rather than callback indexes', async () => {
+  const h = harness();
+  h.respond(method => method === 'registry.list' ? snapshot([]) : { ...board(), active: [], attention: [], recentDone: [] });
+  await h.api.refresh();
+  const stations = h.$('board').children.filter(node => node.className === 'station');
+  assert.equal(stations.length, 5);
+  assert.deepEqual(stations.map(node => node.children[0]!.children.at(-1)!.textContent), ['0', '0', '0', '0', '0']);
+});
+
 test('dashboard projects real registry states, unknown signals, exact task link and supported stop only', async () => {
   const h = harness();
   const entries = [entry(), entry({ id: 'session:s-one', source: 'session', state: 'observed', pid: null, taskId: null, capabilities: { inspect: true, requestStop: false } }),

@@ -1,3 +1,4 @@
+import { submitSessionHandoff } from './handoff.ts';
 import * as z from 'zod/v4';
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -148,11 +149,14 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       if (p.operation.action === 'exit' && !['running', 'lost', 'cleanup_failed'].includes(run.status) &&
           !coord.db.prepare("SELECT 1 FROM budget_reservations WHERE run_id = ? AND state = 'held'").get(run.id) && coord.getMeta(runUtilityKey(run.id)) === null) return;
       if (p.operation.action === 'intent') {
+        const current = coord.getTask(p.taskId);
+        if (current?.generation === p.owner.generation && current.assignee === p.owner.assignee && current.status === 'canceled') throw new Error('Task control pending: cancel');
         const task = coord.assertTaskOwner(p.taskId, { ...p.owner, statuses: WORKER_ACTIVE_STATUSES });
         const preservationId = p.operation.preservationId;
         const preserving = p.operation.preserving && !!preservationId && run.status === 'stopped' && run.pid === null &&
           utilities(coord.db, runUtilityKey(run.id)).every(child => child.state === 'exited' || child.preservationId === preservationId);
-        if (run.status === 'cleanup_failed' || (task.control && !preserving)) throw new Error(`Run cannot launch another utility: status=${run.status}, pid=${run.pid ?? 'none'}, control=${task.control ?? 'none'}, preservation=${p.operation.preserving === true}, priorExit=${utilitiesStopped(coord.db, runUtilityKey(run.id))}.`);
+        if (task.control && !preserving) throw new Error(`Task control pending: ${task.control}`);
+        if (run.status === 'cleanup_failed') throw new Error('Run cannot launch another utility while process cleanup is unconfirmed.');
       }
       recordUtility(coord.db, runUtilityKey(p.runId), p.operation);
     })),
@@ -289,7 +293,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       coord.setPaused(p.projectId ?? null, true, p.by);
       if (p.stopRunning) {
         // Running agents save their partial work and go back to the queue; they continue on resume.
-        for (const t of coord.listTasks(p.projectId ?? null, ['running'])) if (!t.assignee?.startsWith('session:')) coord.updateTask(t.id, { control: 'stop-pause' });
+        for (const t of coord.listTasks(p.projectId ?? null, ['running', 'verifying'])) if (!t.assignee?.startsWith('session:')) coord.updateTask(t.id, { control: 'stop-pause' });
         hooks.stopRunning?.(p.projectId);
       }
       return coord.pausedState(p.projectId);
@@ -319,7 +323,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
     ),
     'session.claim': method(z.object({ sessionId: Id, projectId: Id, taskId: z.string().optional() }), (p) => coord.claimForSession(p.sessionId, p.projectId, p.taskId)),
     'session.finish': method(z.object({ sessionId: Id, taskId: Id, summary: z.string(), outcome: z.enum(['done', 'failed']).default('done'), branch: z.string().optional(), generation: Generation.optional() }), (p) =>
-      coord.finishForSession(p.sessionId, p.taskId, p.summary, p.outcome, p.branch, p.generation),
+      p.branch ? submitSessionHandoff(coord, hooks.machineId, { ...p, branch: p.branch }) : coord.finishForSession(p.sessionId, p.taskId, p.summary, p.outcome, undefined, p.generation),
     ),
 
     'msg.send': method(z.object({ projectId: Id, from: Id, to: Id, body: z.string().min(1).max(4000), taskId: z.string().nullish() }), (p) => coord.sendMessage(p.projectId, p.from, p.to, p.body, p.taskId)),

@@ -148,24 +148,19 @@ export class WorkerJournal {
       if (activeTaskIds.has(record.taskId)) continue;
       const detail = await client['task.get']({ id: record.taskId }).catch(() => null);
       const attested = detail?.runs.find(run => run.id === record.runId && run.generation === record.owner.generation && run.machine_id === this.machineId && run.status === 'stopped' && run.pid === null && run.stop_reason?.startsWith('Owner ') && run.stop_reason.includes('attested stopped:'));
-      if (attested) {
-        for (const utility of record.utilities ?? []) utility.state = 'exited';
-        record.pid = null; record.startedAt = null; record.phase = null;
-        record.exit = { runId: record.runId, taskId: record.taskId, owner: record.owner, reaped: true }; this.save();
-      }
       let utilitiesHeld = false;
       for (const utility of record.utilities ?? []) {
         if (utility.state === 'exited') continue;
-        if (utility.pid === null) { utilitiesHeld = true; continue; }
+        if (utility.pid === null) {
+          if (attested) { utility.state = 'exited'; this.save(); }
+          else utilitiesHeld = true;
+          continue;
+        }
         const proof = await terminateRecordedProcess({ pid: utility.pid, startedAt: utility.startedAt });
         if (!['exited', 'terminated'].includes(proof.status)) { utilitiesHeld = true; continue; }
         utility.state = 'exited'; this.save();
       }
-      if (record.exit) {
-        try { await this.replayRun(client, record); } catch { held.add(record.taskId); }
-        continue;
-      }
-      if (record.pid === null && record.phase?.endsWith(':spawning')) { held.add(record.taskId); continue; }
+      if (record.pid === null && record.phase?.endsWith(':spawning') && !attested) { held.add(record.taskId); continue; }
       if (record.pid !== null) {
         const identity = { pid: record.pid, startedAt: record.startedAt };
         const result = await terminateRecordedProcess({ pid: record.pid, startedAt: record.startedAt });
@@ -177,6 +172,12 @@ export class WorkerJournal {
         }
         record.exit = { runId: record.runId, taskId: record.taskId, owner: record.owner, reaped: true, ...(identity.startedAt !== null ? { process: { pid: identity.pid, startedAt: identity.startedAt } } : {}) };
         record.pid = null; record.startedAt = null; record.phase = null;
+      }
+      // An owner attestation clears the hub hold, never a local recorded identity.
+      // Only after checking every identity above may the returning worker retire it.
+      if (attested) {
+        record.phase = null;
+        record.exit = { runId: record.runId, taskId: record.taskId, owner: record.owner, reaped: true };
       }
       record.exit ??= { runId: record.runId, taskId: record.taskId, owner: record.owner, reaped: true,
         ...(record.phase && !record.phase.endsWith(':spawning') ? { noLaunchPhase: record.phase } : {}) };
