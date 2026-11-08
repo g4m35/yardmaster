@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.0
+- Durable claim generations fence reclaimed work, native handoffs, usage and bundle uploads. Worker channels on the same machine have independent hub/project-scoped journals and exclusive recovery owners, with preserved legacy migration records.
+- Native branch submissions capture immutable committed artifacts for checks, review and integration. Reclaim/resubmit works after failure; stale cleanup preserves dirty, detached, locked, advanced, unmerged and process-held work, including ownership changes during artifact scans.
+- Setup, coding, Git/copy/bundle utilities, checks, reviews and planning use supervised process lifetimes and proof-gated recovery. Cancellation stops owned groups; uncertain identities keep work and budget held for inspection.
+- Atomic budget reservations prevent concurrent admission from spending the same allowance. Sequenced usage retains actual, estimated, mixed and unknown provenance, including failed/canceled work and omitted cache counters. Limits distinguish native caps, reactive stops and admission; no universal hard billing cap is claimed.
+- Private, revocable project-scoped worker pairing, guided setup/doctor and a private agent dashboard distinguish managed, observed, stale and unconnected agents. Native/manual effort settings, floors, retry escalation and worker-local configuration remain under operator control; installed native routers are unchanged.
+
+Upgrade the hub and workers together after stopping their existing processes. Existing data migrates transactionally; unknown process identities remain held rather than assumed stopped. Older workers fail clearly, and older binaries refuse newer database schemas. See [fleet setup and legacy journal recovery](docs/FLEET.md) and [budget migration/recovery](docs/BUDGETS.md).
+
 ## 0.8.0
 - Optional JEV reasoning-effort integration for first-attempt Claude Code and Codex tasks. Uses a separately installed provider-neutral JSON CLI; no new dependency, credentials, or private router source. Disabled by default, shadow by default when enabled, with exact model/effort bindings and cache-policy gates.
 - Preserves explicit effort settings, retry escalation, resumed sessions, agent/model selection, coding prompts, permissions and verification. Bound Claude launches suppress duplicate native JEV routing, including on recovery and fallback.

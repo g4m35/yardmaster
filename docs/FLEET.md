@@ -2,6 +2,8 @@
 
 Yardmaster coordinates one owner's trusted machines through a private hub. Keep using your editor and native agent session; connecting MCP tools and optional hooks lets that session join the workflow. A connection is not permission to scan every native process. The hub registry reports managed runs, observed bridge/hook sessions, stale records and unconnected machine advertisements. Installed/advertised agents are not evidence of active processes. Hosts without a connection remain outside that coverage.
 
+For an existing installation, stop foreground workers with Ctrl+C and stop the hub with `ym hub stop` before upgrading. Upgrade the hub and every worker together, then restart them with their existing private home and local configuration. Database migration is transactional and retains uncertain process/budget holds. Older workers do not satisfy the new ownership contract; older binaries refuse a newer schema, so reinstalling one is not a database downgrade. Pending machine-wide journals need the explicit recovery procedure below.
+
 ## Set up the owner machine
 
 1. In a committed git repository, run `ym setup --dry-run`. To preview a particular connection, use `ym setup --agent codex --dry-run`.
