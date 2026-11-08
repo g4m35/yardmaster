@@ -9,6 +9,8 @@ process.on('exit', () => {
   rmSync(root, { recursive: true, force: true });
   if (process.env.YM_BENCH_CHILD_REV) console.log(JSON.stringify({ kind: 'cleanup', fixtureRemoved: !existsSync(root) }));
 });
+process.once('SIGINT', () => process.exit(130));
+process.once('SIGTERM', () => process.exit(143));
 process.env.YARDMASTER_HOME = join(root, 'home');
 mkdirSync(process.env.YARDMASTER_HOME, { recursive: true });
 writeFileSync(join(process.env.YARDMASTER_HOME, 'config.json'), JSON.stringify({ routing: { cheap: ['mock'], standard: ['mock'], strong: ['mock'] } }));
