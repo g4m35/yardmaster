@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
+import { StringDecoder } from 'node:string_decoder';
 
 const execFileP = promisify(execFile);
 
@@ -585,9 +586,9 @@ function scopedUtility(scope: UtilityScope, command: string, args: string[], opt
   const promise = (async (): Promise<RunResult> => {
     let stdout = '';
     let stderr = '';
-    const append = (stream: 'stdout' | 'stderr', d: Buffer) => {
+    const decoders = { stdout: new StringDecoder('utf8'), stderr: new StringDecoder('utf8') };
+    const append = (stream: 'stdout' | 'stderr', part: string) => {
       // execFile's existing 64 MiB output limit, enforced without retaining unbounded output.
-      const part = d.toString();
       if ((stream === 'stdout' ? stdout.length : stderr.length) + part.length > 64 * 1024 * 1024) throw new Error('utility output exceeded 64 MiB');
       if (stream === 'stdout') stdout += part;
       else stderr += part;
@@ -604,7 +605,7 @@ function scopedUtility(scope: UtilityScope, command: string, args: string[], opt
         termGraceMs: scope.options.termGraceMs, killWaitMs: scope.options.killWaitMs, exitGraceMs: scope.options.exitGraceMs,
         hookTimeoutMs: scope.options.hookTimeoutMs,
         onSpawn: scope.options.onSpawn ? (child) => scope.options.onSpawn!(token, child) : undefined,
-        onStdout: (d) => append('stdout', d), onStderr: (d) => append('stderr', d),
+        onStdout: (d) => append('stdout', decoders.stdout.write(d)), onStderr: (d) => append('stderr', decoders.stderr.write(d)),
       });
     } catch (err) {
       // Intent rejection (including a pending owner control or a temporary RPC outage)
@@ -627,6 +628,8 @@ function scopedUtility(scope: UtilityScope, command: string, args: string[], opt
     }
     if (!result.reaped || (result.end !== 'exit' && result.end !== 'spawn_failed')) return failScope(scope, new UtilityProcessError(token, result));
     if (result.end === 'spawn_failed') throw new Error(`Command not found or could not start: ${command}: ${result.error}`);
+    append('stdout', decoders.stdout.end());
+    append('stderr', decoders.stderr.end());
     return { code: result.code ?? 1, stdout, stderr };
   })();
   scope.pending.add(promise);
@@ -655,14 +658,18 @@ export async function runShell(
   opts: { cwd: string; timeoutMs: number; env?: NodeJS.ProcessEnv; signal?: AbortSignal; onSpawn?: OwnedRunOptions['onSpawn']; termGraceMs?: number; exitGraceMs?: number },
 ): Promise<ShellResult> {
   let out = '';
-  const cap = (d: Buffer) => {
-    out += d.toString();
-    if (out.length > 400_000) out = out.slice(-200_000);
+  const stdoutDecoder = new StringDecoder('utf8'), stderrDecoder = new StringDecoder('utf8');
+  const cap = (part: string) => {
+    out += part;
+    if (out.length > 400_000) out = out.slice(-200_000).replace(/^[\uDC00-\uDFFF]/u, '');
   };
   const r = await runOwnedProcess(command, [], {
     cwd: opts.cwd, env: opts.env ?? cleanEnv({ CI: '1' }), shell: true, signal: opts.signal, timeoutMs: opts.timeoutMs,
-    termGraceMs: opts.termGraceMs, exitGraceMs: opts.exitGraceMs, onSpawn: opts.onSpawn, onStdout: cap, onStderr: cap,
+    termGraceMs: opts.termGraceMs, exitGraceMs: opts.exitGraceMs, onSpawn: opts.onSpawn,
+    onStdout: d => cap(stdoutDecoder.write(d)), onStderr: d => cap(stderrDecoder.write(d)),
   });
+  cap(stdoutDecoder.end());
+  cap(stderrDecoder.end());
   const base = { stderr: '', pid: r.pid, reaped: r.reaped, reap: r.reap };
   switch (r.end) {
     case 'timeout':

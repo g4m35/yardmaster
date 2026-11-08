@@ -27,7 +27,7 @@ export function parseHandoff(raw: string | null | undefined): NativeHandoff | nu
 
 export const nativeArtifactRef = (taskId: string, generation: number) => `refs/yardmaster/native/${taskId}/${generation}`;
 
-/** Never check out, commit, reset, remove or update a ref in the native source. */
+/** Validate the native source without checking out, committing, resetting or removing the user's work. */
 export async function assertNativeSource(repo: string, data: NativeHandoff): Promise<string> {
   if (!(existsSync(data.cwd) && (realpathSync(data.cwd) === realpathSync(repo) || isLinkedWorktreeOf(data.cwd, repo)))) throw new Error('Unsupported remote native handoff: source must be an existing checkout of the hub repository. Native binary export is not implemented.');
   if ((await git(repo, ['check-ref-format', '--branch', data.branch], { allowFail: true })).code !== 0 || data.branch.startsWith('-')) throw new Error('Submit a local branch name.');

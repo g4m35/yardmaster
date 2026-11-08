@@ -25,9 +25,10 @@ import { defaultBranch, mainRepoRoot, projectIdFor } from './git.ts';
 import { basename } from 'node:path';
 import { writeFileSync } from 'node:fs';
 import { paths } from './paths.ts';
+import { controllerLastSeen } from './controller-activity.ts';
 import type { TerminateResult } from './proc.ts';
 import type { UsageSnapshot } from './usage.ts';
-import { utilitiesStopped, utilities, recordUtility, runUtilityKey, forgetStoppedUtilities, taskHasPendingUtilities, PENDING_UTILITY_SQL } from './utility-records.ts';
+import { utilitiesStopped, utilities, recordUtility, runUtilityKey, forgetStoppedUtilities, taskHasPendingUtilities, PENDING_UTILITY_SQL, hasUnregisteredUtilities, attestUtilitiesStopped } from './utility-records.ts';
 import { attachRun, createAllowanceReader, describeBudgetHold, enforcementFor, listHeld, observedSpendUsd, readAllowance, recordUsageDelta, release, requireHeld, reserve, type AllowanceQuery, type Reservation } from './budgets.ts';
 
 type Row = Record<string, unknown>;
@@ -535,22 +536,26 @@ export class Coordinator {
               const machine = this.getMachine(r.machine_id);
               const credential = this.db.prepare('SELECT COUNT(*) AS total, SUM(revoked_at IS NULL AND expires_at > ?) AS live FROM fleet_credentials WHERE machine_id = ?').get(Date.now(), r.machine_id) as { total: number; live: number | null };
               const externalOnHub = machine?.is_hub && this.getMeta(`http_run:${r.id}`) === '1';
-              return externalOnHub || !machine || Date.now() - machine.last_seen > LEASE_MS || (credential.total > 0 && !credential.live);
+              const controllerSeen = controllerLastSeen(this.db, r.task_id, r.machine_id, r.generation);
+              if (credential.total > 0 && !credential.live) return true;
+              if (controllerSeen !== null) return Date.now() - controllerSeen > LEASE_MS;
+              return externalOnHub || !machine || Date.now() - machine.last_seen > LEASE_MS;
             }
             return r.pid === null && (r.phase?.endsWith(':spawning') || this.getMeta(`recovery:${r.id}`) === 'local_exit_unacknowledged' ||
-              utilities(this.db, runUtilityKey(r.id)).some(child => child.state !== 'exited' && child.pid === null));
+              hasUnregisteredUtilities(this.db, runUtilityKey(r.id)));
           });
           if (!holds.length) throw new Error('No PID-less process-recovery hold exists for this task.');
+          const unreadableUtilities: string[] = [];
           for (const run of holds) {
-            for (const child of utilities(this.db, runUtilityKey(run.id))) if (child.state !== 'exited') recordUtility(this.db, runUtilityKey(run.id), { action: 'exit', token: child.token, pid: child.pid, startedAt: child.startedAt, reaped: true });
-            forgetStoppedUtilities(this.db, runUtilityKey(run.id));
+            if (attestUtilitiesStopped(this.db, runUtilityKey(run.id))) unreadableUtilities.push(run.id);
             this.setMeta(`recovery:${run.id}`, null);
             this.updateRun(run.id, { status: 'stopped', phase: null, pid: null, proc_started: null, ended_at: Date.now(), stop_reason: `Owner ${by} attested stopped: ${clip(note, 1000)}` });
             const budget = listHeld(this.db).find(r => r.runId === run.id);
             if (budget) release(this.db, budget.id, { kind: 'exited', runId: run.id });
           }
           this.event(current.project_id, id, 'warn', 'process.owner_confirmed_stopped', `${by} attested that run processes have stopped: ${clip(note, 1000)}`,
-            { runs: holds.map(r => ({ id: r.id, generation: r.generation, machineId: r.machine_id, phase: r.phase })) });
+            { runs: holds.map(r => ({ id: r.id, generation: r.generation, machineId: r.machine_id, phase: r.phase })),
+              ...(unreadableUtilities.length ? { unreadableUtilities } : {}) });
           return this.updateTask(id, { attention: 'Process exit was explicitly attested by the owner. Work is preserved; retry when ready.' });
         });
       }

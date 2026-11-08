@@ -15,7 +15,7 @@ import { Semaphore } from '../src/runner.ts';
 import { httpTransport } from '../src/transport.ts';
 import { WorkerLoop } from '../src/worker.ts';
 import { utilities, runUtilityKey } from '../src/utility-records.ts';
-import { sandbox, until } from './helpers.ts';
+import { sandbox, until, ageControllerActivity } from './helpers.ts';
 
 function latch() {
   let release!: () => void;
@@ -123,6 +123,7 @@ test('an offline same-ID HTTP terminal hold survives hub heartbeats and accepts 
     hub.coord.db.prepare('UPDATE runs SET started_at = ? WHERE id = ?').run(Date.now() - 120_000, id);
     hub.coord.updateRun(id, { status: 'succeeded', phase: 'collect', ended_at: Date.now() - 120_000 });
     hub.coord.updateTask(claim.task.id, { status: 'done' });
+    ageControllerActivity(hub.coord.db, claim.task.id);
     await recover(hub.coord, hub.machineId, new Set());
     assert.equal(hub.coord.getRun(id)!.status, 'cleanup_failed'); assert.equal(listHeld(hub.coord.db).length, 1);
     assert.ok(hub.coord.getMachine(hub.machineId)!.last_seen > Date.now() - 90_000);

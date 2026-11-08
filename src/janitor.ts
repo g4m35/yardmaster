@@ -12,6 +12,7 @@ import type { Run } from './types.ts';
 import type { TerminateResult } from './proc.ts';
 import { TERMINAL_STATUSES, type Project, type Task } from './types.ts';
 import { clip } from './text.ts';
+import { controllerLastSeen } from './controller-activity.ts';
 import { dirBytes, dirOfLogs, findArtifacts, freeGb, gb } from './disk.ts';
 
 export interface CleanItem {
@@ -414,7 +415,8 @@ export async function recover(coord: Coordinator, machineId: string, activeTaskI
     if (run.machine_id !== machineId || externalOnHub) {
       const machine = coord.getMachine(run.machine_id);
       // The embedded hub heartbeat says nothing about a separate controller on this same host.
-      const lastActivity = Math.max(externalOnHub ? 0 : machine?.last_seen ?? 0, run.started_at, run.ended_at ?? 0);
+      const controllerSeen = controllerLastSeen(coord.db, run.task_id, run.machine_id, run.generation);
+      const lastActivity = Math.max(controllerSeen ?? (externalOnHub ? 0 : machine?.last_seen ?? 0), run.started_at, run.ended_at ?? 0);
       if (now - lastActivity <= LEASE_MS) continue;
       tx(coord.db, () => {
         const fresh = coord.getRun(run.id);

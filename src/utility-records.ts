@@ -15,16 +15,43 @@ export type UtilityOperation =
 export const runUtilityKey = (runId: string) => `utility:run:${runId}`;
 export const integrationUtilityKey = (projectId: string) => `utility:integration:${projectId}`;
 /** Shared fail-closed predicate for a utility scope stored in meta under alias m. */
-export const PENDING_UTILITY_SQL = `(NOT json_valid(m.value) OR EXISTS (
-  SELECT 1 FROM json_each(CASE WHEN json_valid(m.value) THEN m.value ELSE '[]' END) child
-  WHERE COALESCE(json_extract(child.value, '$.state'), 'unknown') <> 'exited'))`;
+export const PENDING_UTILITY_SQL = `(CASE WHEN json_valid(m.value) THEN CASE WHEN json_type(m.value) = 'array' THEN EXISTS (
+  SELECT 1 FROM json_each(m.value) child WHERE (CASE WHEN child.type = 'object' THEN
+    json_extract(child.value, '$.state') = 'exited' AND json_type(child.value, '$.token') = 'text' AND
+    json_type(child.value, '$.command') = 'text' AND json_type(child.value, '$.pid') IN ('integer','null') AND
+    json_type(child.value, '$.startedAt') IN ('integer','real','null') ELSE 0 END) IS NOT 1
+  ) ELSE 1 END ELSE 1 END)`;
+
+export class UnreadableUtilityScopeError extends Error {
+  constructor(key: string) { super(`Unreadable utility metadata for ${key}; inspect this run and confirm every owned process stopped before recovery.`); }
+}
 
 export function utilities(db: Db, key: string): UtilityRecord[] {
   const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as { value: string } | undefined;
-  return row ? JSON.parse(row.value) as UtilityRecord[] : [];
+  if (!row) return [];
+  try {
+    const value: unknown = JSON.parse(row.value);
+    if (!Array.isArray(value) || !value.every(child => child && typeof child === 'object' &&
+      typeof child.token === 'string' && typeof child.command === 'string' && ['spawning', 'live', 'held', 'exited'].includes(child.state) &&
+      (child.pid === null || Number.isSafeInteger(child.pid)) &&
+      (child.startedAt === null || (typeof child.startedAt === 'number' && Number.isFinite(child.startedAt))))) throw new Error('shape');
+    return value as UtilityRecord[];
+  } catch { throw new UnreadableUtilityScopeError(key); }
 }
 export function utilitiesStopped(db: Db, key: string): boolean {
-  return utilities(db, key).every(child => child.state === 'exited');
+  try { return utilities(db, key).every(child => child.state === 'exited'); }
+  catch (error) { if (error instanceof UnreadableUtilityScopeError) return false; throw error; }
+}
+export function hasUnregisteredUtilities(db: Db, key: string): boolean {
+  try { return utilities(db, key).some(child => child.state !== 'exited' && child.pid === null); }
+  catch (error) { if (error instanceof UnreadableUtilityScopeError) return true; throw error; }
+}
+/** Trusted owner attestation only: no signal or automatic inference can retire unreadable process identities. */
+export function attestUtilitiesStopped(db: Db, key: string): boolean {
+  let unreadable = false;
+  try { utilities(db, key); } catch (error) { if (!(error instanceof UnreadableUtilityScopeError)) throw error; unreadable = true; }
+  db.prepare('DELETE FROM meta WHERE key = ?').run(key);
+  return unreadable;
 }
 export function taskHasPendingUtilities(db: Db, taskId: string): boolean {
   return !!db.prepare(`SELECT 1 FROM runs r JOIN meta m ON m.key = 'utility:run:' || r.id
@@ -70,7 +97,10 @@ export function forgetStoppedUtilities(db: Db, key: string): void {
 }
 export async function recoverUtilities(db: Db, key: string): Promise<boolean> {
   let confirmed = true;
-  for (const child of utilities(db, key).filter(child => child.state !== 'exited')) {
+  let records: UtilityRecord[];
+  try { records = utilities(db, key); }
+  catch (error) { if (error instanceof UnreadableUtilityScopeError) return false; throw error; }
+  for (const child of records.filter(child => child.state !== 'exited')) {
     if (child.pid === null) { confirmed = false; continue; }
     const proof = await terminateRecordedProcess({ pid: child.pid, startedAt: child.startedAt });
     if (!['exited', 'terminated'].includes(proof.status)) { confirmed = false; continue; }

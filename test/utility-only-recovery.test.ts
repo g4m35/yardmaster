@@ -13,7 +13,8 @@ import { listHeld } from '../src/budgets.ts';
 import { groupAlive, processStartTime, terminateOwnedGroup } from '../src/proc.ts';
 import { recordUtility, runUtilityKey, taskHasPendingUtilities, utilities } from '../src/utility-records.ts';
 import { WorkerJournal } from '../src/worker-journal.ts';
-import { sandbox, sh } from './helpers.ts';
+import { sandbox, sh, ageControllerActivity } from './helpers.ts';
+import { buildRegistry } from '../src/registry.ts';
 
 type Kind = 'embedded' | 'remote' | 'same-host';
 async function fixture(kind: Kind, state: 'canceled' | 'ready' | 'needs_human' | 'queued' | 'done' = 'canceled') {
@@ -55,6 +56,7 @@ async function fixture(kind: Kind, state: 'canceled' | 'ready' | 'needs_human' |
     if (state === 'canceled') hub.coord.control(claim.task.id, 'cancel', 'fixture');
     else hub.coord.updateTask(claim.task.id, { status: state, lease_until: null });
     hub.coord.db.prepare('UPDATE runs SET started_at = ?, ended_at = ? WHERE task_id = ?').run(Date.now() - 120_000, Date.now() - 120_000, claim.task.id);
+    ageControllerActivity(hub.coord.db, claim.task.id);
     assert.equal(listHeld(hub.coord.db).length, 0, 'both model phase allowances are already released');
     return { ...box, dbFile, hub, url, project, machine, client, task: claim.task, owner, run, worktree,
       async close() { await hub.stop(); hub.coord.db.close(); rmSync(box.root, { recursive: true, force: true }); } };
@@ -148,8 +150,9 @@ test('embedded recovery reaps a recorded utility-only child after its active con
 test('connected remote controller keeps utility-only ownership while its heartbeat is fresh', async () => {
   const f = await fixture('remote', 'ready');
   try {
-    f.hub.coord.heartbeatMachine(f.machine, 'connected worker', { agents: ['mock'], repos: { [f.project.id]: f.repo },
-      maxParallel: 1, running: 0, loadPerCpu: 0, freeMemMb: 1000, platform: process.platform, version: 'fixture' });
+    await f.client['machine.heartbeat']({ id: f.machine, name: 'connected worker', info: { agents: ['mock'], repos: { [f.project.id]: f.repo },
+      maxParallel: 1, running: 0, loadPerCpu: 0, freeMemMb: 1000, platform: process.platform, version: 'fixture' },
+      running: [{ taskId: f.task.id, generation: f.task.generation }] });
     await recover(f.hub.coord, f.hub.machineId, new Set());
     assert.equal(f.hub.coord.getRun(f.run)!.status, 'stopped'); assert.equal(f.hub.coord.getMeta(`recovery:${f.run}`), null);
     assert.equal(f.hub.coord.getTask(f.task.id)!.status, 'ready'); assert.ok(taskHasPendingUtilities(f.hub.coord.db, f.task.id));
@@ -187,4 +190,60 @@ test('an earlier phase exit never bypasses pending utility, generation or spawni
     await assert.rejects(f.client['run.exit']({ ...exit, noLaunchPhase: 'collect' }), /phase does not match/i);
     assert.equal(f.hub.coord.getRun(f.run)!.status, 'cleanup_failed');
   } finally { await f.close(); }
+});
+
+for (const evidence of ['unreleased', 'missing reservation'] as const) test(`a ${evidence} phase cannot supply prior-exit proof`, async () => {
+  const f = await fixture('remote');
+  try {
+    await recover(f.hub.coord, f.hub.machineId, new Set());
+    await f.client['run.utility']({ runId: f.run, taskId: f.task.id, owner: f.owner,
+      operation: { action: 'exit', token: 'post-review', pid: null, startedAt: null, reaped: true } });
+    if (evidence === 'unreleased') f.hub.coord.db.prepare("UPDATE budget_reservations SET state = 'held' WHERE run_id = ?").run(f.run);
+    else f.hub.coord.db.prepare('DELETE FROM budget_reservations WHERE run_id = ?').run(f.run);
+    await assert.rejects(f.client['run.exit']({ runId: f.run, taskId: f.task.id, owner: f.owner, reaped: true }), /identity-proven recovery/i);
+    assert.equal(f.hub.coord.getRun(f.run)!.status, 'cleanup_failed');
+    assert.equal(f.hub.coord.spentToday(), .25);
+  } finally { await f.close(); }
+});
+
+for (const raw of ['{', '{}', '["bad"]', '[{"state":"exited"}]']) test(`unreadable utility scope ${raw} is held per run without stopping other recovery`, async () => {
+  const f = await fixture('embedded');
+  try {
+    f.hub.coord.setMeta(runUtilityKey(f.run), raw);
+    const healthy = f.hub.coord.addTasks(f.project.id, [{ title: 'Healthy independent recovery', agent: 'mock', files: ['healthy.txt'] }], 'fixture').created[0]!;
+    const claim = await f.hub.client['worker.claim']({ machineId: f.hub.machineId, agents: ['mock'], repos: { [f.project.id]: f.repo } });
+    assert.equal(claim?.task.id, healthy.id);
+    const id = await f.hub.client['run.start']({ taskId: healthy.id, machineId: f.hub.machineId, agent: 'mock', logPath: '',
+      owner: { generation: claim!.task.generation, assignee: claim!.task.assignee! } });
+    f.hub.coord.updateRun(id, { status: 'succeeded', phase: 'collect', ended_at: Date.now() });
+    f.hub.coord.control(healthy.id, 'cancel', 'fixture');
+    await assert.doesNotReject(recover(f.hub.coord, f.hub.machineId, new Set()));
+    assert.equal(f.hub.coord.getRun(f.run)!.status, 'cleanup_failed');
+    assert.equal(f.hub.coord.getRun(id)!.status, 'succeeded'); assert.equal(listHeld(f.hub.coord.db).length, 0);
+    assert.equal(f.hub.coord.getMeta(runUtilityKey(f.run)), raw, 'unknown identities remain intact until explicit owner confirmation');
+    assert.throws(() => recordUtility(f.hub.coord.db, runUtilityKey(f.run), { action: 'exit', token: 'post-review', pid: null, startedAt: null, reaped: true }), /Unreadable/);
+    const entry = buildRegistry(f.hub.coord.db).entries.find(entry => entry.id === `run:${f.run}`)!;
+    assert.equal(entry.exitUnconfirmed, true); assert.match(entry.utilityChildren![0]!.command, /Unreadable/);
+    f.hub.coord.control(f.task.id, 'confirm-stopped', 'fixture', 'Inspected all processes despite damaged metadata and confirmed all stopped.');
+    assert.equal(f.hub.coord.getMeta(runUtilityKey(f.run)), null);
+    assert.equal(f.hub.coord.getTask(f.task.id)!.status, 'canceled'); assert.equal(f.hub.coord.spentToday(), .25);
+    const audit = f.hub.coord.eventsSince(0, f.project.id, 100).find(event => event.kind === 'process.owner_confirmed_stopped');
+    assert.match(JSON.stringify(audit?.data), new RegExp(f.run));
+  } finally { await f.close(); }
+});
+
+test('hub startup succeeds with a held unreadable utility scope', async () => {
+  const f = await fixture('embedded'); let originalClosed = false; let restarted: Hub | undefined;
+  try {
+    f.hub.coord.setMeta(runUtilityKey(f.run), '{');
+    await f.hub.stop(); f.hub.coord.db.close(); originalClosed = true;
+    restarted = new Hub({ db: openDb(f.dbFile), token: 'fixture-owner', machineId: f.machine,
+      includeMock: false, host: '127.0.0.1', port: 0, tickMs: 60_000, quiet: true });
+    await restarted.start();
+    assert.equal(restarted.coord.getRun(f.run)!.status, 'cleanup_failed');
+    assert.equal(restarted.coord.getMeta(runUtilityKey(f.run)), '{');
+  } finally {
+    if (restarted) { await restarted.stop(); restarted.coord.db.close(); }
+    if (!originalClosed) await f.close(); else rmSync(f.root, { recursive: true, force: true });
+  }
 });

@@ -16,8 +16,8 @@ import { claude, codex, opencode } from '../src/adapters/builtin.ts';
 import { changedLineCount } from '../src/review.ts';
 import { priceFor } from '../src/config.ts';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync as mkdtemp, rmSync as rmrf, writeFileSync as write } from 'node:fs';
-import { tmpdir as tmp } from 'node:os';
+import { rmSync as rmrf, writeFileSync as write } from 'node:fs';
+import { tempDir } from './helpers.ts';
 import { taskChecks, verifyCommands } from '../src/runner.ts';
 import { planGoal } from '../src/planner.ts';
 import { createServer } from 'node:http';
@@ -370,16 +370,16 @@ test('Codex output tokens already include reasoning, so reasoning is not added a
   assert.equal(priceFor(config, 'codex', null).outPerM, 10);
 });
 
-test('lockfile churn does not make a change "large" for review', () => {
-  const dir = mkdtemp(join(tmp(), 'ym-review-'));
+test('lockfile churn does not make a change "large" for review', async () => {
+  const dir = tempDir('ym-review-');
   try {
     const sh = (...a: string[]) => execFileSync('git', a, { cwd: dir, stdio: 'pipe' });
     sh('init', '-q', '-b', 'main'); sh('config', 'user.email', 't@e.com'); sh('config', 'user.name', 'T');
     write(join(dir, 'a.js'), 'x\n'); sh('add', '-A'); sh('commit', '-qm', 'base');
     write(join(dir, 'package-lock.json'), Array.from({ length: 5000 }, (_, i) => `"line${i}"`).join('\n'));
     write(join(dir, 'a.js'), 'x\ny\n'); sh('add', '-A'); sh('commit', '-qm', 'bump');
-    return changedLineCount(dir, 'HEAD~1').then((n) => assert.equal(n, 1));
+    assert.equal(await changedLineCount(dir, 'HEAD~1'), 1);
   } finally {
-    setTimeout(() => rmrf(dir, { recursive: true, force: true }), 2000).unref();
+    rmrf(dir, { recursive: true, force: true });
   }
 });

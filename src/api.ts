@@ -18,6 +18,7 @@ import { buildRegistry } from './registry.ts';
 import { tx } from './transaction.ts';
 import { WORKER_ACTIVE_STATUSES, WORKER_FINALIZE_STATUSES } from './worker-policy.ts';
 import { recordUtility, runUtilityKey, utilitiesStopped, utilities } from './utility-records.ts';
+import { noteControllerActivity } from './controller-activity.ts';
 
 /**
  * The single API surface. The hub serves it over HTTP, the CLI and MCP server call it locally or
@@ -167,6 +168,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
         if (run.status === 'cleanup_failed') throw new Error('Run cannot launch another utility while process cleanup is unconfirmed.');
       }
       recordUtility(coord.db, runUtilityKey(p.runId), p.operation);
+      if (hooks.externalWorker) noteControllerActivity(coord.db, p.taskId, run.machine_id, p.owner.generation);
     })),
     'run.usage': method(z.object({ runId: RunId, taskId: TaskId, owner: Owner, sequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
       usage: z.object({ costUsd: z.number().finite().nonnegative(), tokensIn: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), tokensOut: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
@@ -345,6 +347,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
         return {
           controls: p.running.map((r) => {
             const renewed = coord.renewLease(r.taskId, p.id, r.generation);
+            if (hooks.externalWorker) noteControllerActivity(coord.db, r.taskId, p.id, r.generation);
             const t = coord.getTask(r.taskId);
             return { taskId: r.taskId, status: t?.status ?? 'missing', control: t?.control ?? null, assignee: t?.assignee ?? null, generation: t?.generation ?? 0, renewed };
           }),
@@ -389,6 +392,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       // Immutable run provenance: review and upload can reuse this run's utilities after a phase exit.
       // Persist before the response permits launch; a same-host worker is not this hub's controller.
       if (hooks.externalWorker && p.machineId === hooks.machineId) coord.setMeta(`http_run:${run.id}`, '1');
+      if (hooks.externalWorker) noteControllerActivity(coord.db, p.taskId, p.machineId, p.owner!.generation);
       if (lessons.length) {
         coord.updateRun(run.id, { lessons });
         markUsed(coord, lessons);

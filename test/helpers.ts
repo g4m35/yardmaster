@@ -3,6 +3,13 @@ import { mkdtempSync, writeFileSync, mkdirSync, realpathSync, rmSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import type { Db } from '../src/db.ts';
+import { controllerActivityKey } from '../src/controller-activity.ts';
+
+/** Fault-injected elapsed controller time, alongside the tests' backdated run/machine timestamps. */
+export function ageControllerActivity(db: Db, taskId: string, seenAt = Date.now() - 120_000): void {
+  db.prepare("UPDATE meta SET value = json_set(value, '$.seenAt', ?) WHERE key = ?").run(seenAt, controllerActivityKey(taskId));
+}
 
 export function sh(cwd: string, cmd: string, args: string[]): string {
   return execFileSync(cmd, args, { cwd, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } }).trim();

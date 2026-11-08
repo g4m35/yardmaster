@@ -1,5 +1,5 @@
 import type { Db } from './db.ts';
-import { utilities, runUtilityKey, PENDING_UTILITY_SQL, type UtilityRecord } from './utility-records.ts';
+import { utilities, runUtilityKey, PENDING_UTILITY_SQL, UnreadableUtilityScopeError, type UtilityRecord } from './utility-records.ts';
 
 /** Append alongside pairing.migrationDDL in the versioned migration list, never on a registry read. */
 export const registryMigrationDDL = `
@@ -159,7 +159,12 @@ export function buildRegistry(db: Db, options: {
       (r.task_status === 'ready' || (r.task_lease !== null && r.task_lease > now)));
     const pid = number(r.pid);
     const processStartedAt = number(r.proc_started);
-    const children = utilities(db, runUtilityKey(r.id)).filter(child => child.state !== 'exited');
+    let children: UtilityRecord[];
+    try { children = utilities(db, runUtilityKey(r.id)).filter(child => child.state !== 'exited'); }
+    catch (error) {
+      if (!(error instanceof UnreadableUtilityScopeError)) throw error;
+      children = [{ token: 'unreadable', command: 'Unreadable utility metadata; owner inspection required', state: 'held', pid: null, startedAt: null }];
+    }
     const exitUnconfirmed = active || ['lost', 'cleanup_failed'].includes(r.status) || children.length > 0;
     entries.push({ id: `run:${r.id}`, source: 'run', exitUnconfirmed, state: exitUnconfirmed && (!active || !current || f.freshness !== 'fresh') ? 'stale' : 'managed',
       agent: text(r.agent), model: text(r.model), role: text(r.role), phase: text(r.phase), effort: text(r.effort),

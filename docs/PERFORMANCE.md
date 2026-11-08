@@ -1,18 +1,18 @@
 # Performance
 
-## Baseline before statement reuse
+## Statement reuse under quiet CI
 
-The dedicated [GitHub Actions run for `8213a76`](https://github.com/g4m35/yardmaster/actions/runs/42528394612) measured a regression against `028cc2a080f7962256d5feea2b93a79f4f17ab61`. The runner used Node 24.22.2, Linux x64, four logical CPUs and 16 GiB RAM. Its merge checkout `65a1e95` and PR head had the same runtime source tree (`c3778ff0638b8a907e385a9bf6abcf509243154e`); the downloaded artifact digest was verified.
+The dedicated [GitHub Actions run for `f3b3cfc`](https://github.com/g4m35/yardmaster/actions/runs/42530865992) measured the statement-reuse change against `028cc2a080f7962256d5feea2b93a79f4f17ab61`. The runner used Node 24.22.2, Linux x64, four logical CPUs and 16 GiB RAM. Its merge checkout `7dabb3d` and PR head had the same runtime source tree (`2fbf63208a0af0ca70eb6f2cecaaedea2ff2af7a`); artifact `13637566759` had verified SHA-256 `c52adb2abadbac110635451632ebfbcc52d1515da430caea7228b832e2c0025a`.
 
-| Operation | Baseline | `8213a76` | Change |
+| Operation | Baseline | `f3b3cfc` | Change |
 | --- | ---: | ---: | ---: |
-| Claim pass, no matching agent | 103.40 ms | 113.15 ms | +9.4% |
-| Board read | 121.55 ms | 139.55 ms | +14.8% |
-| Individual blockers outside a shared pass | 686.25 ms | 736.25 ms | +7.3% |
+| Claim pass, no matching agent | 142.45 ms | 99.15 ms | −30.4% |
+| Board read | 166.90 ms | 92.40 ms | −44.6% |
+| Individual blockers outside a shared pass | 928.60 ms | 943.35 ms | +1.6% |
 
-Each entry is the median across four separate processes per revision, interleaved in alternating order. Every process seeds the same 1,000 tasks with 30 marked running, then performs one warmup and five timed calls per operation. The observed CPU idle fraction before each process was at least 96.4%. This isolates the comparison from the loaded-host measurements below; it does not promise these absolute times on another machine. The previous two dedicated runs also found slower claim/board reads (roughly 12–17%), so the regression is not dismissed as noise.
+Each entry is the median across four separate processes per revision, interleaved in alternating order. Every process seeds the same 1,000 tasks with 30 marked running, then performs one warmup and five timed calls per operation. The artifact confirms low background load and removal of every fixture. This does not promise these absolute times on another machine or make the individual-blocker path faster. Before statement reuse, [run `42528394612` at `8213a76`](https://github.com/g4m35/yardmaster/actions/runs/42528394612) measured claim/board ratios of 1.09×/1.15× on its own paired runner; earlier runs corroborated the regression. Compare within-run ratios rather than absolute times across machines.
 
-End-of-process median RSS was 412.6 MiB for the baseline and 426.0 MiB for `8213a76` (+13.4 MiB, +3.2%); peak RSS had the same medians. This includes fixture construction and all three operations, and does not isolate memory by feature. The fixture contains no usage-ledger history, actual run rows, attached budget holds, provider/network calls, HTTP or browser rendering. It cannot establish scaling with a large ledger or many held runs, provider savings, or real-agent end-to-end latency.
+End-of-process median RSS was 410.0 MiB for the baseline and 372.8 MiB for `f3b3cfc`; peak RSS had the same medians. This includes fixture construction and all three operations, so it does not attribute memory changes to the retained statements. The fixture contains no usage-ledger history, actual run rows, attached budget holds, provider/network calls, HTTP or browser rendering. It cannot establish scaling with a large ledger or many held runs, provider savings, or real-agent end-to-end latency.
 
 Reproduce the committed comparison harness from a clean candidate checkout after installing dependencies, with the baseline object fetched:
 
@@ -20,7 +20,7 @@ Reproduce the committed comparison harness from a clean candidate checkout after
 node bench/compare.mjs 028cc2a080f7962256d5feea2b93a79f4f17ab61 > performance.json
 ```
 
-The command measures the checked-out candidate source and loads baseline modules from Git in memory. It records source revisions, CPU idle/load, all paired results, RSS and fixture-removal proof. The CI `performance` job runs this command against the PR base; it records results without enforcing a numerical threshold. The digest/source binding and raw eight-process results for the table are retained in `outputs/hillclimb-2026-11-07/ci-performance-8213-binding.json` and `ci-performance-8213/performance.json`.
+The command measures the checked-out candidate source and loads baseline modules from Git in memory. It records source revisions, CPU idle/load, all paired results, RSS and fixture-removal proof. The CI `performance` job runs this command against the PR base; it records results without enforcing a numerical threshold. The linked public run's `scheduler-performance` artifact contains the eight raw process results and conditions. Future runtime revisions must use their own source-bound CI results.
 
 ## Scheduler profiling and statement reuse
 
@@ -30,7 +30,7 @@ Four interleaved diagnostic triplets kept the original fixture and warmup/sample
 
 `getTask` and `latestRunUncached` now lazily retain those two prepared statements per coordinator. Every lookup still executes `.get()` with its current task ID; query text, run-role filter and timestamp/rowid ordering are unchanged. This removes repeated compilation while retaining fresh results, and keeps recovery/admission rights independent of display caches. Tests cover no-row warmup, different IDs, same-connection updates, external commits, savepoint rollback and equal-time run ordering. The resource tradeoff is two retained SQLite statements per coordinator, released with its database; no memory reduction is claimed. Use the dedicated CI comparison to qualify the optimization under quiet load; local profiles alone cannot establish that claim.
 
-A subsequent four-pair comparison loaded all candidate source bytes once into memory, including statement reuse and the concurrent recovery fix, and verified those bytes were unchanged at completion. Against the original baseline, claim/board medians were 42.63/34.83 ms versus 60.34/57.45 ms (0.71×/0.61×). Individual blockers were 344.02 versus 366.05 ms (0.94×), with two pairs slower and two faster. CPU idle samples were 44.7–71.1%, with substantial absolute variation. This supports the bounded optimization and does not supersede quiet-CI regression evidence or establish a production no-regression result. The complete source SHA-256 manifest, paired values, conditions and fixture-removal records are in `outputs/hillclimb-2026-11-07/optimized-baseline-comparison.json`; diagnostic scripts, profiles and raw ablations are adjacent. A fresh dedicated-runner comparison is required before accepting a quiet-load performance claim for this source.
+A subsequent four-pair local comparison captured all candidate source bytes once and verified they were unchanged at completion. Against the original baseline, claim/board medians were 42.63/34.83 ms versus 60.34/57.45 ms (0.71×/0.61×). Individual blockers were 344.02 versus 366.05 ms (0.94×), with two pairs slower and two faster. CPU idle samples were 44.7–71.1%, with substantial absolute variation. Those local diagnostics support the bounded optimization; the public quiet-CI result above supplies the qualification for `f3b3cfc`. Neither establishes a universal production no-regression guarantee.
 
 ## Local stress check
 
@@ -187,7 +187,7 @@ The scheduler harness uses one warmup and five timed repetitions; the API harnes
 
 Board API median fell 41.4% and p95 fell 47.8% in this pair; no provider calls were made and no provider-cost savings were measured. End-of-run RSS increased from 165.6 to 199.8 MiB, so these numbers do not establish a memory improvement. Registry/event paths and individual blocker calls do not use the new pass snapshot; their changes illustrate measurement/load variability and should not be attributed to it. The historical 47/50 ms scheduler/board numbers remain faster than these reruns; this is not a claim of recovering historical performance or a general no-regression guarantee. The harnesses seed no usage ledger history or attached budget holds, so they do not characterize large-ledger or many-held-run scaling.
 
-Every benchmark ran under a wrapper-owned `mkdtemp` TMPDIR removed in `finally`; the scheduler's otherwise-unremoved fixture root was contained within it. New tests verify a single aggregation for 100 repeated display reads, cache/fresh equivalence, same-connection and external-process reserve/usage/release refreshes, two independently warmed process displays racing for one $5 budget, coordinator board updates within a pass, rollback exit, and midnight with lifetime task spend and cross-day holds retained. Detailed commands, raw results, checks and limitations are in `outputs/hillclimb-2026-11-07/gpt-budget-performance.md` and its adjacent `budget-*.log` evidence.
+Every benchmark ran under a wrapper-owned `mkdtemp` TMPDIR removed in `finally`; the scheduler's fixture root was contained within it. Tests verify a single aggregation for 100 repeated display reads, cache/fresh equivalence, same-connection and external-process reserve/usage/release refreshes, two independently warmed process displays racing for one $5 budget, coordinator board updates within a pass, rollback exit, and midnight with lifetime task spend and cross-day holds retained. Reproduce the current source with the committed benchmark commands above.
 
 Validation for this bounded change: typecheck, build and all 299 tests passed; the full test process exited naturally in 98.8 seconds without force-exit.
 
@@ -207,6 +207,6 @@ Four interleaved pairs used the original `028cc2a` scheduler benchmark text on b
 | Board read | 55.25 ms | 63.80 ms | 1.15× |
 | Individual blockers outside a shared pass | 326.20 ms | 360.15 ms | 1.10× |
 
-The new fencing, recovery and reservation work has measurable overhead. This sample falls within the review's 1.25× target; it is not a universal speed claim. Host load ranged roughly 8–10 and reported free memory was low; other applications were not controlled, so this is a balanced loaded-host comparison, not a low-load certification. These fixtures have no large usage ledger or many historical held runs. Raw invocation/conditions and all eight results are in `outputs/hillclimb-2026-11-07/round4-paired-benchmark.log`; the in-memory loader removes its exact benchmark temp root on process exit.
+The fencing, recovery and reservation work had measurable overhead in this historical sample. It fell within that review's 1.25× target; it is not a universal speed claim. Host load ranged roughly 8–10 and reported free memory was low; other applications were not controlled, so this was a balanced loaded-host comparison, not quiet-load certification. These fixtures have no large usage ledger or many historical held runs. The later public CI comparison at the top is the newer evidence; the benchmark loader removes its exact temporary fixture root on process exit.
 
 A separate real paired HTTP test held the integration lock while uploading a verified fixture branch. Receipt completed in 138 ms before that lock was released. Imports now use independent owned quarantine scopes with at most two concurrent Git imports, preserving generation checks and shutdown/restart process ownership. They no longer queue behind integration checks. This is a small local bundle measurement, not remote-network throughput evidence.
