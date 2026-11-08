@@ -312,3 +312,19 @@ test('existing task controls and pause/resume still send the original owner RPC 
   assert.equal(h.calls.find(c => c.method === 'fleet.pause')!.params.stopRunning, false);
   assert.equal(h.calls.some(c => c.method === 'fleet.resume'), true);
 });
+
+
+test('default registry view retains unconfirmed main and utility exits without offering unsafe stop', async () => {
+  const h = harness();
+  const rows = ['lost', 'cleanup_failed', 'succeeded'].map((status, i) => entry({ id: `held-${i}`, status, state: 'stale',
+    exitUnconfirmed: true, utilityChildren: i === 2 ? [{ token: 'held', state: 'spawning', pid: null }] : [],
+    capabilities: { inspect: true, requestStop: false } }));
+  rows.push(entry({ id: 'finished', status: 'succeeded', exitUnconfirmed: false, capabilities: { inspect: true, requestStop: false } }));
+  h.respond(method => method === 'registry.list' ? snapshot(rows) : board());
+  await h.api.refresh();
+  assert.equal(h.$('registry').children.length, 3);
+  assert.doesNotMatch(h.$('registry').textContent, /Request stop/);
+  h.api.showEntry('held-2');
+  assert.match(h.$('d-facts').textContent, /succeeded/);
+  assert.doesNotMatch(h.$('d-acts').textContent, /Request stop/);
+});

@@ -5,6 +5,7 @@ import { runOneShot, type OneShotHooks, type OneShotResult } from './oneshot.ts'
 import type { Client } from './api.ts';
 import { processStartTime } from './proc.ts';
 import { NewTaskSchema, type NewTask } from './types.ts';
+import { normalizePlanningHub, PlanningJournal } from './planning-journal.ts';
 
 const PlanSchema = z.object({ tasks: z.array(NewTaskSchema).min(1).max(30) });
 
@@ -76,13 +77,16 @@ export async function planGoal(goal: string, opts: { cwd: string; agent: string;
 }
 
 /** Product planning lifecycle. The owner API admits before launch and records every outcome, including bad JSON. */
-export async function planGoalManaged(goal: string, opts: { cwd: string; agent: string; config: Config; client: Client; projectId: string; machineId: string }) {
+export async function planGoalManaged(goal: string, opts: { cwd: string; agent: string; config: Config; client: Client; projectId: string; machineId: string; hub: string }) {
+  // Refuse missing/credential-bearing hub identities before admission, never use a machine-only key.
+  const hub = normalizePlanningHub(opts.hub);
   const model = agentSettings(opts.config, opts.agent).models.strong ?? null;
   const startedAt = await processStartTime(process.pid);
   if (startedAt === null) throw new Error('Planning CLI owner identity could not be read.');
   const owner = { pid: process.pid, startedAt };
   const admissionRequestedAt = Date.now();
   const admitted = await opts.client['plan.start']({ projectId: opts.projectId, machineId: opts.machineId, agent: opts.agent, model, owner });
+  const journal = new PlanningJournal({ hub, machineId: opts.machineId, projectId: opts.projectId, runId: admitted.runId, owner });
   const stop = new AbortController();
   const onSignal = () => stop.abort('Planning interrupted.');
   process.once('SIGINT', onSignal);
@@ -99,11 +103,9 @@ export async function planGoalManaged(goal: string, opts: { cwd: string; agent: 
       if (Date.now() - lastHeartbeat >= admitted.leaseMs) stop.abort('Planning invocation heartbeat lease expired.');
     }).finally(() => { heartbeatPending = false; });
   }, Math.min(admitted.heartbeatMs, admitted.leaseMs / 4));
-  let sequence = 0;
   let result: OneShotResult | null = null;
   let spawned = false;
   let phase = 'plan';
-  let accounted = true;
   let finalizing = false;
   let succeeded = false;
   let reason = 'Planning failed before launch.';
@@ -112,21 +114,26 @@ export async function planGoalManaged(goal: string, opts: { cwd: string; agent: 
       hooks: {
         beforeSpawn: async () => {
           if (stop.signal.aborted) throw new Error(String(stop.signal.reason));
+          journal.spawning();
           await opts.client['plan.spawning']({ runId: admitted.runId }); phase = 'plan:spawning';
         },
         onSpawn: async ({ pid, startedAt }) => {
           spawned = true;
-          accounted = false;
           if (startedAt === null) throw new Error('Planning process identity could not be read.');
+          journal.spawned({ pid, startedAt });
           await opts.client['plan.spawn']({ runId: admitted.runId, pid, startedAt });
         },
-        onUsage: async (usage) => { if (finalizing) return; await opts.client['plan.usage']({ runId: admitted.runId, sequence: ++sequence, usage }); },
+        onUsage: async (usage) => { if (finalizing) return; journal.snapshot(usage); await journal.sendUsage(opts.client); },
       },
       onResult: async (r) => {
         finalizing = true;
         result = r;
-        await opts.client['plan.usage']({ runId: admitted.runId, sequence: ++sequence, usage: r.usage });
-        accounted = true;
+        // Persist measured totals and exit proof before parsing can fail or any final RPC can lose its acknowledgment.
+        journal.complete(r.usage, { reaped: r.reaped, succeeded: false, reason: 'Planning outcome was interrupted before validation.',
+          ...(r.pid !== null && r.procStartedAt !== null ? { process: { pid: r.pid, startedAt: r.procStartedAt } } : {}),
+          ...(r.status === 'spawn_failed' && r.pid === null && phase === 'plan:spawning' ? { spawnFailure: { status: 'spawn_failed', pid: null } } : {}),
+          ...(!spawned && phase === 'plan' ? { noLaunchPhase: phase } : {}),
+        });
         if (!r.reaped) throw new Error('Planning process cleanup was not confirmed; its budget remains held.');
       },
     });
@@ -140,11 +147,12 @@ export async function planGoalManaged(goal: string, opts: { cwd: string; agent: 
     // An unexpected throw after spawn is not evidence of exit. Fail closed and retain its hold.
     const completed = result as OneShotResult | null;
     try {
-      if (accounted) await opts.client['plan.finish']({ runId: admitted.runId, reaped: completed?.reaped ?? !spawned, succeeded, reason,
+      journal.outcome({ reaped: completed?.reaped ?? !spawned, succeeded, reason,
         ...(completed?.pid !== null && completed?.pid !== undefined && completed.procStartedAt !== null ? { process: { pid: completed.pid, startedAt: completed.procStartedAt } } : {}),
         ...(completed?.status === 'spawn_failed' && completed.pid === null && phase === 'plan:spawning' ? { spawnFailure: { status: 'spawn_failed', pid: null } } : {}),
         ...(!spawned && phase === 'plan' ? { noLaunchPhase: phase } : {}),
       });
+      await journal.replay(opts.client);
     } finally {
       clearInterval(heartbeat);
       process.off('SIGINT', onSignal);

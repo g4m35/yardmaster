@@ -667,7 +667,7 @@
     const root = $('registry');
     const status = $('registry-status');
     if (!registry) { root.replaceChildren(); status.textContent = registryError ? 'Agent view unavailable. ' + registryError + ' Use Refresh now to retry.' : 'Loading connected agents…'; return; }
-    const entries = registry.entries.filter(e => $('registry-view').value === 'all' || e.source !== 'run' || e.status === 'running');
+    const entries = registry.entries.filter(e => $('registry-view').value === 'all' || e.source !== 'run' || e.status === 'running' || e.exitUnconfirmed === true || ['lost', 'cleanup_failed'].includes(e.status) || (e.utilityChildren || []).length > 0);
     const taskNames = new Map([...(board?.active || []), ...(board?.attention || []), ...(board?.recentDone || [])].map(t => [t.id, t.title]));
     status.textContent = registryError ? 'Agent view could not refresh. Showing snapshot from ' + age(registryReceivedAt) + '. Use Refresh now to retry.' : 'Snapshot received ' + age(registryReceivedAt) + '. ' + (entries.length ? 'Only connected or machine-reported clients are visible.' : 'No connected agents reported. Run “ym connect all” in an initialized repository, then refresh.');
     root.replaceChildren(...entries.map(e => el('article', { class: 'registry-row', 'data-state': e.state },

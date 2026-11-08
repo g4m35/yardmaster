@@ -193,3 +193,30 @@ test('corrupt machine info is ignored and registry reads never perform DDL or re
     assert.equal(stale.entries[0]!.freshness, 'stale');
   } finally { f.db.close(); }
 });
+
+
+test('unconfirmed runs and utilities stay current beyond history limits and remain project scoped', () => {
+  const f = fixture();
+  try {
+    f.machine('m-one', ['p-one'], ['codex']); f.task('t-held', 'p-one', 'm-one');
+    f.run('r-held', 't-held', 'm-one', { status: 'cleanup_failed', started: now - 1000000 });
+    f.run('r-lost', 't-held', 'm-one', { status: 'lost', started: now - 1000000 });
+    f.run('r-utility', 't-held', 'm-one', { status: 'succeeded', started: now - 1000000 });
+    recordUtility(f.db, runUtilityKey('r-utility'), { action: 'intent', token: 'pending', command: 'git' });
+    for (let i = 0; i < 12; i++) f.run(`r-history-${i}`, 't-held', 'm-one', { status: 'succeeded', started: now + i });
+    f.task('t-private', 'p-two', 'm-two'); f.run('r-private', 't-private', 'm-two', { status: 'cleanup_failed' });
+    for (const historyLimit of [0, 1]) {
+      const registry = buildRegistry(f.db, { projectId: 'p-one', now, historyLimit });
+      for (const id of ['r-held', 'r-lost', 'r-utility']) {
+        const row = registry.entries.find(e => e.runId === id)!;
+        assert.ok(row, `${id} survives capped history`); assert.equal(row.exitUnconfirmed, true);
+        assert.equal(row.state, 'stale'); assert.equal(row.capabilities.requestStop, false);
+      }
+      assert.equal(registry.entries.filter(e => e.runId?.startsWith('r-history-')).length, historyLimit);
+      assert.ok(!registry.entries.some(e => e.runId === 'r-private'));
+    }
+    recordUtility(f.db, runUtilityKey('r-utility'), { action: 'exit', token: 'pending', pid: null, startedAt: null, reaped: true });
+    f.db.prepare("UPDATE runs SET status = 'stopped' WHERE id IN ('r-held','r-lost')").run();
+    assert.deepEqual(buildRegistry(f.db, { projectId: 'p-one', now, historyLimit: 0 }).entries.filter(e => e.source === 'run'), []);
+  } finally { f.db.close(); }
+});

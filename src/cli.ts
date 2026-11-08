@@ -4,7 +4,7 @@ import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, 
 import { createInterface } from 'node:readline/promises';
 import { createInterface as createLineReader } from 'node:readline';
 import { homedir as homedirPath, hostname, networkInterfaces, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { buildMethods, localClient, remoteClient, type Client } from './api.ts';
 import { Coordinator } from './coordinator.ts';
 import { openDb } from './db.ts';
@@ -171,6 +171,7 @@ ${bold('Get started')}
 ${bold('Manage work')}
   ym show <id>   ym logs <id> [-f]   ym retry|cancel|stop|approve <id>
   ym tell <id> "do X instead"  redirect a running agent (it keeps its work so far)
+  ym recover                   replay saved planning usage before releasing budget
   ym recover --confirm-stopped <id> --note "exit verified"  attest a PID-less spawn hold stopped
   ym recover --confirm-stopped <task> --remote --note "exit verified"  attest a lost worker stopped
   ym integration adopt <project> --head <SHA> --note "inspected"  check and keep interrupted merge work
@@ -265,7 +266,7 @@ async function cmdPlan(a: Args) {
   const project = await currentProject(client, root);
   console.log(dim(`Asking ${getAdapter(agent, config)?.label ?? agent} to plan (read-only; admission and reactive budget limits apply)...`));
   const { planGoalManaged } = await import('./planner.ts');
-  const plan = await planGoalManaged(goal, { cwd: root, agent, config, client, projectId: project.id, machineId: machineId() });
+  const plan = await planGoalManaged(goal, { hub: flag(a, 'hub') ?? process.env.YARDMASTER_HUB ?? `local:${resolve(paths.db())}`, cwd: root, agent, config, client, projectId: project.id, machineId: machineId() });
   const { tasks, costUsd } = plan;
   console.log(bold(`\nPlan (${tasks.length} tasks, planning cost ${formatUsd(costUsd)}):`));
   for (const t of tasks) console.log(`  ${cyan(t.key ?? '-')} ${t.title} ${dim(`[${t.tier ?? 'auto'}${t.files?.length ? `; ${t.files.join(', ')}` : ''}${t.after?.length ? `; after ${t.after.join(', ')}` : ''}]`)}`);
@@ -369,11 +370,21 @@ async function cmdLogs(a: Args) {
 }
 
 async function cmdRecover(a: Args) {
+  const client = await getClient(a);
+  const { recoverPlanningReceipts } = await import('./planning-journal.ts');
+  const receipts = await recoverPlanningReceipts(client, { hub: flag(a, 'hub') ?? process.env.YARDMASTER_HUB ?? `local:${resolve(paths.db())}`, machineId: machineId() });
+  if (!a._[1] && a.flags['confirm-stopped'] !== true) {
+    if (a.flags.json) return console.log(JSON.stringify(receipts));
+    console.log(green(`Planning receipts recovered: ${receipts.replayed.length}.`));
+    for (const item of receipts.pending) console.log(yellow(`${item.runId}: ${item.reason}`));
+    if (receipts.skippedLive.length) console.log(dim(`Kept ${receipts.skippedLive.length} live or unverified invocation receipt(s).`));
+    return;
+  }
   if (a.flags['confirm-stopped'] !== true) die('Use ym recover --confirm-stopped <task> --note "how you verified process exit".');
   const id = a._[1] ?? die('Pass the task with a PID-less spawning-window hold.');
   const note = flag(a, 'note');
   if (!note || note.trim().length < 12) die('Pass --note with how you confirmed every process has stopped (at least 12 characters).');
-  const client = await getClient(a);
+  if (receipts.replayed.includes(id)) return console.log(green(`✔ ${id}: final planning usage replayed and exit acknowledged.`));
   if (id.startsWith('r-')) await client['plan.confirmStopped']({ runId: id, by: 'you', note });
   else if (id.startsWith('p-')) await client['integration.confirmStopped']({ projectId: id, by: 'you', note });
   else await client['task.control']({ id, action: 'confirm-stopped', by: 'you', note, remote: a.flags.remote === true });

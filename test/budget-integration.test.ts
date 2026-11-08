@@ -162,7 +162,7 @@ for (const mode of ['malformed', 'nonzero', 'spawn_failed'] as const) test(`live
     };
   } });
   try {
-    await assert.rejects(planGoalManaged('write something', { cwd: s.repo, agent, config: loadConfig(s.repo), client, projectId: s.project.id, machineId: 'm1' }));
+    await assert.rejects(planGoalManaged('write something', { hub: 'http://planning-fixture.local', cwd: s.repo, agent, config: loadConfig(s.repo), client, projectId: s.project.id, machineId: 'm1' }));
     const run = s.coord.db.prepare("SELECT * FROM runs WHERE role = 'plan'").get()!;
     assert.equal(cap, 3); assert.equal(run.status, 'failed'); assert.equal(run.pid, null);
     assert.equal(run.cost_usd, mode === 'spawn_failed' ? 0 : .2);
@@ -226,7 +226,7 @@ test('a plan with failed final accounting keeps its hold instead of returning un
     return target[key];
   } });
   try {
-    await assert.rejects(planGoalManaged('goal', { cwd: s.repo, agent, config: loadConfig(s.repo), client, projectId: s.project.id, machineId: 'm1' }), /accounting unavailable/);
+    await assert.rejects(planGoalManaged('goal', { hub: 'http://planning-fixture.local', cwd: s.repo, agent, config: loadConfig(s.repo), client, projectId: s.project.id, machineId: 'm1' }), /accounting unavailable/);
     assert.equal(listHeld(s.coord.db).length, 1);
     assert.equal(s.coord.db.prepare("SELECT status FROM runs WHERE role='plan'").get()!.status, 'running');
   } finally { s.coord.db.close(); }
@@ -338,5 +338,24 @@ test('planning spawn-window hold has a separate audited owner attestation and wo
     assert.equal(listHeld(s.coord.db).length, 0);
     assert.equal(s.coord.getRun(admitted.runId)!.status, 'stopped');
     assert.ok(s.coord.eventsSince(0, s.project.id).some(e => e.kind === 'process.owner_confirmed_stopped'));
+  } finally { s.coord.db.close(); }
+});
+
+
+test('final planning acknowledgment cannot supersede a newer usage snapshot', async () => {
+  const s = await fixture();
+  try {
+    const { runId } = await s.client['plan.start']({ projectId: s.project.id, machineId: 'm1', agent: 'mock', model: null });
+    const usage = { costUsd: .1, tokensIn: 10, tokensOut: 1, provenance: 'actual' as const, cacheReadTokens: null, cacheWriteTokens: null };
+    await s.client['plan.usage']({ runId, sequence: 1, usage });
+    await s.client['plan.usage']({ runId, sequence: 2, usage: { ...usage, costUsd: .2 } });
+    await assert.rejects(s.client['plan.usage']({ runId, sequence: 1, usage, final: true }), /older than/);
+    assert.equal(s.coord.getPlanInvocation(runId)!.accountingPending, true);
+    for (let replay = 0; replay < 2; replay++) await s.client['plan.usage']({ runId, sequence: 2, usage: { ...usage, costUsd: .2 }, final: true });
+    assert.equal(s.coord.getPlanInvocation(runId)!.accountingPending, false);
+    assert.equal(s.coord.spentToday(), .2);
+    assert.equal(s.coord.db.prepare('SELECT COUNT(*) AS n FROM usage_ledger WHERE run_id = ?').get(runId)!.n, 2);
+    await s.client['plan.finish']({ runId, reaped: true, succeeded: false, noLaunchPhase: 'plan' });
+    assert.equal(listHeld(s.coord.db).length, 0);
   } finally { s.coord.db.close(); }
 });

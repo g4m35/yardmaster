@@ -126,6 +126,11 @@ export function boardText(coord: Coordinator, projectId?: string | null, supervi
 }
 
 export function buildMethods(coord: Coordinator, hooks: HubHooks) {
+  const scopedLessons = (projectId: string, raw: unknown): string[] => {
+    const ids = [...new Set(z.array(Id).max(20).parse(raw))];
+    for (const id of ids) if (!coord.db.prepare('SELECT 1 FROM lessons WHERE id = ? AND project_id = ?').get(id, projectId)) throw new Error('Lesson does not belong to this run project.');
+    return ids;
+  };
   const pairing = new PairingStore(coord.db, { ownerId: 'personal' });
   const owner = { kind: 'owner' as const, ownerId: 'personal' };
   const resolveProject = async (cwd?: string, projectId?: string) => {
@@ -377,10 +382,11 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       if (!task) throw new Error(`No task ${p.taskId}`);
       coord.assertTaskOwner(p.taskId, p.owner);
       if (p.owner!.assignee !== `machine:${p.machineId}`) throw new Error('Run machine does not match the claim owner.');
+      const lessons = scopedLessons(task.project_id, p.lessons);
       const run = coord.startRun({ ...task, generation: p.owner!.generation! }, p.machineId, p.agent, p.model ?? null, p.logPath, p.role, p.implementationExited);
-      if (p.lessons.length) {
-        coord.updateRun(run.id, { lessons: p.lessons });
-        markUsed(coord, p.lessons);
+      if (lessons.length) {
+        coord.updateRun(run.id, { lessons });
+        markUsed(coord, lessons);
       }
       return run.id;
     }),
@@ -413,6 +419,17 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       return coord.withRunOwner(p.runId, p.owner && { ...p.owner, statuses: WORKER_FINALIZE_STATUSES },
         () => {
           if (['cost_usd', 'tokens_in', 'tokens_out', 'cost_estimated'].some(k => k in p.patch)) throw new Error('Usage must be recorded through sequenced run.usage.');
+          if ('lessons' in p.patch) {
+            const run = coord.getRun(p.runId)!;
+            const projectId = coord.getTask(run.task_id)?.project_id;
+            const ids = scopedLessons(projectId ?? '', p.patch.lessons);
+            const added = ids.filter(id => !run.lessons.includes(id));
+            p.patch.lessons = [...new Set([...run.lessons, ...ids])];
+            if ((p.patch.lessons as string[]).length > 20) throw new Error('A run may use at most 20 lessons.');
+            coord.updateRun(p.runId, p.patch as never);
+            markUsed(coord, added);
+            return;
+          }
           return coord.updateRun(p.runId, p.patch as never);
         });
     }),
@@ -444,12 +461,10 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       if (run.pid !== null || run.phase !== 'plan:spawning') throw new Error('Planning child requires a recorded spawn intent.');
       coord.updateRun(run.id, { phase: 'plan', pid: p.pid, proc_started: p.startedAt });
     }),
-    'plan.usage': method(z.object({ runId: RunId, sequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    'plan.usage': method(z.object({ runId: RunId, final: z.boolean().default(false), sequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
       usage: z.object({ costUsd: z.number().finite().nonnegative(), tokensIn: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), tokensOut: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
         provenance: z.enum(['actual', 'estimated', 'mixed', 'unknown']), cacheReadTokens: z.number().int().nonnegative().nullable(), cacheWriteTokens: z.number().int().nonnegative().nullable() }) }), (p) => {
-      const run = coord.getRun(p.runId);
-      if (!run || String(run.role) !== 'plan') throw new Error('No planning run.');
-      coord.recordRunUsage(run.id, run.task_id, { generation: run.generation, assignee: `machine:${run.machine_id}` }, p.sequence, p.usage);
+      coord.recordPlanUsage(p.runId, p.sequence, p.usage, p.final);
     }),
     'plan.finish': method(z.object({ runId: RunId, reaped: z.boolean(), succeeded: z.boolean(), reason: z.string().optional(),
       process: z.object({ pid: z.number().int().positive(), startedAt: z.number().finite().positive() }).optional(), noLaunchPhase: z.string().optional(),

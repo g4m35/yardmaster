@@ -356,6 +356,14 @@ export class Integrator {
     return true;
   }
 
+  private async preserveChangedVerification(project: Project, path: string, checkedHead: string | null, tasks: Task[]): Promise<void> {
+    if (checkedHead && await revParse(path, 'HEAD') === checkedHead && await isClean(path)) return;
+    const note = `Verification changed the integration checkout at ${path}. Changes and commits are preserved. Inspect and commit the intended state, then use ym integration adopt ${project.id} --head <current SHA> --note "what you verified". Integration stays held until inspection.`;
+    for (const task of tasks) this.transition(task, ['merging'], { attention: note });
+    this.warnOnce(project, 'verification_changed', note);
+    throw new IntegrationHeld(note);
+  }
+
   private async integrate(project: Project, task: Task, config: Config): Promise<void> {
     const sha = task.head_sha!;
     if (config.integration.mode === 'none') {
@@ -395,6 +403,7 @@ export class Integrator {
         onExit: reaped => this.processFinished(project, reaped),
       }), this.lifetime.signal);
       this.processFinished(project, result.reaped);
+      await this.preserveChangedVerification(project, path, result.sha, [task]);
       if (!result.ok) {
         await git(path, ['reset', '--hard', before]);
         this.coord.setMeta(`integrating:${project.id}`, null);
@@ -467,6 +476,7 @@ export class Integrator {
       onExit: reaped => this.processFinished(project, reaped),
     }), this.lifetime.signal);
     this.processFinished(project, result.reaped);
+    await this.preserveChangedVerification(project, path, result.sha, merged);
     const stillMerging = merged.every((t) => this.current(t, ['merging']));
     if (!result.ok || !stillMerging) {
       await git(path, ['reset', '--hard', before]);

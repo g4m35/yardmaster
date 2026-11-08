@@ -416,6 +416,7 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   }
 
   const context = await api['task.context']({ id: task.id });
+  if (context.lessonIds.length) await api['run.update']({ runId, patch: { lessons: context.lessonIds } });
   const settings = agentSettings(config, ctx.agent);
   // Resume only a recent, same-agent conversation whose managed launch shape still matches.
   let resumeId = adapter.resumable && settings.resume && !freshWorktree && task.agent_session && task.session_agent === ctx.agent && task.session_at !== null && Date.now() - task.session_at < 60 * 60_000 ? task.agent_session : null;

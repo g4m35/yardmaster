@@ -1024,16 +1024,29 @@ export class Coordinator {
         VALUES (?, ?, 1, 0, ?, ?, ?, 'running', ?, 'plan', 'plan')`).run(runId, `plan:${projectId}`, machineId, agent, model, Date.now());
       attachRun(this.db, admission.reservation.id, runId);
       const leaseMs = 30_000;
-      this.setMeta(`plan_invocation:${runId}`, JSON.stringify({ owner: owner ?? null, leaseUntil: Date.now() + leaseMs, leaseMs }));
+      this.setMeta(`plan_invocation:${runId}`, JSON.stringify({ owner: owner ?? null, leaseUntil: Date.now() + leaseMs, leaseMs, accountingPending: true }));
       this.invalidate();
       return { runId, budget: requireHeld(this.db, runId), leaseMs, heartbeatMs: 5_000 };
     });
   }
 
   /** A CLI invocation lease is independent of the machine heartbeat (MCP owners may stay alive forever). */
-  getPlanInvocation(runId: string): { owner: { pid: number; startedAt: number } | null; leaseUntil: number; leaseMs: number } | null {
+  getPlanInvocation(runId: string): { owner: { pid: number; startedAt: number } | null; leaseUntil: number; leaseMs: number; accountingPending?: boolean } | null {
     const raw = this.getMeta(`plan_invocation:${runId}`);
     return raw ? JSON.parse(raw) : null;
+  }
+
+  recordPlanUsage(runId: string, sequence: number, usage: Pick<UsageSnapshot, 'costUsd' | 'tokensIn' | 'tokensOut' | 'provenance' | 'cacheReadTokens' | 'cacheWriteTokens'>, final = false): void {
+    tx(this.db, () => {
+      const run = this.getRun(runId);
+      if (!run || String(run.role) !== 'plan') throw new Error('No planning run.');
+      this.recordRunUsage(run.id, run.task_id, { generation: run.generation, assignee: `machine:${run.machine_id}` }, sequence, usage);
+      if (final) {
+        if ((this.db.prepare('SELECT usage_seq FROM runs WHERE id = ?').get(runId) as { usage_seq: number }).usage_seq !== sequence) throw new Error('Final planning usage is older than the latest snapshot.');
+        const invocation = this.getPlanInvocation(runId);
+        if (invocation) this.setMeta(`plan_invocation:${runId}`, JSON.stringify({ ...invocation, accountingPending: false }));
+      }
+    });
   }
 
   heartbeatPlan(runId: string, owner: { pid: number; startedAt: number }): { leaseUntil: number } {
@@ -1060,6 +1073,7 @@ export class Coordinator {
         if (result.noLaunchPhase !== undefined && !matchedNoLaunch) throw new Error('Planning no-launch phase does not match this recorded run.');
         const failedSpawn = result.spawnFailure?.status === 'spawn_failed' && result.spawnFailure.pid === null && run.pid === null && run.phase === 'plan:spawning';
         if (!matchedProcess && !matchedNoLaunch && !failedSpawn) throw new Error('Planning exit requires matching recorded process identity, no-launch phase, or spawn-failure proof.');
+        if (!matchedNoLaunch && !failedSpawn && this.getPlanInvocation(runId)?.accountingPending) throw new Error('Final planning usage must be replayed before its budget can be released. Run ym recover on the planning machine.');
       }
       this.updateRun(run.id, { status: result.reaped ? result.succeeded ? 'succeeded' : 'failed' : 'cleanup_failed', ended_at: Date.now(), stop_reason: result.reason ?? null,
         ...(result.reaped ? { pid: null, proc_started: null, phase: null } : {}) });

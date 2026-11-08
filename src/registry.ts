@@ -15,6 +15,8 @@ export interface RegistryEntry {
   id: string;
   source: 'run' | 'session' | 'machine-advertisement';
   state: RegistryState;
+  /** Persisted exit/recovery evidence is incomplete; this does not assert OS liveness. */
+  exitUnconfirmed?: boolean;
   agent: string | null;
   model: string | null;
   role: string | null;
@@ -113,9 +115,12 @@ export function buildRegistry(db: Db, options: {
   if (projectId !== null && !/^[A-Za-z0-9][A-Za-z0-9:_.-]{0,199}$/.test(projectId)) throw new Error('Invalid registry project');
   const filter = projectId === null ? '' : ' AND COALESCE(t.project_id, p.id) = ?';
   const args = projectId === null ? [] : [projectId];
-  const live = db.prepare(`${RUN_COLUMNS} WHERE r.status = 'running'${filter} ORDER BY r.started_at DESC, r.id`)
+  // Enumerate indexed status/utility owners once, rather than probing metadata for every historical run.
+  const currentIds = `SELECT id FROM runs WHERE status IN ('running','lost','cleanup_failed') UNION SELECT substr(m.key, 13) FROM meta m WHERE m.key GLOB 'utility:run:*' AND (NOT json_valid(m.value) OR EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(m.value) THEN m.value ELSE '[]' END) child WHERE COALESCE(json_extract(child.value, '$.state'), 'unknown') <> 'exited'))`;
+  const currentRun = `r.id IN (${currentIds})`;
+  const live = db.prepare(`${RUN_COLUMNS} WHERE ${currentRun}${filter} ORDER BY r.started_at DESC, r.id`)
     .all(...args) as unknown as RunRow[];
-  const recent = historyLimit ? db.prepare(`${RUN_COLUMNS} WHERE r.status <> 'running'${filter}
+  const recent = historyLimit ? db.prepare(`${RUN_COLUMNS} WHERE NOT ${currentRun}${filter}
     ORDER BY r.started_at DESC, r.id LIMIT ?`).all(...args, historyLimit) as unknown as RunRow[] : [];
   const sessions = db.prepare(`SELECT id, agent, project_id, machine_id, last_seen FROM sessions
     ${projectId === null ? '' : 'WHERE project_id = ?'} ORDER BY last_seen DESC, id LIMIT ?`)
@@ -155,7 +160,8 @@ export function buildRegistry(db: Db, options: {
     const pid = number(r.pid);
     const processStartedAt = number(r.proc_started);
     const children = utilities(db, runUtilityKey(r.id)).filter(child => child.state !== 'exited');
-    entries.push({ id: `run:${r.id}`, source: 'run', state: active && (!current || f.freshness !== 'fresh') ? 'stale' : 'managed',
+    const exitUnconfirmed = active || ['lost', 'cleanup_failed'].includes(r.status) || children.length > 0;
+    entries.push({ id: `run:${r.id}`, source: 'run', exitUnconfirmed, state: exitUnconfirmed && (!active || !current || f.freshness !== 'fresh') ? 'stale' : 'managed',
       agent: text(r.agent), model: text(r.model), role: text(r.role), phase: text(r.phase), effort: text(r.effort),
       effortSource: text(r.effort_source), launchFingerprint: text(r.launch_fingerprint),
       utilityChildren: children.slice(0, 50), utilityChildrenTruncated: children.length > 50,

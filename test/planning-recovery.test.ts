@@ -11,6 +11,8 @@ import { openDb } from '../src/db.ts';
 import { buildMethods, localClient, type Client } from '../src/api.ts';
 import { recover } from '../src/janitor.ts';
 import { planGoalManaged } from '../src/planner.ts';
+import { recoverPlanningReceipts } from '../src/planning-journal.ts';
+import { emptyUsage } from '../src/usage.ts';
 import { loadConfig } from '../src/config.ts';
 import { registerAdapter } from '../src/adapters/index.ts';
 import type { AgentEvent } from '../src/adapters/types.ts';
@@ -36,7 +38,7 @@ async function stopChild(child: ChildProcess | undefined) {
   if (child?.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await once(child, 'exit'); }
 }
 
-for (const signal of ['SIGKILL', 'SIGTERM'] as const) test(`real managed CLI ${signal}: its TERM-resistant planner is reaped and reservation released exactly once`, async () => {
+for (const signal of ['SIGKILL', 'SIGTERM'] as const) test(`real managed CLI ${signal}: its planner is reaped and final usage gates allowance release`, async () => {
   const s = await fixture();
   const server = createServer(async (req, res) => {
     try {
@@ -57,7 +59,7 @@ for (const signal of ['SIGKILL', 'SIGTERM'] as const) test(`real managed CLI ${s
 import {planGoalManaged} from ${JSON.stringify(source('planner.ts'))};import {loadConfig} from ${JSON.stringify(source('config.ts'))};
 registerAdapter({name:'plan-crash-fixture',label:'fixture',binary:process.execPath,build:ctx=>({command:process.execPath,args:[${JSON.stringify(planner)}],stdin:ctx.prompt}),parse:line=>[JSON.parse(line)]});
 const client=new Proxy({}, {get:(_,method)=>async params=>{const r=await fetch(${JSON.stringify(endpoint)},{method:'POST',body:JSON.stringify({method,params})});const b=await r.json();if(b.error)throw new Error(b.error);return b.value;}});
-await planGoalManaged('goal',{cwd:${JSON.stringify(s.repo)},agent:'plan-crash-fixture',config:loadConfig(${JSON.stringify(s.repo)}),client,projectId:${JSON.stringify(s.project.id)},machineId:'m1'});`);
+await planGoalManaged('goal',{hub:${JSON.stringify(endpoint)},cwd:${JSON.stringify(s.repo)},agent:'plan-crash-fixture',config:loadConfig(${JSON.stringify(s.repo)}),client,projectId:${JSON.stringify(s.project.id)},machineId:'m1'});`);
   let child: ChildProcess | undefined;
   let plannerPid: number | null = null;
   try {
@@ -69,7 +71,14 @@ await planGoalManaged('goal',{cwd:${JSON.stringify(s.repo)},agent:'plan-crash-fi
     child.kill(signal); await once(child, 'exit');
     await recover(s.coord, 'm1', new Set(), { startup: true });
     assert.equal(isAlive(plannerPid), false);
-    assert.equal(s.coord.getRun(run!.id)!.status, signal === 'SIGKILL' ? 'stopped' : 'failed');
+    assert.equal(s.coord.getRun(run!.id)!.status, signal === 'SIGKILL' ? 'cleanup_failed' : 'failed');
+    if (signal === 'SIGKILL') {
+      assert.equal(listHeld(s.coord.db).length, 1, 'process exit alone does not vouch for missing final usage');
+      const replay = await recoverPlanningReceipts(s.client, { hub: endpoint, machineId: 'm1' });
+      assert.ok(replay.pending.some(item => item.runId === run!.id));
+      assert.equal(listHeld(s.coord.db).length, 1);
+      await s.client['plan.confirmStopped']({ runId: run!.id, note: 'Planner group was reaped; latest durable usage replayed, final provider usage unavailable.' });
+    }
     assert.equal(s.coord.spentToday(), .2);
     assert.equal(listHeld(s.coord.db).length, 0);
     await recover(s.coord, 'm1', new Set());
@@ -96,7 +105,10 @@ test('active plan owner and renewed heartbeat survive recovery; invocation lease
     assert.equal(isAlive(pid), true); assert.equal(s.coord.getRun(runId)!.status, 'running');
     expire(s, runId);
     await recover(s.coord, 'm1', new Set());
-    assert.equal(isAlive(pid), false); assert.equal(listHeld(s.coord.db).length, 0);
+    assert.equal(isAlive(pid), false); assert.equal(listHeld(s.coord.db).length, 1);
+    await s.client['plan.usage']({ runId, sequence: 1, usage: emptyUsage(), final: true });
+    await s.client['plan.finish']({ runId, reaped: true, succeeded: false, process: { pid, startedAt } });
+    assert.equal(listHeld(s.coord.db).length, 0);
   } finally { if (child?.pid) await terminateOwnedGroup(child.pid, { graceMs: 50 }); s.coord.db.close(); }
 });
 
@@ -158,7 +170,7 @@ for (const outcome of ['rejected', 'hung'] as const) test(`managed planning abor
     return target[key];
   } });
   try {
-    await assert.rejects(planGoalManaged('goal', { cwd: s.repo, agent, config: loadConfig(s.repo), client, projectId: s.project.id, machineId: 'm1' }));
+    await assert.rejects(planGoalManaged('goal', { hub: 'http://planning-fixture.local', cwd: s.repo, agent, config: loadConfig(s.repo), client, projectId: s.project.id, machineId: 'm1' }));
     const run = s.coord.db.prepare("SELECT id FROM runs WHERE role='plan'").get() as { id: string };
     assert.ok(heartbeats > 0);
     assert.equal(s.coord.getRun(run.id)!.status, 'failed');
@@ -183,6 +195,8 @@ test('expired no-launch plan recovers automatically, and an exact recorded proce
     assert.equal(isAlive(processProof.pid), true);
     await assert.rejects(s.client['plan.finish']({ runId: admitted.runId, reaped: true, succeeded: false }), /requires matching/);
     await terminateOwnedGroup(processProof.pid, { graceMs: 50 });
+    await assert.rejects(s.client['plan.finish']({ runId: admitted.runId, reaped: true, succeeded: false, process: processProof }), /Final planning usage/);
+    await s.client['plan.usage']({ runId: admitted.runId, sequence: 1, usage: emptyUsage(), final: true });
     await s.client['plan.finish']({ runId: admitted.runId, reaped: true, succeeded: false, process: processProof });
     assert.equal(listHeld(s.coord.db).length, 0);
     assert.equal(s.coord.getRun(admitted.runId)!.status, 'failed');

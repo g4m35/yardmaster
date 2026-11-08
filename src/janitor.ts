@@ -369,8 +369,12 @@ export async function recover(coord: Coordinator, machineId: string, activeTaskI
     const result = fresh.pid !== null ? await terminateRecordedProcess({ pid: fresh.pid, startedAt: fresh.proc_started }) :
       fresh.phase && !fresh.phase.endsWith(':spawning') ? { status: 'exited' as const } : { status: 'unverified' as const, reason: 'Planning child may have spawned without a recorded identity.' };
     if (result.status === 'exited' || result.status === 'terminated') {
-      coord.confirmRecoveredRunExit(fresh.id, result);
-      coord.setMeta(`plan_invocation:${fresh.id}`, null);
+      if (current?.accountingPending && (fresh.pid !== null || fresh.phase?.endsWith(':spawning'))) {
+        coord.updateRun(fresh.id, { status: 'cleanup_failed', stop_reason: 'Planning process exit is confirmed, but final usage is pending. Run ym recover on the planning machine to replay its receipt before releasing budget.' });
+      } else {
+        coord.confirmRecoveredRunExit(fresh.id, result);
+        coord.setMeta(`plan_invocation:${fresh.id}`, null);
+      }
     } else coord.updateRun(fresh.id, { status: 'cleanup_failed', stop_reason: result.reason ?? 'Planning process exit could not be verified.' });
   }
   // A prior cleanup failure is a hold, not a permanent dead end. Only identity-proven local recovery clears it.

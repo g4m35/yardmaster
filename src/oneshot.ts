@@ -3,7 +3,7 @@ import { getAdapter } from './adapters/index.ts';
 import type { AgentEvent } from './adapters/types.ts';
 import { agentSettings, priceFor, type Config, type Tier } from './config.ts';
 import { emptyUsage, UsageMeter, type UsageSnapshot } from './usage.ts';
-import { EffortPolicyError } from './effort.ts';
+import { EffortPolicyError, launchEffort } from './effort.ts';
 import { cleanEnv, startOwnedProcess, type OwnedProcessInfo, type OwnedRunResult, type TerminateResult } from './proc.ts';
 
 /**
@@ -99,7 +99,11 @@ export async function runOneShot(opts: {
   if (!adapter) return { ...base, ok: false, status: 'spawn_failed', error: `unknown agent ${opts.agent}` };
   const settings = agentSettings(opts.config, opts.agent);
   let spec;
-  try { spec = adapter.build({ prompt: opts.prompt, cwd: opts.cwd, model, settings, readOnly: opts.readOnly, tier: opts.tier, maxTurns: opts.maxTurns, budgetUsd: opts.budgetUsd }); }
+  try {
+    const context = { prompt: opts.prompt, cwd: opts.cwd, model, settings, readOnly: opts.readOnly, tier: opts.tier, maxTurns: opts.maxTurns, budgetUsd: opts.budgetUsd };
+    spec = adapter.build(context);
+    launchEffort(opts.agent, context, spec);
+  }
   catch (error) {
     if (!(error instanceof EffortPolicyError)) throw error;
     return { ...base, ok: false, status: 'spawn_failed', error: error.message };
