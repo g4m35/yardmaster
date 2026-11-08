@@ -130,8 +130,9 @@ export class UsageMeter {
   add(ev: Usage): void {
     if (ev.cumulative) {
       const previous = this.total;
-      this.snap = this.part(ev, true);
-      if (!this.snap.cacheReadKnown && previous.cacheReadKnown) { this.snap.cacheRead = previous.cacheRead; this.snap.cacheReadKnown = true; }
+      // Resolve retained reads before deriving inclusive input and pricing (including resume baselines).
+      const effective = ev.cachedIn === undefined && previous.cacheReadKnown ? { ...ev, cachedIn: previous.cacheRead } : ev;
+      this.snap = this.part(effective, true);
       if (!this.snap.cacheWriteKnown && previous.cacheWriteKnown) { this.snap.cacheWrite = previous.cacheWrite; this.snap.cacheWriteKnown = true; }
       this.inc = ZERO;
       if (this.baseline > 0) this.notes.add('Token counts come from a resumed session\'s cumulative total and may include earlier runs.');

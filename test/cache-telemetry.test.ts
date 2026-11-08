@@ -123,6 +123,7 @@ for (const read of [undefined, 0, 240]) {
         meter.add(event);
         const snapshot = meter.snapshot();
         assert.equal(snapshot.cacheReadTokens, read ?? null, 'omission preserves the prior observation, including zero');
+        assert.equal(snapshot.tokensIn, 1000 * sequence + (read ?? 0), 'inclusive input retains cache reads exactly once');
         assert.equal(snapshot.provenance, 'actual', 'a final dollar figure does not create cache telemetry');
         assert.equal(snapshot.costUsd, sequence / 10);
         await f.persist(snapshot, sequence);
@@ -152,4 +153,45 @@ test('an explicit cumulative zero supersedes a prior positive cache count; forge
       owner: { ...f.identity.owner, assignee: 'machine:m-other' } }), /recorded run identity/);
     f.check(snapshot, 0, 2);
   } finally { f.db.close(); }
+});
+
+for (const reportedCost of [false, true]) for (const read of [undefined, 0, 240]) {
+  test(`repeated cumulative cache omission keeps independent inclusive input and ${reportedCost ? 'actual' : 'estimated'} cost (read=${read})`, async () => {
+    const meter = new UsageMeter(price);
+    meter.add(parsedUsage(claude, reportingAdapters[0]!.line(read)));
+    const f = fixture(claude.name);
+    try {
+      await f.persist(meter.snapshot());
+      const final = parsedUsage(claude, { type: 'result', subtype: 'success',
+        ...(reportedCost ? { total_cost_usd: .2 } : {}), usage: { input_tokens: 2000, output_tokens: 200 } });
+      // Independent expected values: AgentEvent input excludes reads, Snapshot input includes them.
+      const expectedInput = 2000 + (read ?? 0);
+      const expectedCost = reportedCost ? .2 : (2000 * 3 + (read ?? 0) * .3 + 200 * 15) / 1e6;
+      for (const sequence of [2, 3]) {
+        meter.add(final);
+        const snapshot = meter.snapshot();
+        assert.equal(snapshot.tokensIn, expectedInput);
+        assert.equal(snapshot.cacheReadTokens, read ?? null);
+        assert.equal(snapshot.tokensOut, 200);
+        assert.ok(Math.abs(snapshot.costUsd - expectedCost) < 1e-12);
+        assert.equal(snapshot.provenance, reportedCost ? 'actual' : 'estimated');
+        await f.persist(snapshot, sequence);
+        f.check(snapshot, read ?? null, sequence);
+        const total = f.db.prepare('SELECT SUM(tokens_in_delta) AS input, SUM(cost_delta_micros) AS micros FROM usage_ledger WHERE run_id = ?').get(f.identity.runId)!;
+        assert.equal(total.input, expectedInput, 'ledger corrections retain reads without counting a repeated final twice');
+        assert.equal(total.micros, Math.round(expectedCost * 1e6));
+      }
+    } finally { f.db.close(); }
+  });
+}
+
+test('omitted cumulative cache reads are priced before applying a resumed session baseline', () => {
+  for (const scope of ['session', 'run', 'unknown'] as const) {
+    const meter = new UsageMeter(price, .005, { resumedTokenSnapshots: scope });
+    meter.add(parsedUsage(claude, reportingAdapters[0]!.line(240)));
+    const event = parsedUsage(claude, { type: 'result', usage: { input_tokens: 2000, output_tokens: 200 } });
+    meter.add(event); meter.add(event);
+    assert.equal(meter.tokensIn, 2240);
+    assert.ok(Math.abs(meter.spent - (scope === 'session' ? .004072 : .009072)) < 1e-12);
+  }
 });
