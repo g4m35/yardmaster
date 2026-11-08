@@ -107,7 +107,12 @@ export class Hub {
       agents: () => detectAgents(loadConfig(), includeMock),
       localConfig: () => loadConfig(),
       verifySlots,
-      onDiskPressure: () => this.relieveDisk(),
+      onDiskPressure: () => {
+        if (this.captureAbort.signal.aborted) return Promise.resolve();
+        const operation = this.relieveDisk();
+        this.trackBackground(operation, 'Disk cleanup error');
+        return operation;
+      },
     });
   }
 
@@ -267,7 +272,7 @@ export class Hub {
   private trackBackground(operation: Promise<unknown>, label = 'Hub error'): void {
     const completion = operation.catch(err => this.coord.event(null, null, 'error', 'hub.error', `${label}: ${(err as Error).message}`));
     this.background.add(completion);
-    void completion.finally(() => this.background.delete(completion)).catch(() => undefined);
+    void completion.finally(() => this.background.delete(completion));
   }
 
   /** Routine cleanup never holds up scheduling: it runs beside the loop, one pass at a time, without sizing anything. */
@@ -285,6 +290,7 @@ export class Hub {
   /** Import graphs feed coupling warnings in briefs and (optionally) scheduling. Rebuilt only when HEAD moves. */
   private async refreshGraphs(): Promise<void> {
     for (const p of this.coord.listProjects()) {
+      if (this.captureAbort.signal.aborted) return;
       if (!existsSync(p.root) || this.coord.configFor(p.id).coupling === 'off') continue;
       try {
         this.coord.graphs.set(p.id, await importGraph(p.root));

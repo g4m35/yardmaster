@@ -4,6 +4,8 @@ Yardmaster coordinates one owner's trusted machines through a private hub. Keep 
 
 For an existing installation, stop foreground workers with Ctrl+C and stop the hub with `ym hub stop` before upgrading. Upgrade the hub and every worker together, then restart them with their existing private home and local configuration. Database migration is transactional and retains uncertain process/budget holds. Older workers do not satisfy the new ownership contract; older binaries refuse a newer schema, so reinstalling one is not a database downgrade. Pending machine-wide journals need the explicit recovery procedure below.
 
+Graceful hub shutdown waits for admitted scheduling, heartbeat, graph and cleanup work before releasing ownership. A slow disk scan or Git operation can exceed a service manager's stop timeout (launchd defaults to 20 seconds). If the service is force-killed, startup recovery retains uncertain process and budget holds; it does not assume those children exited.
+
 ## Set up the owner machine
 
 1. In a committed git repository, run `ym setup --dry-run`. To preview a particular connection, use `ym setup --agent codex --dry-run`.
