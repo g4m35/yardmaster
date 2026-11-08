@@ -54,7 +54,7 @@ For a configured agent, `minimumEffort: "high"` raises generated/routed defaults
 
 With owner access, `ym doctor --hub URL` reports `registry.list` state counts and the returned coverage/unknown signals, including passive inventory truncation. With a saved worker credential it validates only the project-scoped connection; global registry access remains owner-only. Without a running/accessible hub, registry coverage stays unknown. Registry freshness is persisted heartbeat evidence, not proof of OS liveness; stop-request capability is not an OS-stop acknowledgment.
 
-Usage can be actual, estimated, mixed or unknown. Unknown usage is not free. Claude's supported native budget flag is distinct from the other adapters' admission/reactive limits; missing/delayed usage and concurrent work can overshoot. JEV classification charges are excluded from task totals. No concurrent reservation or universal hard billing-cap claim is made here. Doctor reports available configuration/coverage, not a fabricated budget guarantee.
+Usage can be actual, estimated, mixed or unknown. Unknown usage is not free. Claude's supported native budget flag is distinct from the other adapters' admission/reactive limits; missing/delayed usage and concurrent work can overshoot. JEV classification charges are excluded from task totals. Concurrent reservations serialize admission, but no universal hard billing cap is claimed. Doctor reports available configuration/coverage, not a fabricated budget guarantee.
 
 ## Local evidence and remaining qualification
 
