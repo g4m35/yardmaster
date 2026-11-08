@@ -13,7 +13,7 @@
       "result": "pass"
     },
     {
-      "command": "node /Users/jheller/.codex/skills/creative-os/scripts/render-verification-gate.mjs --contract design-verification/dashboard/acceptance-contract.json",
+      "command": "node <local-creative-os-skill>/scripts/render-verification-gate.mjs --contract design-verification/dashboard/acceptance-contract.json",
       "result": "pass"
     },
     {
@@ -77,5 +77,6 @@
   "pairingUI": {
     "result": "not-applicable",
     "reason": "Optional scoped pairing control deferred. No invitation secret is generated or rendered."
-  }
+  },
+  "localToolPathRedacted": true
 }
