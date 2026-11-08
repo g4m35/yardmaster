@@ -281,7 +281,7 @@
   },
   {
     "role": "StaticText",
-    "name": "Connected agent sessions: render-native"
+    "name": "Connected agent sessions: render-claude"
   },
   {
     "role": "StaticText",
@@ -453,11 +453,11 @@
   },
   {
     "role": "StaticText",
-    "name": "147.1 GB free · worktrees 0 MB"
+    "name": "146.3 GB free · worktrees 0 MB"
   },
   {
     "role": "InlineTextBox",
-    "name": "Connected agent sessions: render-native"
+    "name": "Connected agent sessions: render-claude"
   },
   {
     "role": "InlineTextBox",
@@ -521,7 +521,7 @@
   },
   {
     "role": "StaticText",
-    "name": "observed · fresh · last seen 3s ago"
+    "name": "observed · fresh · last seen 7s ago"
   },
   {
     "role": "StaticText",
@@ -597,7 +597,7 @@
   },
   {
     "role": "StaticText",
-    "name": "07:54:16 PM"
+    "name": "08:36:19 PM"
   },
   {
     "role": "StaticText",
@@ -605,7 +605,7 @@
   },
   {
     "role": "StaticText",
-    "name": "07:54:16 PM"
+    "name": "08:36:19 PM"
   },
   {
     "role": "InlineTextBox",
@@ -617,7 +617,7 @@
   },
   {
     "role": "InlineTextBox",
-    "name": "147.1 GB free · worktrees 0 MB"
+    "name": "146.3 GB free · worktrees 0 MB"
   },
   {
     "role": "option",
@@ -637,7 +637,7 @@
   },
   {
     "role": "InlineTextBox",
-    "name": "observed · fresh · last seen 3s ago"
+    "name": "observed · fresh · last seen 7s ago"
   },
   {
     "role": "InlineTextBox",
@@ -709,7 +709,7 @@
   },
   {
     "role": "InlineTextBox",
-    "name": "07:54:16 "
+    "name": "08:36:19 "
   },
   {
     "role": "InlineTextBox",
@@ -725,7 +725,7 @@
   },
   {
     "role": "InlineTextBox",
-    "name": "07:54:16 "
+    "name": "08:36:19 "
   },
   {
     "role": "InlineTextBox",

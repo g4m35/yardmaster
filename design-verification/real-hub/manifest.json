@@ -1,26 +1,30 @@
 {
   "sourceFile": "src/dashboard/index.html",
-  "sourceSha256": "1b7ca7e9458be11d4674874988a0611e23adbbfdecba7a54e9ce52cc0f33444e",
+  "sourceSha256": "250aab6dd0db98e6d1fc4c29635dc49bd7f0ea066c6b4fd088eaeaa5fd3e8437",
+  "serverHead": "22f76b8c269d7a1f92fb2e0af107addbaeda92aa",
+  "serverSourceTree": "02b8fd2cd703531019de50a4f3f39ba48408965b",
   "browser": "Browserbase cloud",
-  "transport": "isolated real Hub HTTP through task-owned ephemeral tunnel",
-  "fixtures": "disposable homes, two repositories, fake machine names, no provider inference",
+  "transport": "isolated real Hub HTTP via task-owned ephemeral tunnel; two real CLI stdio MCP clients using SDK transports",
+  "fixtures": "disposable homes/repos and fake names; no coding model inference or installed native settings edits",
   "coverage": [
     "onboarding zero counts",
+    "truthful pause policy",
+    "two MCP bridge clients",
     "two-project isolation",
     "1440 and 390px",
-    "native dialog keyboard and focus",
-    "accessibility tree labels",
-    "real 401 key removal"
+    "native dialog keyboard/focus",
+    "accessible tree labels",
+    "real HTTP 401 key/control removal"
   ],
   "limits": [
-    "no physical screen-reader output",
-    "no actual provider cache-hit measurement"
+    "not a physical screen-reader session",
+    "MCP bridge clients, not model inference or installed editor UI",
+    "combined auth reload wait timed out; separate auth-only stage passed"
   ],
   "checks": [
     "empty-checks.json",
     "populated-checks.json",
     "auth-checks.json"
   ],
-  "note": "populated-checks has successful project/keyboard/responsive/AX checks; its initial reload wait timed out. auth-checks records the separately completed real-401 case. Diagnostic preserved in outputs.",
   "sessionsClosed": true
 }

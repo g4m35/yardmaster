@@ -3,11 +3,13 @@
     "real empty Hub gives executable first-project guidance",
     "empty registry does not invent agents",
     "empty board displays five truthful zero counts",
+    "pause policy explicitly distinguishes coding from checks/review",
     "no uncaught browser exceptions"
   ],
   "errors": [],
   "transport": "real isolated Hub HTTP via ephemeral cloud tunnel",
   "browser": "Browserbase cloud",
-  "sourceHead": "4b4a765 plus round4 working diff",
+  "sourceHead": "22f76b8c269d7a1f92fb2e0af107addbaeda92aa",
+  "serverSourceTree": "02b8fd2cd703531019de50a4f3f39ba48408965b",
   "phase": "empty"
 }

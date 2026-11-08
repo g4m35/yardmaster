@@ -250,7 +250,8 @@ export async function runCleanup(coord: Coordinator, plan: CleanPlan): Promise<{
           if (!(await isClean(item.target))) throw new Error('changed since the plan was made; kept');
           await removeWorktree(root, item.target, { expectedHead: item.sha, expectedBranch: item.branch, guard });
           guard();
-          if (t.worktree && resolve(t.worktree) === resolve(item.target)) coord.updateTask(t.id, { worktree: null });
+          const latest = coord.getTask(t.id);
+          if (latest?.worktree && resolve(latest.worktree) === resolve(item.target)) coord.updateTask(t.id, { worktree: null });
           break;
         }
         case 'prune':
