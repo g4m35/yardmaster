@@ -54,6 +54,7 @@ export class Hub {
   private readonly pairing: PairingStore;
   private readonly nativeCaptures = new Map<string, Promise<unknown>>();
   private readonly captureAbort = new AbortController();
+  private readonly background = new Set<Promise<unknown>>();
   private server: Server | null = null;
   private timers: NodeJS.Timeout[] = [];
   private lastNotified = 0;
@@ -161,7 +162,7 @@ export class Hub {
     this.timers.push(
       setInterval(() => {
         n++;
-        void this.loop(n).catch((err) => this.coord.event(null, null, 'error', 'hub.error', `Hub loop error: ${(err as Error).message}`));
+        this.trackBackground(this.loop(n), 'Hub loop error');
       }, tick),
     );
     if (!this.opts.quiet) this.coord.event(null, null, 'info', 'hub.started', `Hub started on ${this.url} (${this.worker.machineId})`);
@@ -178,15 +179,16 @@ export class Hub {
    * The timer loop stays as a safety net and for periodic jobs.
    */
   kick(): void {
-    if (this.kickTimer || !this.server) return;
+    if (this.kickTimer || !this.server || this.captureAbort.signal.aborted) return;
     this.kickTimer = setTimeout(() => {
       this.kickTimer = null;
-      void this.react().catch((err) => this.coord.event(null, null, 'error', 'hub.error', `Hub error: ${(err as Error).message}`));
+      this.trackBackground(this.react());
     }, 15);
     this.kickTimer.unref();
   }
 
   private async react(): Promise<void> {
+    if (this.captureAbort.signal.aborted) return;
     if (this.looping) {
       this.again = true;
       return;
@@ -194,6 +196,7 @@ export class Hub {
     this.looping = true;
     try {
       await this.worker.tick();
+      if (this.captureAbort.signal.aborted) return;
       for (const p of this.coord.listProjects()) if (existsSync(p.root)) void this.integrator.step(p.id);
     } finally {
       this.looping = false;
@@ -223,6 +226,7 @@ export class Hub {
   private readonly invalidConfigs = new Set<string>();
 
   private async loop(n: number): Promise<void> {
+    if (this.captureAbort.signal.aborted) return;
     // Never overlap ticks: a slow git call must not start a second scheduling pass alongside the first.
     if (this.looping) {
       this.again = true;
@@ -239,11 +243,13 @@ export class Hub {
       if (n % 3 === 0) await this.heartbeat();
       if (n % 20 === 0) this.reportConfig();
       await this.worker.tick();
+      if (this.captureAbort.signal.aborted) return;
       // Merges (and their re-verification) run in the background so a long test run never stalls scheduling.
       for (const p of this.coord.listProjects()) if (existsSync(p.root)) void this.integrator.step(p.id);
       if (n % 4 === 0) await recover(this.coord, this.machineId, new Set([...this.worker.active.keys(), ...this.nativeCaptures.keys()]));
+      if (this.captureAbort.signal.aborted) return;
       if (n % 7 === 0) this.supervisor.check();
-      if (n % 20 === 1) void this.refreshGraphs();
+      if (n % 20 === 1) this.trackBackground(this.refreshGraphs());
       if (n % 400 === 0 && loadConfig().cleanup.auto) this.cleanInBackground();
       this.dispatchNotifications();
     } finally {
@@ -257,16 +263,23 @@ export class Hub {
 
   private cleaning = false;
 
+  /** Join admitted callbacks before shutdown releases the database/lock to its caller or a replacement hub. */
+  private trackBackground(operation: Promise<unknown>, label = 'Hub error'): void {
+    const completion = operation.catch(err => this.coord.event(null, null, 'error', 'hub.error', `${label}: ${(err as Error).message}`));
+    this.background.add(completion);
+    void completion.finally(() => this.background.delete(completion)).catch(() => undefined);
+  }
+
   /** Routine cleanup never holds up scheduling: it runs beside the loop, one pass at a time, without sizing anything. */
   private cleanInBackground(): void {
     if (this.cleaning) return;
     this.cleaning = true;
-    void planCleanup(this.coord, undefined, { sizes: false })
+    this.trackBackground(planCleanup(this.coord, undefined, { sizes: false })
       .then((plan) => runCleanup(this.coord, plan))
       .catch(() => undefined)
       .finally(() => {
         this.cleaning = false;
-      });
+      }));
   }
 
   /** Import graphs feed coupling warnings in briefs and (optionally) scheduling. Rebuilt only when HEAD moves. */
@@ -309,7 +322,7 @@ export class Hub {
     this.coord.onChange = null;
     if (this.kickTimer) clearTimeout(this.kickTimer);
     this.worker.stopAll('shutdown', 'Yardmaster is shutting down');
-    await Promise.all([this.worker.drain(), this.integrator.stop(), Promise.allSettled([...this.nativeCaptures.values()])]);
+    await Promise.all([this.worker.drain(), this.integrator.stop(), Promise.allSettled([...this.nativeCaptures.values()]), Promise.allSettled([...this.background])]);
     await new Promise<void>((r) => (this.server ? this.server.close(() => r()) : r()));
     this.releaseLock();
   }
