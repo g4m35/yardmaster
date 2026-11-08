@@ -33,7 +33,7 @@ import { attachRun, createAllowanceReader, describeBudgetHold, enforcementFor, l
 type Row = Record<string, unknown>;
 
 const DUPLICATE_THRESHOLD = 0.85;
-const LEASE_MS = 90_000;
+export const LEASE_MS = 90_000;
 
 function toTask(r: Row): Task {
   return {
@@ -523,10 +523,10 @@ export class Coordinator {
     if (!t) throw new Error(`No task ${id}`);
     switch (action) {
       case 'confirm-stopped': {
-        if (!note || note.trim().length < 12) throw new Error('Describe how you confirmed every process from this spawning window has stopped (at least 12 characters).');
+        if (!note || note.trim().length < 12) throw new Error('Describe how you confirmed every process from this run has stopped (at least 12 characters).');
         return tx(this.db, () => {
           const current = this.getTask(id)!;
-          if (['running', 'verifying', 'merging'].includes(current.status)) throw new Error('Stop the active task before attesting to a recovered spawning window.');
+          if (['running', 'verifying', 'merging'].includes(current.status)) throw new Error('Stop the active task before confirming recovered process exit.');
           const holds = this.runsFor(id).filter(r => {
             if (r.status !== 'cleanup_failed') return false;
             if (options.remote) {
@@ -535,9 +535,10 @@ export class Coordinator {
               const credential = this.db.prepare('SELECT COUNT(*) AS total, SUM(revoked_at IS NULL AND expires_at > ?) AS live FROM fleet_credentials WHERE machine_id = ?').get(Date.now(), r.machine_id) as { total: number; live: number | null };
               return !machine || Date.now() - machine.last_seen > LEASE_MS || (credential.total > 0 && !credential.live);
             }
-            return r.pid === null && (r.phase?.endsWith(':spawning') || utilities(this.db, runUtilityKey(r.id)).some(child => child.state !== 'exited' && child.pid === null));
+            return r.pid === null && (r.phase?.endsWith(':spawning') || this.getMeta(`recovery:${r.id}`) === 'local_exit_unacknowledged' ||
+              utilities(this.db, runUtilityKey(r.id)).some(child => child.state !== 'exited' && child.pid === null));
           });
-          if (!holds.length) throw new Error('No PID-less spawning-window hold exists for this task.');
+          if (!holds.length) throw new Error('No PID-less process-recovery hold exists for this task.');
           for (const run of holds) {
             for (const child of utilities(this.db, runUtilityKey(run.id))) if (child.state !== 'exited') recordUtility(this.db, runUtilityKey(run.id), { action: 'exit', token: child.token, pid: child.pid, startedAt: child.startedAt, reaped: true });
             forgetStoppedUtilities(this.db, runUtilityKey(run.id));
@@ -971,9 +972,12 @@ export class Coordinator {
       const run = this.getRun(runId);
       if (!run) throw new Error(`Unknown run ${runId}`);
       if (!utilitiesStopped(this.db, runUtilityKey(runId))) throw new Error('Owned utilities still require recovery.');
-      this.updateRun(runId, { status: 'stopped', pid: null, proc_started: null, phase: null, ended_at: Date.now(), stop_reason: 'process recovery confirmed group exit' });
+      const unfinished = ['running', 'lost', 'cleanup_failed'].includes(run.status);
+      this.updateRun(runId, { status: unfinished ? 'stopped' : run.status, pid: null, proc_started: null, phase: null,
+        ended_at: run.ended_at ?? Date.now(), stop_reason: unfinished ? 'process recovery confirmed group exit' : run.stop_reason });
       const held = listHeld(this.db).find(r => r.runId === runId);
       if (held) release(this.db, held.id, { kind: 'exited', runId });
+      this.setMeta(`recovery:${runId}`, null);
       forgetStoppedUtilities(this.db, runUtilityKey(runId));
       this.invalidate();
       this.changed();

@@ -2,7 +2,7 @@ import { worktreeRootOf } from './config.ts';
 import { existsSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { removeFast } from './fastfs.ts';
-import type { Coordinator } from './coordinator.ts';
+import { LEASE_MS, type Coordinator } from './coordinator.ts';
 import { paths } from './paths.ts';
 import { git, gitOut, isAncestor, isClean, isLinkedWorktreeOf, listWorktrees, removeWorktree } from './git.ts';
 import { isAlive, processStartTime, terminateRecordedProcess } from './proc.ts';
@@ -341,8 +341,22 @@ async function recoverRunChildren(coord: Coordinator, run: Pick<Run, 'id' | 'pid
 }
 
 function unresolvedClaimRuns(coord: Coordinator, task: Task): Run[] {
+  const attached = new Set((coord.db.prepare("SELECT run_id FROM budget_reservations WHERE task_id = ? AND state = 'held' AND run_id IS NOT NULL")
+    .all(task.id) as { run_id: string }[]).map(row => row.run_id));
   return coord.runsFor(task.id).filter(run => run.generation === task.generation && run.machine_id === task.machine_id &&
-    (['running', 'lost', 'cleanup_failed'].includes(run.status) || !utilitiesStopped(coord.db, runUtilityKey(run.id))));
+    (attached.has(run.id) || ['running', 'lost', 'cleanup_failed'].includes(run.status) || !utilitiesStopped(coord.db, runUtilityKey(run.id))));
+}
+
+function holdUnconfirmedExit(coord: Coordinator, run: Pick<Run, 'id'>, reason: string): boolean {
+  return tx(coord.db, () => {
+    const fresh = coord.getRun(run.id);
+    if (!fresh || (!['running', 'lost', 'cleanup_failed'].includes(fresh.status) && utilitiesStopped(coord.db, runUtilityKey(run.id)) &&
+        !coord.db.prepare("SELECT 1 FROM budget_reservations WHERE run_id = ? AND state = 'held'").get(run.id))) return false;
+    // An exit acknowledgement can arrive while process/utility lookup is awaiting I/O. Never resurrect it.
+    if (fresh.pid === null && fresh.phase === null && coord.getMeta(`recovery:${run.id}`) !== 'local_exit_unacknowledged') coord.setMeta(`recovery:${run.id}`, 'local_exit_unacknowledged');
+    if (fresh.status !== 'cleanup_failed' || fresh.stop_reason !== reason) coord.updateRun(run.id, { status: 'cleanup_failed', stop_reason: reason });
+    return true;
+  });
 }
 
 export async function recover(coord: Coordinator, machineId: string, activeTaskIds: Set<string>, opts: { startup?: boolean } = {}): Promise<void> {
@@ -384,14 +398,39 @@ export async function recover(coord: Coordinator, machineId: string, activeTaskI
     } else coord.updateRun(fresh.id, { status: 'cleanup_failed', stop_reason: result.reason ?? 'Planning process exit could not be verified.' });
   }
   // A prior cleanup failure is a hold, not a permanent dead end. Only identity-proven local recovery clears it.
-  const held = coord.db.prepare("SELECT id, task_id, pid, proc_started, phase FROM runs WHERE machine_id = ? AND status = 'cleanup_failed' AND role <> 'plan'").all(machineId) as { id: string; task_id: string; pid: number | null; proc_started: number | null; phase: string | null }[];
-  for (const run of held) {
+  // A terminal result can precede run.exit. Attached allowance is unresolved until exit proof, in any task state.
+  // Start from the indexed held rows instead of probing a reservation once per historical run.
+  const held = coord.db.prepare(`SELECT id FROM runs WHERE machine_id = ? AND status = 'cleanup_failed' AND role <> 'plan'
+    UNION SELECT r.id FROM budget_reservations b JOIN runs r ON r.id = b.run_id WHERE b.state = 'held' AND r.role <> 'plan'`)
+    .all(machineId) as { id: string }[];
+  for (const candidate of held) {
+    const run = coord.getRun(candidate.id);
+    if (!run) continue;
+    const task = coord.getTask(run.task_id);
+    // Current claims must recover and requeue together below; clearing their hold here could hide the orphan.
+    if (task?.generation === run.generation && task.machine_id === run.machine_id && ['running', 'verifying'].includes(task.status)) continue;
+    if (run.machine_id !== machineId) {
+      const machine = coord.getMachine(run.machine_id);
+      if (machine && now - machine.last_seen <= LEASE_MS) continue;
+      tx(coord.db, () => {
+        const fresh = coord.getRun(run.id);
+        if (!fresh || fresh.machine_id !== run.machine_id || fresh.generation !== run.generation ||
+            !coord.db.prepare("SELECT 1 FROM budget_reservations WHERE run_id = ? AND state = 'held'").get(run.id)) return;
+        if (fresh.status === 'cleanup_failed' && coord.getMeta(`recovery:${run.id}`) === 'remote_lease_expired') return;
+        coord.setMeta(`recovery:${run.id}`, 'remote_lease_expired');
+        coord.updateRun(run.id, { status: 'cleanup_failed', stop_reason: 'Remote exit acknowledgement is missing; the worker or owner must confirm process exit before releasing budget.' });
+      });
+      continue; // A remote PID or idle phase never authorizes local signaling or release.
+    }
     if (activeTaskIds.has(run.task_id)) continue;
     const result = await recoverRunChildren(coord, run);
     if (result.status === 'exited' || result.status === 'terminated') {
       coord.confirmRecoveredRunExit(run.id, { ...result, reason: 'process recovery confirmed group exit' } as import('./proc.ts').TerminateResult);
       const task = coord.getTask(run.task_id);
-      if (task?.status === 'needs_human') coord.updateTask(task.id, { attention: 'Process exit is now confirmed. Your work is preserved; retry when ready.' });
+      if (run.status === 'cleanup_failed' && task?.status === 'needs_human' && task.generation === run.generation && task.machine_id === run.machine_id &&
+          (!task.attention || task.attention.startsWith('Process recovery'))) coord.updateTask(task.id, { attention: 'Process exit is now confirmed. Your work is preserved; retry when ready.' });
+    } else {
+      holdUnconfirmedExit(coord, run, result.reason ?? 'Owned process exit is unconfirmed; allowance remains held.');
     }
   }
   if (opts.startup) {
@@ -415,8 +454,8 @@ export async function recover(coord: Coordinator, machineId: string, activeTaskI
       for (const owned of orphanRuns) {
         const result = await recoverRunChildren(coord, owned);
         if (!['exited', 'terminated'].includes(result.status)) {
-          uncertain = result.reason ?? 'Could not prove that the old process stopped.';
-          coord.updateRun(owned.id, { status: 'cleanup_failed', stop_reason: uncertain });
+          const reason = result.reason ?? 'Could not prove that the old process stopped.';
+          if (holdUnconfirmedExit(coord, owned, reason)) uncertain = reason;
         } else coord.confirmRecoveredRunExit(owned.id, result as import('./proc.ts').TerminateResult);
       }
       const fresh = coord.getTask(t.id);

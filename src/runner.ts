@@ -680,7 +680,7 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   const finishRun = async (status: string, reason?: string) => {
     phase('collect');
     await log.close();
-    await api['run.update']({ runId, patch: { status, stop_reason: reason ?? null, phases, phase: null, ended_at: Date.now() } });
+    await api['run.update']({ runId, patch: { status, stop_reason: reason ?? null, phases, phase: 'collect', ended_at: Date.now() } });
   };
 
   // ---- stopped by us ----
@@ -814,7 +814,7 @@ async function runNativeArtifact(ctx: RunContext, runId: string, log: LogBuffer,
   if (overlap) return finishNeedsHuman(ctx, `Native artifact overlaps active work in ${overlap.file}; source preserved.`, runId);
   const finishRun = async (status: string, reason?: string) => {
     await log.close();
-    await api['run.update']({ runId, patch: { status, phase: null, ended_at: Date.now(), stop_reason: reason ?? null } });
+    await api['run.update']({ runId, patch: { status, phase: 'collect', ended_at: Date.now(), stop_reason: reason ?? null } });
   };
   return acceptArtifact({ ...ctx, agent: data.agent }, wt, ctx.startPoint, files, task.summary ?? 'Native artifact submitted', runId,
     log, phase, finishRun, 0, {}, setAttemptReaped, data);
@@ -930,7 +930,7 @@ async function acceptArtifact(ctx: RunContext, wt: string, baseSha: string, file
       reviewAccounted = true;
       await api['run.update']({ runId: reviewRun, patch: { status: !outcome.reaped ? 'cleanup_failed' : 'skipped' in outcome ? outcome.status === 'not_started' ? 'skipped' : 'failed' : 'succeeded',
         ended_at: outcome.endedAt, stop_reason: 'skipped' in outcome ? outcome.skipped : null, verdict: 'review' in outcome ? JSON.stringify(outcome.review) : null,
-        ...(outcome.reaped ? { phase: null, pid: null, proc_started: null } : {}) } }).catch((err) => { if (!isStale(err)) throw err; });
+        ...(outcome.reaped ? { phase: 'review', pid: null, proc_started: null } : {}) } }).catch((err) => { if (!isStale(err)) throw err; });
     }
     if (reviewRun && outcome.reaped) await api['run.exit']({ runId: reviewRun, taskId: task.id, owner: claimOwner(task), reaped: true });
     if (!outcome.reaped) return finishNeedsHuman(ctx, 'The reviewer process may still be alive; work is held for process recovery.', runId);

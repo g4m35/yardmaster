@@ -381,7 +381,7 @@ async function cmdRecover(a: Args) {
     return;
   }
   if (a.flags['confirm-stopped'] !== true) die('Use ym recover --confirm-stopped <task> --note "how you verified process exit".');
-  const id = a._[1] ?? die('Pass the task with a PID-less spawning-window hold.');
+  const id = a._[1] ?? die('Pass the task id shown by the process-recovery warning.');
   const note = flag(a, 'note');
   if (!note || note.trim().length < 12) die('Pass --note with how you confirmed every process has stopped (at least 12 characters).');
   if (receipts.replayed.includes(id)) return console.log(green(`✔ ${id}: final planning usage replayed and exit acknowledged.`));
