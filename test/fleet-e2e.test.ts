@@ -17,6 +17,7 @@ import { recover, planCleanup, runCleanup } from '../src/janitor.ts';
 import { groupAlive, processStartTime, terminateOwnedGroup } from '../src/proc.ts';
 import { listHeld } from '../src/budgets.ts';
 import type { Task } from '../src/types.ts';
+import type { Client } from '../src/api.ts';
 import { sandbox, sh, settleTasks, until } from './helpers.ts';
 
 /** Real HTTP, auth, scheduler, verification, journals and Git; only model inference is mocked. */
@@ -52,8 +53,8 @@ async function fleet() {
       const local = resolveConfig([loadConfig(), { worktreeRoot: join(box.root, `machine-${suffix}-worktrees`) }]);
       const transport = httpTransport(url, paired.token, machineId);
       const journalChannel = { hub: url, projectIds: [project.id] };
-      const createWorker = (transfer: BranchTransport = transport, maxParallel = 1) => {
-        const worker = new WorkerLoop({ hub: url, client: channel.client, machineId, name: `machine ${suffix}`, repos: () => ({ [project.id]: repo }),
+      const createWorker = (transfer: BranchTransport = transport, maxParallel = 1, api = channel.client) => {
+        const worker = new WorkerLoop({ hub: url, client: api, machineId, name: `machine ${suffix}`, repos: () => ({ [project.id]: repo }),
           agents: () => ['mock'], localConfig: () => resolveConfig([local, { maxParallel }]), verifySlots: new Semaphore(1), transport: transfer });
         workers.push(worker);
         return worker;
@@ -270,6 +271,9 @@ test('a canceled HTTP bundle aborts while its sibling renews; a replacement gene
   let oldBundle: Buffer | undefined;
   let uploadStarted = false;
   let canceledTaskId = '';
+  let siblingTaskId = '';
+  let siblingWaiting = false;
+  const siblingGate = latch();
   try {
     const a = f.machines[0]!;
     const slow: BranchTransport = {
@@ -296,22 +300,38 @@ test('a canceled HTTP bundle aborts while its sibling renews; a replacement gene
         throw new Error('Unreachable');
       },
     };
-    const wa = a.createWorker(slow, 2);
+    const gatedClient = new Proxy(a.client, { get(target, key: keyof Client) {
+      if (key !== 'run.update') return target[key];
+      return async (params: Parameters<Client['run.update']>[0]) => {
+        if (params.patch.phase === 'agent:spawning' && f.hub.coord.getRun(params.runId)?.task_id === siblingTaskId) {
+          siblingWaiting = true;
+          await siblingGate.promise;
+        }
+        return target[key](params);
+      };
+    } });
+    const wa = a.createWorker(slow, 2, gatedClient);
     const tasks = f.hub.coord.addTasks(f.project.id, [
       { title: 'Cancel this in-flight artifact', prompt: '@mock write cancel/a.txt accepted', files: ['cancel/a.txt'], agent: 'mock' },
-      { title: 'Keep sibling progress', prompt: '@mock sleep 1200\n@mock write sibling/b.txt accepted', files: ['sibling/b.txt'], agent: 'mock' },
+      { title: 'Keep sibling progress', prompt: '@mock write sibling/b.txt accepted', files: ['sibling/b.txt'], agent: 'mock' },
     ], 'fleet cancel e2e').created;
     canceledTaskId = tasks[0]!.id;
+    siblingTaskId = tasks[1]!.id;
     await wa.tick();
     await until(() => uploadStarted, Boolean, 20_000, 'partial bundle reaching real Hub');
+    await until(() => siblingWaiting, Boolean, 20_000, 'sibling held before coding launch');
     const sibling = f.hub.coord.getTask(tasks[1]!.id)!;
+    assert.equal(sibling.status, 'running');
     assert.equal(sibling.machine_id, a.machineId);
-    // Expiring the lease makes renewal observable without a clock-dependent sleep.
-    f.hub.coord.db.prepare('UPDATE tasks SET lease_until = ? WHERE id = ?').run(Date.now() + 1000, sibling.id);
+    // A bounded gate keeps this claim active; compare actual renewal against its stored prior lease.
+    const priorLease = Date.now() + 30_000;
+    f.hub.coord.db.prepare('UPDATE tasks SET lease_until = ? WHERE id = ?').run(priorLease, sibling.id);
     await f.owner['task.control']({ id: tasks[0]!.id, action: 'cancel', by: 'fleet test' });
     await wa.heartbeat();
     await until(() => aborted && !wa.active.has(tasks[0]!.id), Boolean, 5000, 'cancel aborting the upload');
-    assert.ok(f.hub.coord.getTask(sibling.id)!.lease_until! > Date.now() + 1000);
+    assert.equal(f.hub.coord.getTask(sibling.id)!.status, 'running');
+    assert.ok(f.hub.coord.getTask(sibling.id)!.lease_until! > priorLease);
+    siblingGate.release();
     assert.equal(f.hub.coord.getTask(tasks[0]!.id)!.status, 'canceled');
     f.pump(wa);
     assert.equal((await settleTasks(f.hub.coord, [sibling.id], f.root, 20_000))[0]!.status, 'done');
@@ -331,7 +351,7 @@ test('a canceled HTTP bundle aborts while its sibling renews; a replacement gene
     assert.equal(f.hub.coord.getMeta(`bundle:${stale.id}:${stale.generation}`), null);
     assert.equal(sh(f.repo, 'git', ['for-each-ref', '--format=%(refname)', `refs/yardmaster/accepted/${stale.id}/`]), '');
     await f.owner['task.control']({ id: stale.id, action: 'cancel', by: 'fixture cleanup' });
-  } finally { await f.close(); }
+  } finally { siblingGate.release(); await f.close(); }
 });
 
 test('a paired worker reconnects and reuploads its durable verified branch without running the model again', { timeout: 40_000 }, async () => {
