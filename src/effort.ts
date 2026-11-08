@@ -199,11 +199,12 @@ export function withEffort(spec: LaunchSpec, effort: EffortResolution): LaunchSp
 
 /**
  * The effort resolution behind a built launch, for persisting with the run. Specs from adapters that don't apply the
- * policy (third-party plugins) are resolved here instead, so a configured minimum still fails loudly rather than being
- * silently skipped.
+ * policy (third-party plugins, including replacements for built-in names) have no applied flag evidence. Treat their
+ * effort as native and require attestation for a minimum; configured flags/routing are not proof the plugin used them.
  */
 export function launchEffort(agent: string, ctx: AdapterContext & { routedEffort?: RoutedEffort }, spec: LaunchSpec): EffortResolution {
-  return recorded.get(spec) ?? resolveEffort(agent, ctx);
+  return recorded.get(spec) ?? resolveEffort(agent, { ...ctx, routedEffort: undefined,
+    settings: { ...ctx.settings, effortOwnership: 'native', effort: {}, extraArgs: [] } });
 }
 
 /** One-line summary for activity logs; carries no prompt or argument text. */

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { registerAdapter } from '../src/adapters/index.ts';
+import { getAdapter, registerAdapter } from '../src/adapters/index.ts';
 import { resolveConfig } from '../src/config.ts';
 import { runOneShot } from '../src/oneshot.ts';
 import { Hub } from '../src/hub.ts';
@@ -13,25 +13,25 @@ import { addLesson, listLessons } from '../src/lessons.ts';
 import { sandbox, settleTasks } from './helpers.ts';
 
 // An existing plugin may return an ordinary launch without using Yardmaster's effort helper.
-test('one-shot plugin review launches enforce the configured floor before any child starts', async () => {
+for (const agent of ['review-plugin-floor-fixture', 'codex', 'claude']) test(`one-shot plugin ${agent} enforces the configured floor before any child starts`, async () => {
   const box = sandbox();
-  const agent = 'review-plugin-floor-fixture';
+  const original = getAdapter(agent);
   const marker = join(box.root, 'launched');
   registerAdapter({ name: agent, label: 'Fixture plugin', binary: process.execPath,
     build: () => ({ command: process.execPath, args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)},'started'); console.log(JSON.stringify({type:'result',ok:true,text:'fixture'}))`] }),
     parse: line => [JSON.parse(line)] });
-  for (const attestedEffort of [undefined, 'medium', 'high']) {
+  try { for (const attestedEffort of [undefined, 'medium', 'high']) {
     rmSync(marker, { force: true });
     let spawned = false;
     const config = resolveConfig([{ agents: { [agent]: { minimumEffort: 'high', ...(attestedEffort ? { attestedEffort } : {}) } } }]);
     const result = await runOneShot({ agent, prompt: 'Read-only fixture review', cwd: box.repo, config,
-      readOnly: true, tier: 'standard', timeoutMs: 2000, hooks: { onSpawn: () => { spawned = true; } } });
+      readOnly: true, tier: 'strong', timeoutMs: 2000, hooks: { onSpawn: () => { spawned = true; } } });
     assert.equal(spawned, attestedEffort === 'high');
     assert.equal(existsSync(marker), attestedEffort === 'high');
     assert.equal(result.ok, attestedEffort === 'high');
     if (attestedEffort !== 'high') { assert.equal(result.status, 'spawn_failed'); assert.match(result.error, /minimumEffort/); }
     assert.equal(result.reaped, true);
-  }
+  } } finally { if (original) registerAdapter(original); }
 });
 
 test('late brief attachment counts each lesson once and rejects stale or foreign-project writes', async () => {

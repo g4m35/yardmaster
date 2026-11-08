@@ -12,12 +12,63 @@ import { Coordinator } from '../src/coordinator.ts';
 import { openDb } from '../src/db.ts';
 import { recover } from '../src/janitor.ts';
 import { normalizePlanningHub, PlanningJournal, recoverPlanningReceipts } from '../src/planning-journal.ts';
+import { planGoalManaged } from '../src/planner.ts';
+import { registerAdapter } from '../src/adapters/index.ts';
+import { loadConfig } from '../src/config.ts';
 import { processStartTime } from '../src/proc.ts';
 import { sandbox } from './helpers.ts';
 
 const usage = { costUsd: .3, tokensIn: 30, tokensOut: 3, provenance: 'actual' as const, cacheReadTokens: null, cacheWriteTokens: null };
 function clientFor(coord: Coordinator): Client { return localClient(buildMethods(coord, { machineId: 'm1', integrationHead: async () => 'a'.repeat(40) })); }
 function receipts(home: string) { return readdirSync(join(home, 'planning-receipts')).filter(name => name.endsWith('.json')); }
+
+for (const failure of ['result', 'stderr']) test(`failed planner ${failure} stays out of outage receipts while usage and exit remain replayable`, async () => {
+  const box = sandbox();
+  const coord = new Coordinator(openDb(join(box.home, 'privacy.sqlite')));
+  const sentinel = 'PRIVATE-PLANNER-OUTPUT-SENTINEL';
+  const agent = `privacy-${failure}-fixture`;
+  const script = `console.log(JSON.stringify({type:'usage',costUsd:.3,tokensIn:30,tokensOut:3,cumulative:false})); ${failure === 'result'
+    ? `console.log(JSON.stringify({type:'result',ok:false,text:${JSON.stringify(sentinel)}}));`
+    : `console.error(${JSON.stringify(sentinel)}); process.exitCode=1;`}`;
+  registerAdapter({ name: agent, label: 'Privacy fixture', binary: process.execPath,
+    build: () => ({ command: process.execPath, args: ['-e', script] }), parse: line => [JSON.parse(line)] });
+  const client = clientFor(coord);
+  let restored = false;
+  const outage = new Proxy(client, { get(target, key: keyof Client) {
+    if (key === 'plan.usage') return async (params: Parameters<Client['plan.usage']>[0]) => {
+      if (params.final && !restored) throw new Error('fixture final accounting outage');
+      return target[key](params);
+    };
+    return target[key];
+  } });
+  try {
+    const project = await coord.registerProject(box.repo);
+    await assert.rejects(planGoalManaged('PRIVATE-GOAL-SENTINEL', { cwd: box.repo, agent, config: loadConfig(box.repo),
+      client: outage, projectId: project.id, machineId: 'm1', hub: 'https://privacy.example' }), /fixture final accounting outage/);
+    const file = join(box.home, 'planning-receipts', receipts(box.home)[0]!);
+    const text = readFileSync(file, 'utf8');
+    assert.ok(!text.includes(sentinel), 'durable accounting must not retain agent output');
+    assert.ok(!text.includes('PRIVATE-GOAL-SENTINEL'), 'durable accounting must not retain the goal');
+    const receipt = JSON.parse(text);
+    assert.equal(receipt.snapshot.usage.costUsd, .3);
+    assert.equal(receipt.snapshot.final, true);
+    assert.equal(receipt.outcome.reaped, true);
+    assert.equal(receipt.outcome.succeeded, false);
+    assert.equal(listHeld(coord.db).length, 1);
+    restored = true;
+    const journal = PlanningJournal.read(join(box.home, 'planning-receipts'), file);
+    assert.equal(await journal.replay(outage), true);
+    assert.equal(coord.spentToday(), .3);
+    assert.equal(coord.getRun(receipt.runId)!.status, 'failed');
+    assert.equal(listHeld(coord.db).length, 0);
+    assert.equal(receipts(box.home).length, 0);
+    // With working RPC, the original detailed exception still reaches the invoking caller.
+    await assert.rejects(planGoalManaged('goal', { cwd: box.repo, agent, config: loadConfig(box.repo),
+      client: outage, projectId: project.id, machineId: 'm1', hub: 'https://privacy.example' }), new RegExp(sentinel));
+    assert.equal(receipts(box.home).length, 0);
+    assert.equal(listHeld(coord.db).length, 0);
+  } finally { coord.db.close(); }
+});
 
 for (const hub of [undefined, '']) test(`local CLI recovery replays its receipt with ${hub === undefined ? 'unset' : 'empty'} hub configuration`, async () => {
   const box = sandbox();

@@ -108,7 +108,6 @@ export async function planGoalManaged(goal: string, opts: { cwd: string; agent: 
   let phase = 'plan';
   let finalizing = false;
   let succeeded = false;
-  let reason = 'Planning failed before launch.';
   try {
     const plan = await planGoal(goal, { ...opts, signal: stop.signal, budgetUsd: admitted.budget.amountUsd,
       hooks: {
@@ -138,14 +137,12 @@ export async function planGoalManaged(goal: string, opts: { cwd: string; agent: 
       },
     });
     succeeded = true;
-    reason = '';
     return plan;
-  } catch (err) {
-    reason = err instanceof Error ? err.message : String(err);
-    throw err;
   } finally {
     // An unexpected throw after spawn is not evidence of exit. Fail closed and retain its hold.
     const completed = result as OneShotResult | null;
+    // Exceptions can contain echoed prompts, stderr or provider output. Keep only lifecycle facts in the receipt.
+    const reason = succeeded ? '' : completed ? `Planning ended without a valid plan (${completed.status}).` : 'Planning failed before a final result was recorded.';
     try {
       journal.outcome({ reaped: completed?.reaped ?? !spawned, succeeded, reason,
         ...(completed?.pid !== null && completed?.pid !== undefined && completed.procStartedAt !== null ? { process: { pid: completed.pid, startedAt: completed.procStartedAt } } : {}),
