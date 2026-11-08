@@ -70,6 +70,8 @@ async function runUnscoped(cmd: string, args: string[], opts: RunOptions = {}): 
 function runWithInput(cmd: string, args: string[], opts: { cwd?: string; timeoutMs?: number; env?: NodeJS.ProcessEnv; input?: string }): Promise<RunResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { cwd: opts.cwd, env: opts.env ?? cleanEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (d) => (stdout += d));

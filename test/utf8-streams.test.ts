@@ -17,9 +17,14 @@ test('scoped utilities stream-decode separate stdout/stderr across every UTF-8 b
   assert.deepEqual(actual, expected);
 });
 
+test('unscoped utilities with stdin also preserve split UTF-8 output', async () => {
+  const result = await run(process.execPath, ['-e', split], { input: 'fixture input' });
+  assert.equal(result.stdout, 'é€😀'); assert.equal(result.stderr, '文🦊');
+});
+
 test('utility decoders flush an incomplete final sequence once on nonzero exit', async () => {
   const code = "process.stdout.write(Buffer.from([0xe2,0x82]));process.stderr.write(Buffer.from([0xf0,0x9f]));process.exitCode=7";
-  const actual = await withProcessScope({}, () => run(process.execPath, ['-e', code], { allowFail: true }));
+  const actual = await withProcessScope({}, () => run(process.execPath, ['-e', code]));
   assert.equal(actual.code, 7); assert.equal(actual.stdout, '�'); assert.equal(actual.stderr, '�');
 });
 
