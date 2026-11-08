@@ -83,7 +83,9 @@ test('cancellation during registration waits for cleanup and preserves the cance
       registered = info;
       return new Promise<void>(() => {});
     } });
-    await until(() => existsSync(f.ready) && registered !== undefined, Boolean);
+    await until(() => registered !== undefined, Boolean);
+    assert.equal(existsSync(f.ready), false, 'router input is withheld while registration is pending');
+    assert.equal(groupAlive(registered!.pid), true);
     abort.abort('test cancellation');
     const r = await pending;
     assert.equal(r.reason, 'canceled');
