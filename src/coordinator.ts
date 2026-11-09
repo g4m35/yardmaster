@@ -473,7 +473,7 @@ export class Coordinator {
     });
   }
 
-  updateTask(id: string, patch: TaskPatch): Task {
+  updateTask(id: string, patch: TaskPatch, options: { requestEdit?: boolean } = {}): Task {
     this.invalidate();
     this.changed();
     const sets: string[] = [];
@@ -485,6 +485,15 @@ export class Coordinator {
       else if (typeof v === 'boolean') vals.push(v ? 1 : 0);
       else if (Array.isArray(v)) vals.push(JSON.stringify(v));
       else vals.push(v as string | number);
+    }
+    // Request options can change after creation. An old identity must never suppress work no
+    // longer represented by this task; lifecycle/telemetry updates keep the original identity.
+    const requestFields = options.requestEdit
+      ? ['title', 'prompt', 'scope', 'verify', 'priority', 'tier', 'agent', 'model', 'budget_usd', 'review', 'max_attempts', 'guidance', 'needs_approval']
+      : ['title', 'prompt', 'scope', 'verify', 'guidance'];
+    if (Object.keys(patch).some(k => requestFields.includes(k))) {
+      sets.push('fingerprint = ?');
+      vals.push('');
     }
     sets.push('updated_at = ?');
     vals.push(Date.now());
@@ -1313,7 +1322,7 @@ export class Coordinator {
   }
 
   /** Atomic retirement of the captured native generation into ordinary hub run ownership. */
-  beginSessionHandoff(sessionId: string, taskId: string, generation: number | undefined, branch: string, machineId: string, summary: string): { task: Task; run: Run | null } {
+  beginSessionHandoff(sessionId: string, taskId: string, generation: number | undefined, branch: string, machineId: string, summary: string, sourceCwd?: string): { task: Task; run: Run | null } {
     return tx(this.db, () => {
       const previous = this.getTask(taskId);
       const replay = parseHandoff(previous?.native_handoff);
@@ -1327,7 +1336,9 @@ export class Coordinator {
       const session = this.db.prepare('SELECT cwd, machine_id, agent, project_id FROM sessions WHERE id = ?').get(sessionId) as { cwd: string | null; machine_id: string | null; agent: string | null; project_id: string | null } | undefined;
       if (!session?.cwd || session.project_id !== task.project_id) throw new Error('Register this native session with its project and source checkout before branch handoff.');
       if (session.machine_id !== machineId) throw new Error('Unsupported remote native handoff: source checkout must be on the hub/shared repository and registered with the hub machine ID. Native binary export is not implemented; scoped worker credentials cannot submit sessions. Managed remote workers remain supported.');
-      const data: NativeHandoff = { sessionId, sessionGeneration: task.generation, branch, cwd: session.cwd, machineId, agent: session.agent ?? 'native', sha: null };
+      // MCP pins the source when this task is taken; later status calls may visit another checkout.
+      // assertNativeSource still validates that checkout/branch against this hub repository.
+      const data: NativeHandoff = { sessionId, sessionGeneration: task.generation, branch, cwd: sourceCwd ?? session.cwd, machineId, agent: session.agent ?? 'native', sha: null };
       this.advanceGeneration(taskId);
       this.db.prepare('UPDATE tasks SET native_handoff = ? WHERE id = ?').run(JSON.stringify(data), taskId);
       const owned = this.updateTask(taskId, { assignee: `machine:${machineId}`, machine_id: machineId, summary: clip(summary, 1200), lease_until: Date.now() + LEASE_MS, attention: 'Capturing native artifact; no checks accepted', head_sha: null, ready_at: null });

@@ -225,7 +225,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       coord.updateTaskIfOwner(p.id, p.owner ?? { assignee: '' }, p.patch as TaskPatch),
     ),
     // Explicit administrative writes never masquerade as a worker claim.
-    'task.adminUpdate': method(z.object({ id: TaskId, patch: z.record(z.string(), z.unknown()) }), (p) => coord.updateTask(p.id, p.patch as TaskPatch)),
+    'task.adminUpdate': method(z.object({ id: TaskId, patch: z.record(z.string(), z.unknown()) }), (p) => coord.updateTask(p.id, p.patch as TaskPatch, { requestEdit: true })),
     'task.context': method(z.object({ id: Id }), (p) => {
       const task = coord.getTask(p.id);
       if (!task) throw new Error(`No task ${p.id}`);
@@ -332,7 +332,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       p.claims.map((claim) => ({ taskId: claim.taskId, renewed: coord.renewSessionLease(claim.taskId, p.sessionId, claim.generation) })),
     ),
     'session.claim': method(z.object({ sessionId: Id, projectId: Id, taskId: z.string().optional() }), (p) => coord.claimForSession(p.sessionId, p.projectId, p.taskId)),
-    'session.finish': method(z.object({ sessionId: Id, taskId: Id, summary: z.string(), outcome: z.enum(['done', 'failed']).default('done'), branch: z.string().optional(), generation: Generation.optional() }), (p) =>
+    'session.finish': method(z.object({ sessionId: Id, taskId: Id, summary: z.string(), outcome: z.enum(['done', 'failed']).default('done'), branch: z.string().optional(), sourceCwd: z.string().min(1).max(4096).optional(), generation: Generation.optional() }), (p) =>
       p.branch ? (hooks.captureNative ? hooks.captureNative({ ...p, branch: p.branch }) : submitSessionHandoff(coord, hooks.machineId, { ...p, branch: p.branch })) : coord.finishForSession(p.sessionId, p.taskId, p.summary, p.outcome, undefined, p.generation),
     ),
 

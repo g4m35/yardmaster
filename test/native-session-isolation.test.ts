@@ -137,3 +137,35 @@ test('MCP finishing uses the captured project identity after this connection vis
     assert.equal(mcp.claims.size, 0);
   } finally { await mcp.close(); f.coord.db.close(); }
 });
+
+test('native branch capture keeps its taken checkout after nested and linked-checkout status lookups', async () => {
+  const f = await fixture();
+  const mcp = await f.connect('checkout-stable-editor');
+  const linked = join(f.root, 'linked-source');
+  let linkedCreated = false;
+  try {
+    mkdirSync(join(f.repo, 'src'));
+    writeFileSync(join(f.repo, 'src', 'feature.ts'), 'export const feature = true;\n');
+    sh(f.repo, 'git', ['add', '.']); sh(f.repo, 'git', ['commit', '-qm', 'native feature']);
+    const sha = sh(f.repo, 'git', ['rev-parse', 'HEAD']);
+    const task = f.coord.addTasks(f.firstProject.id, [{ title: 'Accept native feature', files: ['src/feature.ts'] }], 'fixture').created[0]!;
+    const take = await mcp.mcp.callTool({ name: 'yard_take_task', arguments: { id: task.id } });
+    assert.ok(!take.isError, JSON.stringify(take));
+    const nested = await mcp.mcp.callTool({ name: 'yard_status', arguments: { repo: join(f.repo, 'src') } });
+    assert.ok(!nested.isError, JSON.stringify(nested));
+    assert.equal(f.coord.listSessions(f.firstProject.id)[0]!.cwd, f.repo, 'registration stores the checkout root');
+    sh(f.repo, 'git', ['worktree', 'add', '-qb', 'other-native-checkout', linked]); linkedCreated = true;
+    const other = await mcp.mcp.callTool({ name: 'yard_status', arguments: { repo: linked } });
+    assert.ok(!other.isError, JSON.stringify(other));
+    assert.equal(f.coord.listSessions(f.firstProject.id)[0]!.cwd, linked, 'the live session can observe another checkout');
+    const finish = await mcp.mcp.callTool({ name: 'yard_finish_task', arguments: { id: task.id, branch: 'main', summary: 'Feature committed' } });
+    assert.ok(!finish.isError, JSON.stringify(finish));
+    const captured = JSON.parse(f.coord.getTask(task.id)!.native_handoff!);
+    assert.equal(captured.cwd, f.repo, 'submission uses the checkout captured with this claim');
+    assert.equal(captured.sha, sha);
+    assert.equal(f.coord.getTask(task.id)!.status, 'queued');
+  } finally {
+    await mcp.close(); f.coord.db.close();
+    if (linkedCreated) { sh(f.repo, 'git', ['worktree', 'remove', linked]); sh(f.repo, 'git', ['branch', '-d', 'other-native-checkout']); }
+  }
+});

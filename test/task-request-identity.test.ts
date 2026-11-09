@@ -7,6 +7,25 @@ import { Coordinator } from '../src/coordinator.ts';
 import { chooseAgent } from '../src/router.ts';
 import { resolveConfig } from '../src/config.ts';
 import { sandbox } from './helpers.ts';
+import { buildMethods, localClient } from '../src/api.ts';
+
+test('editing scope or checks cannot suppress the original request, while lifecycle updates retain identity', async () => {
+  const box = sandbox(); const db = openDb(':memory:'); const c = new Coordinator(db);
+  try {
+    const p = await c.registerProject(box.repo);
+    const api = localClient(buildMethods(c, { machineId: 'fixture' }));
+    for (const patch of [{ scope: ['beta.ts'] }, { verify: ['node other-check.mjs'] }, { priority: 5 }]) {
+      const input = { title: `Keep exact check ${Object.keys(patch)[0]}`, files: ['alpha.ts'], verify: ['node first-check.mjs'] };
+      const first = c.addTasks(p.id, [input], 'test').created[0]!;
+      await api['task.adminUpdate']({ id: first.id, patch: { summary: 'status note', lease_until: null, cost_usd: 0.01 } });
+      assert.equal(c.addTasks(p.id, [input], 'test').duplicates[0]!.existing, first.id, 'telemetry does not change requested work');
+      c.updateTask(first.id, { agent: 'mock', model: 'fixture-model', tier: 'strong' });
+      assert.equal(c.addTasks(p.id, [input], 'test').duplicates[0]!.existing, first.id, 'execution routing does not edit the request');
+      await api['task.adminUpdate']({ id: first.id, patch });
+      assert.equal(c.addTasks(p.id, [input], 'test').created.length, 1, 'the old scope/check request is no longer represented');
+    }
+  } finally { db.close(); rmSync(box.root, { recursive: true, force: true }); }
+});
 
 test('automatic deduplication requires identical instructions and scope/options', async () => {
   const box = sandbox(); const db = openDb(join(box.home, 'identity.db')); const c = new Coordinator(db);

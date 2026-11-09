@@ -48,10 +48,10 @@ export async function assertNativeSource(repo: string, data: NativeHandoff): Pro
 }
 
 /** Bounded capture only; long checks/review run in the existing WorkerLoop after this returns. */
-export async function submitSessionHandoff(coord: Coordinator, machineId: string, p: { sessionId: string; taskId: string; generation?: number; branch: string; summary: string; outcome: 'done' | 'failed' }, signal?: AbortSignal): Promise<Task> {
+export async function submitSessionHandoff(coord: Coordinator, machineId: string, p: { sessionId: string; taskId: string; generation?: number; branch: string; sourceCwd?: string; summary: string; outcome: 'done' | 'failed' }, signal?: AbortSignal): Promise<Task> {
   if (signal?.aborted) throw new Error('The hub is shutting down; native capture was not started.');
   if (p.outcome !== 'done') throw new Error('A branch can only be submitted with outcome done. Use plain completion to report failure.');
-  const { task, run } = coord.beginSessionHandoff(p.sessionId, p.taskId, p.generation, p.branch, machineId, p.summary);
+  const { task, run } = coord.beginSessionHandoff(p.sessionId, p.taskId, p.generation, p.branch, machineId, p.summary, p.sourceCwd);
   if (!run) return task; // Replay of this captured session generation, including lost RPC responses.
   const owner = { generation: task.generation, assignee: task.assignee! };
   const key = runUtilityKey(run.id);

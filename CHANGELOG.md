@@ -2,9 +2,9 @@
 
 ## 0.9.1
 - Malformed unauthenticated request targets return400; rejected asynchronous handlers no longer terminate the hub.
-- Native hooks exempt only the exact canonical session. Session identities are scoped by project and machine, including MCP connections addressing multiple repositories; matching legacy claims remain intact.
-- Owned-process cleanup includes ordinary detached descendants retaining an inherited marker, with private durable receipts and identity-checked restart recovery. Inspection uncertainty keeps recovery holds; environment-clearing/hostile children remain outside this containment.
-- Exact request deduplication preserves different scopes, instruction ordering and acceptance options. Learned routing keeps configured-model histories separate and never attributes legacy aggregate results to a replacement model.
+- Native hooks exempt only the exact canonical session. Session identities are scoped by project and machine, including MCP connections addressing multiple repositories; matching legacy claims remain intact. Native submissions retain the checkout captured at claim time across later nested-directory or linked-checkout status calls.
+- Owned-process cleanup includes ordinary detached descendants retaining an OS-visible inherited marker, with private durable receipts and identity-checked restart recovery. Inspection uncertainty keeps recovery holds; children clearing/hiding their environment and hostile children remain outside this containment.
+- Exact request deduplication preserves different scopes, instruction ordering and acceptance options; request edits invalidate stale identities. Learned routing keeps configured-model histories separate and never attributes legacy aggregate results to a replacement model.
 - Managed work without configured checks waits for attention; native code cannot bypass artifact verification by reporting completion without a branch. Explicit allowNoChanges research/report tasks retain report-only completion. Requested failed/missing/unresolved reviews stop by default; explicit advisory review remains available through onUnresolved=proceed.
 - Scope lean-context savings to Claude Code and document connected-client, cache and containment limits.
 

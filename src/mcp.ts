@@ -4,7 +4,7 @@ import * as z from 'zod/v4';
 import { relative } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Client } from './api.ts';
-import { mainRepoRoot, projectIdFor } from './git.ts';
+import { mainRepoRoot, projectIdFor, repoRoot } from './git.ts';
 import { NewTaskSchema } from './types.ts';
 import { clip, formatUsd } from './text.ts';
 import { machineId } from './paths.ts';
@@ -26,13 +26,15 @@ type SessionRegistration = { identity: string; cwd: string };
 type Ctx = {
   client: Client; cwd: string; identity: string; agentName: string | null; profile?: 'full' | 'minimal';
   claims?: Map<string, number>; claimOwners?: Map<string, string>;
+  claimSources?: Map<string, string>;
   /** Present for interactive connections, whose canonical identity is registered separately for each project. */
   sessionName?: string;
   sessions?: Map<string | null, SessionRegistration>;
 };
 
-async function projectId(ctx: Ctx, repo?: string): Promise<{ id: string; root: string; identity: string }> {
-  const cwd = repo ?? ctx.cwd;
+async function projectId(ctx: Ctx, repo?: string): Promise<{ id: string; root: string; identity: string; checkout: string }> {
+  const cwd = await repoRoot(repo ?? ctx.cwd);
+  if (!cwd) throw new Error(`${repo ?? ctx.cwd} is not inside a git repository.`);
   const root = await mainRepoRoot(cwd);
   if (!root) throw new Error(`${cwd} is not inside a git repository.`);
   const id = await projectIdFor(root);
@@ -46,7 +48,7 @@ async function projectId(ctx: Ctx, repo?: string): Promise<{ id: string; root: s
     identity = await ctx.client['session.register']({ name: ctx.sessionName, agent: ctx.agentName, projectId: id, cwd, machineId: machineId() });
     (ctx.sessions ??= new Map()).set(id, { identity, cwd });
   }
-  return { id, root, identity };
+  return { id, root, identity, checkout: cwd };
 }
 
 const text = (s: string) => ({ content: [{ type: 'text' as const, text: s }] });
@@ -55,6 +57,7 @@ const fail = (err: unknown) => ({ content: [{ type: 'text' as const, text: `Erro
 export function buildMcpServer(ctx: Ctx): McpServer {
   const claims = ctx.claims ?? new Map<string, number>();
   const claimOwners = ctx.claimOwners ??= new Map<string, string>();
+  const claimSources = ctx.claimSources ??= new Map<string, string>();
   const server = new McpServer({ name: 'yardmaster', version: VERSION }, { instructions: INSTRUCTIONS });
   const repoArg = { repo: z.string().optional().describe('Path inside the repo; defaults to the current directory.') };
 
@@ -135,6 +138,7 @@ export function buildMcpServer(ctx: Ctx): McpServer {
     if (!t) return 'Nothing is ready to take right now.';
     claims.set(t.id, t.generation);
     claimOwners.set(t.id, p.identity);
+    claimSources.set(t.id, p.checkout);
     if (t.scope.length) await ctx.client['lock.claim']({ projectId: p.id, holder: p.identity, patterns: t.scope, reason: t.title, ttlMinutes: 60 }).catch(() => undefined);
     return `You have ${t.id}: ${t.title}\n${t.prompt !== t.title ? t.prompt + '\n' : ''}${t.scope.length ? `Files: ${t.scope.join(', ')}\n` : ''}When finished call yard_finish_task with a short summary${t.allow_no_changes ? '.' : ' and the committed local branch to verify.'}`;
   });
@@ -143,17 +147,19 @@ export function buildMcpServer(ctx: Ctx): McpServer {
     const generation = claims.get(a.id);
     if (generation === undefined) throw new Error('This connection has no captured claim for that task. Do not finish a claim owned by another or restarted connection; retry/reclaim it through Yardmaster first.');
     const identity = claimOwners.get(a.id) ?? ctx.identity;
-    const t = await ctx.client['session.finish']({ sessionId: identity, taskId: a.id, generation, summary: a.summary, outcome: a.outcome, branch: a.branch }).catch(async error => {
+    const t = await ctx.client['session.finish']({ sessionId: identity, taskId: a.id, generation, summary: a.summary, outcome: a.outcome, branch: a.branch, sourceCwd: claimSources.get(a.id) }).catch(async error => {
       // A rejected capture may have durably retired this generation. Never borrow a new one on retry/restart.
       const current = await ctx.client['task.peek']({ id: a.id }).catch(() => null);
       if (current && (current.generation !== generation || current.assignee !== identity || current.status !== 'running')) {
         claims.delete(a.id);
         claimOwners.delete(a.id);
+        claimSources.delete(a.id);
       }
       throw error;
     });
     claims.delete(a.id);
     claimOwners.delete(a.id);
+    claimSources.delete(a.id);
     const artifact = ['ready', 'merging'].includes(t.status) ? 'Native artifact passed checks; integration is pending.' : t.status === 'done' ? 'Native artifact completed integration.' : 'Native artifact captured; checks/review and integration are pending.';
     return `${t.id} is now ${t.status}.${a.branch ? ` ${artifact} Source branch/worktree are preserved.` : ' Reported outcome only; no automated verification claimed.'}`;
   });
@@ -213,7 +219,8 @@ export function buildMcpServer(ctx: Ctx): McpServer {
 }
 
 export async function runMcp(client: Client, opts: { cwd?: string } = {}): Promise<void> {
-  const cwd = opts.cwd ?? process.cwd();
+  const requestedCwd = opts.cwd ?? process.cwd();
+  const cwd = await repoRoot(requestedCwd).catch(() => null) ?? requestedCwd;
   const taskId = process.env.YARDMASTER_TASK_ID;
   const agentName = process.env.YARDMASTER_AGENT ?? null;
   const sessionName = nativeSessionName(`mcp-${randomUUID()}`);
@@ -230,7 +237,7 @@ export async function runMcp(client: Client, opts: { cwd?: string } = {}): Promi
         void client['session.register']({ name: sessionName, agent: agentName, projectId, cwd: session.cwd, machineId: machineId() }).catch(() => undefined);
         const claims = [...ctx.claims!].filter(([id]) => ctx.claimOwners!.get(id) === session.identity).map(([taskId, generation]) => ({ taskId, generation }));
         if (claims.length) void client['session.heartbeat']({ sessionId: session.identity, claims }).then((results) => {
-          for (const r of results) if (!r.renewed) { ctx.claims!.delete(r.taskId); ctx.claimOwners!.delete(r.taskId); }
+          for (const r of results) if (!r.renewed) { ctx.claims!.delete(r.taskId); ctx.claimOwners!.delete(r.taskId); ctx.claimSources?.delete(r.taskId); }
         }).catch(() => undefined);
       }
     }, 60_000).unref();

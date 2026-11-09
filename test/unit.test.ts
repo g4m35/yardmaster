@@ -120,7 +120,8 @@ test('tier inference and escalation', () => {
 });
 
 test('routing skips busy and consistently failing agents', () => {
-  const config = resolveConfig([{ routing: { standard: ['claude', 'codex'] }, agents: { claude: { maxParallel: 1 } } }]);
+  const agents = { claude: { maxParallel: 1, models: { standard: 'fixture-claude' } }, codex: { models: { standard: 'fixture-codex' } } };
+  const config = resolveConfig([{ routing: { standard: ['claude', 'codex'] }, agents }]);
   const base = { config, tier: 'standard' as const, forced: null, installed: ['claude', 'codex'] };
   assert.equal(chooseAgent({ ...base, runningByAgent: {}, stats: {} })?.agent, 'claude');
   assert.equal(chooseAgent({ ...base, runningByAgent: { claude: 1 }, stats: {} })?.agent, 'codex');
@@ -134,7 +135,7 @@ test('routing skips busy and consistently failing agents', () => {
   assert.equal(pick?.agent, 'codex');
   assert.match(pick!.reason, /6\/6 verified/);
   // Exploration gives an agent with no history a chance.
-  const cfg2 = resolveConfig([{ routing: { standard: ['claude', 'codex'] }, learning: { explore: 0.5 } }]);
+  const cfg2 = resolveConfig([{ routing: { standard: ['claude', 'codex'] }, agents, learning: { explore: 0.5 } }]);
   assert.equal(chooseAgent({ ...base, config: cfg2, runningByAgent: {}, stats: { claude: st('claude', 6, 6, 1) }, random: () => 0.1 })?.agent, 'codex');
   assert.equal(chooseAgent({ ...base, installed: [], runningByAgent: {}, stats: {} }), null);
 });
