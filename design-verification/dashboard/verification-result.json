@@ -2,123 +2,22 @@
   "schemaVersion": 1,
   "gate": "render-verification-gate",
   "gateVersion": 1,
-  "result": "fail",
-  "defects": [
-    {
-      "type": "overlap",
-      "viewport": "desktop",
-      "detail": "<time> index 306 overlaps <h2> index 315 (ratio 0.63)"
-    },
-    {
-      "type": "overlap",
-      "viewport": "desktop",
-      "detail": "<span> index 307 overlaps <h2> index 315 (ratio 0.74)"
-    },
-    {
-      "type": "overlap",
-      "viewport": "desktop",
-      "detail": "<time> index 309 overlaps <span> index 319 (ratio 0.22)"
-    },
-    {
-      "type": "overlap",
-      "viewport": "desktop",
-      "detail": "<time> index 309 overlaps <span> index 323 (ratio 0.32)"
-    },
-    {
-      "type": "overlap",
-      "viewport": "desktop",
-      "detail": "<span> index 310 overlaps <span> index 319 (ratio 0.50)"
-    },
-    {
-      "type": "overlap",
-      "viewport": "desktop",
-      "detail": "<span> index 310 overlaps <span> index 323 (ratio 0.79)"
-    },
-    {
-      "type": "overlap",
-      "viewport": "desktop",
-      "detail": "<time> index 312 overlaps <span> index 325 (ratio 0.11)"
-    },
-    {
-      "type": "overlap",
-      "viewport": "desktop",
-      "detail": "<span> index 313 overlaps <span> index 325 (ratio 0.29)"
-    },
-    {
-      "type": "overlap",
-      "viewport": "mobile",
-      "detail": "<time> index 300 overlaps <h2> index 309 (ratio 0.63)"
-    },
-    {
-      "type": "overlap",
-      "viewport": "mobile",
-      "detail": "<span> index 301 overlaps <h2> index 309 (ratio 0.74)"
-    },
-    {
-      "type": "overlap",
-      "viewport": "mobile",
-      "detail": "<time> index 303 overlaps <span> index 313 (ratio 0.24)"
-    },
-    {
-      "type": "overlap",
-      "viewport": "mobile",
-      "detail": "<time> index 303 overlaps <span> index 317 (ratio 0.32)"
-    },
-    {
-      "type": "overlap",
-      "viewport": "mobile",
-      "detail": "<span> index 304 overlaps <span> index 313 (ratio 0.54)"
-    },
-    {
-      "type": "overlap",
-      "viewport": "mobile",
-      "detail": "<span> index 304 overlaps <span> index 317 (ratio 0.79)"
-    },
-    {
-      "type": "overlap",
-      "viewport": "mobile",
-      "detail": "<time> index 306 overlaps <span> index 319 (ratio 0.11)"
-    },
-    {
-      "type": "overlap",
-      "viewport": "mobile",
-      "detail": "<span> index 307 overlaps <span> index 319 (ratio 0.29)"
-    },
-    {
-      "type": "overlap",
-      "viewport": "desktop",
-      "detail": "<time> and <span> overlap (+1 similar)"
-    },
-    {
-      "type": "overlap",
-      "viewport": "desktop",
-      "detail": "<span> and <span> overlap (+1 similar)"
-    },
-    {
-      "type": "overlap",
-      "viewport": "mobile",
-      "detail": "<time> and <span> overlap (+1 similar)"
-    },
-    {
-      "type": "overlap",
-      "viewport": "mobile",
-      "detail": "<span> and <span> overlap (+1 similar)"
-    }
-  ],
+  "result": "pass",
+  "defects": [],
   "artifacts": [
     {
       "path": "desktop.png",
       "kind": "desktop-screenshot",
-      "sha256": "44827da1a7635b6588826785100c4e88dc3f90e0765db19fab998dca80ac6a7a",
-      "bytes": 441706,
+      "sha256": "f4a8cf28894f0d4087ee23778a701e79bd6caf74072b72d11ce49faa18565810",
+      "bytes": 456997,
       "width": 1425,
       "height": 2136
     },
     {
       "path": "mobile-390.png",
       "kind": "mobile-screenshot",
-      "sha256": "28cd95dfa0f8ce54c1d35645fe3c78080e187f542098a270adc803d5e3ddf485",
-      "bytes": 85266,
+      "sha256": "7e4cb43399320ed5cfa0bfe64ec086f15a1dc78d123ae3c393901f8c152c674f",
+      "bytes": 85420,
       "width": 390,
       "height": 844
     },
@@ -131,12 +30,12 @@
     {
       "path": "geometry.json",
       "kind": "geometry",
-      "sha256": "0cbf0489dcc4a652d2b2c35236686a2c6559bfcd49e5cf950eb001fc2eca308a",
-      "bytes": 210468
+      "sha256": "a10d70e1318f37ad905676f6ff5ccea3a1748cf1f2b0e477a8ae645b3e213f17",
+      "bytes": 209207
     }
   ],
   "sourceState": {
-    "head": "5f607a87da8171ee26e0023a8daae259ef284ec3",
-    "dirtyDigest": "20af1a83e97f48cb36ab1f43fdd16f377fd0531e4f5954e4cfce6410e2c7d3a2"
+    "head": "66e7f3a210bf1e93e1cbddebf340f994428bd2c1",
+    "dirtyDigest": "a5feadbe823a9cd39de56c2c48c8fb2277026a4287fb0b5f154e9ade99ffbcd5"
   }
 }
