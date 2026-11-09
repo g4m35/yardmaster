@@ -289,14 +289,14 @@ test('a task stopped for touching other files can have its allowed files widened
   assert.deepEqual(call.params, { id: 't-one', scope: ['src/chat/**', 'docs/ledger.json', 'docs/ledger.md', 'src/privacy/map.ts'], by: 'dashboard' });
   assert.match(h.$('toast').textContent, /Try again/);
   // A brace pattern is one pattern, matched the way the hub matches it; a folder allows what is inside it.
-  const braces = { ...stopped, task: { ...stopped.task, scope: ['src/{client,server}/**', 'docs'],
-    last_error: 'Changed files outside its declared scope: src/client/app.ts, docs/guide/a.md, lib/x.ts. Only change src/{client,server}/**, docs.' } };
+  const braces = { ...stopped, task: { ...stopped.task, scope: ['src/{client,server}/**', 'docs', 'gen/**/out.md', 'a?.ts'],
+    last_error: 'Changed files outside its declared scope: src/client/app.ts, docs/guide/a.md, gen/out.md, ab.ts, lib/x.ts. Only change src/{client,server}/**, docs, gen/**/out.md, a?.ts.' } };
   h.respond(method => method === 'task.get' ? braces : method === 'registry.list' ? snapshot() : method === 'board.status' ? board() : {});
   await h.api.showTask('t-one', true);
   assert.match(h.$('d-body').textContent, /stopped for changing a file outside this list: lib\/x\.ts/);
   await button('Add it to the list').dispatch('click');
   await button('Save allowed files').dispatch('click');
-  assert.deepEqual(h.calls.filter(c => c.method === 'task.setScope').at(-1)!.params.scope, ['src/{client,server}/**', 'docs', 'lib/x.ts']);
+  assert.deepEqual(h.calls.filter(c => c.method === 'task.setScope').at(-1)!.params.scope, ['src/{client,server}/**', 'docs', 'gen/**/out.md', 'a?.ts', 'lib/x.ts']);
   h.respond(method => method === 'task.get' ? { ...detail(), label: 'Done', task: { ...detail().task, status: 'done' } } : method === 'registry.list' ? snapshot() : board());
   await h.api.showTask('t-one', true);
   assert.equal(h.$('d-scope'), null);
