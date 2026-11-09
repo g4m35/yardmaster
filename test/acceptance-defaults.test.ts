@@ -56,3 +56,30 @@ test('native code cannot finish by report alone; explicit report-only tasks can'
     assert.equal(c.finishForSession(research.assignee!,research.id,'research findings','done',undefined,research.generation).status,'done');
   } finally {db.close();rmSync(box.root,{recursive:true,force:true});}
 });
+
+for (const scenario of ['no checks', 'file quick checks', 'changed files', 'unavailable review'] as const) {
+  test(`managed report: ${scenario}`, { timeout: 30000 }, async () => {
+    const box = sandbox({ review: { mode: scenario === 'unavailable review' ? 'always' : 'never', reviewers: [] } });
+    const projectConfig = scenario === 'file quick checks'
+      ? { verify: ['node check.mjs'], verifyQuick: ['node inapplicable.mjs {files}'] }
+      : { verify: [] };
+    writeFileSync(join(box.repo, 'yardmaster.json'), JSON.stringify(projectConfig));
+    sh(box.repo, 'git', ['add', '.']); sh(box.repo, 'git', ['commit', '-qm', 'report verification fixture']);
+    const initial = sh(box.repo, 'git', ['rev-parse', 'HEAD']);
+    const h = new Hub({ db: openDb(':memory:'), token: 'fixture', machineId: 'm-report', port: 0, host: '127.0.0.1', quiet: true, includeMock: true, tickMs: 100 });
+    try {
+      await h.start(); const p = await h.coord.registerProject(box.repo);
+      const task = h.coord.addTasks(p.id, [{ title: `Research conventions ${scenario}`, allowNoChanges: true,
+        prompt: scenario === 'changed files' ? '@mock write result.js unverified' : 'Research conventions and report findings without editing files', agent: 'mock' }], 'fixture').created[0]!;
+      const [final] = await settleTasks(h.coord, [task.id], box.root, 25000);
+      const report = scenario === 'no checks' || scenario === 'file quick checks';
+      assert.equal(final!.status, report ? 'done' : 'needs_human', final!.attention ?? '');
+      assert.equal(sh(box.repo, 'git', ['rev-parse', 'yardmaster/integration']), initial, 'report completion never requests a code merge');
+      if (report) {
+        assert.ok(final!.finished_at);
+        assert.equal(final!.ready_at, null);
+        assert.equal(final!.head_sha, initial);
+      } else assert.match(final!.attention!, scenario === 'changed files' ? /verification commands/ : /review did not complete/);
+    } finally { await h.stop(); h.coord.db.close(); rmSync(box.root, { recursive: true, force: true }); }
+  });
+}

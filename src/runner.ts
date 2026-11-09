@@ -845,8 +845,9 @@ async function acceptArtifact(ctx: RunContext, wt: string, baseSha: string, file
   if (hot.length) await event(ctx, 'info', 'task.hotfiles', `Touches shared files (${hot.join(', ')}); it will be merged on its own.`);
 
   // ---- verify: "done" is measured, not claimed ----
+  const reportOnly = task.allow_no_changes && files.length === 0;
   const commands = native ? verifyCommands(task, config) : taskChecks(task, config, files);
-  if (!commands.length) return finishNeedsHuman(ctx, `${native ? 'Native handoff' : 'Managed work'} requires configured verification commands. Work is preserved; add verify commands to yardmaster.json and retry.`, runId);
+  if (!commands.length && !reportOnly) return finishNeedsHuman(ctx, `${native ? 'Native handoff' : 'Managed work'} requires configured verification commands. Work is preserved; add verify commands to yardmaster.json and retry.`, runId);
   const head = await revParse(wt, 'HEAD');
   await update(ctx, { status: 'verifying', head_sha: head, summary });
   if (commands.length) {
@@ -879,7 +880,7 @@ async function acceptArtifact(ctx: RunContext, wt: string, baseSha: string, file
     await api['run.update']({ runId, patch: { phase: 'collect', pid: null, proc_started: null } });
     if (head && (await isClean(wt))) await rememberChecked(wt, head, commands);
   } else {
-    await event(ctx, 'warn', 'task.unverified', 'No checks are configured, so this work was not tested. Add "verify" commands to yardmaster.json.');
+    await event(ctx, 'info', 'task.report', 'Explicit report-only task changed no files. No code verification is claimed.');
   }
   // ---- second opinion: a different model family reviews what tests can't judge ----
   let reviewNote = '';
@@ -981,13 +982,13 @@ async function acceptArtifact(ctx: RunContext, wt: string, baseSha: string, file
   await api['lesson.outcome']({ taskId: task.id, runId, summary: summary || 'completed', failureBefore: task.attempts > 1 ? task.last_error : null, reviewIssues: resolved.slice(0, 5) }).catch((err: Error) => { if (process.env.YARDMASTER_DEBUG) console.error('lesson.outcome', err.message); });
   const needsApproval = (config.integration.requireApproval || task.needs_approval) && !task.approved;
   await update(ctx, {
-    status: 'ready', ready_at: Date.now(), head_sha: head, summary: clip(summary + reviewNote, 1500), attention: needsApproval ? 'Waiting for your approval to merge' : null,
+    status: reportOnly ? 'done' : 'ready', ready_at: reportOnly ? null : Date.now(), ...(reportOnly ? { finished_at: Date.now() } : {}), head_sha: head, summary: clip(summary + reviewNote, 1500), attention: !reportOnly && needsApproval ? 'Waiting for your approval to merge' : null,
     retry_note: null, lease_until: null,
     // A failure that only shows up at merge time is kept on record, so a repeat of it stops early.
     ...(task.error_fp?.startsWith('merge:') ? {} : { last_error: null, error_fp: null, same_error_count: 0 }),
   });
-  await event(ctx, 'success', 'task.ready', `"${task.title}" passed checks (${files.length} file${files.length === 1 ? '' : 's'} changed, ${formatUsd(task.cost_usd + cost)})${needsApproval ? '. Waiting for your approval to merge.' : ''}`);
-  return { status: 'ready', message: summary };
+  await event(ctx, 'success', reportOnly ? 'task.done' : 'task.ready', reportOnly ? `Completed report "${task.title}" without file changes; no code integration requested.` : `"${task.title}" passed checks (${files.length} file${files.length === 1 ? '' : 's'} changed, ${formatUsd(task.cost_usd + cost)})${needsApproval ? '. Waiting for your approval to merge.' : ''}`);
+  return { status: reportOnly ? 'done' : 'ready', message: summary };
 }
 
 export { runVerify };
