@@ -1274,7 +1274,7 @@
 
   $('project').addEventListener('change', (e) => {
     closeDrawer(); projectId = e.target.value; localStorage.setItem('ym-project', projectId);
-    registry = null; registryError = ''; board = null; feed.length = 0;
+    registry = null; registryError = ''; board = null; feed.length = 0; feedAll = false;
     $('registry').replaceChildren(); $('board').replaceChildren(); $('att-list').replaceChildren(); $('attention').hidden = true; $('machines').replaceChildren(); $('sessions').textContent = ''; renderFeed();
     const scope = projectId;
     refresh(); rpc('events.since', { after: 0, limit: 60, projectId: scope || null }).then(events => { if (scope === projectId) pushEvents(events); }).catch(() => {});
