@@ -70,9 +70,12 @@ export function clip(s: string | null | undefined, max: number): string {
  */
 export function taskTitle(text: string, max = 96): string {
   const line = (text.split('\n').find((l) => l.trim()) ?? '').replace(/\s+/g, ' ').trim();
-  // A sentence ends at ". " before a capital or digit; "v1.2", "file.ts" and "e.g. x" do not end one.
-  const end = line.slice(12).search(/[.!?](?=\s+[A-Z0-9"'`(\[])/);
-  return clip(end >= 0 ? line.slice(0, 12 + end) : line, max);
+  // A sentence ends at ". " before a capital or digit, so "v1.2" and "file.ts" do not end one. A one-word
+  // lead-in ("1.", "Dr.", "e.g.") is not a sentence either.
+  for (const stop of line.matchAll(/[.!?](?=\s+[A-Z0-9"'`(\[])/g)) {
+    if (line.slice(0, stop.index).includes(' ')) return clip(line.slice(0, stop.index), max);
+  }
+  return clip(line, max);
 }
 
 /**

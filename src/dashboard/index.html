@@ -551,8 +551,10 @@
   // titles stored by older hubs and CLIs, which kept up to 200 characters of the request.
   const shortTitle = (s, max = 96) => {
     const line = String(s || '').replace(/\s+/g, ' ').trim();
-    const end = line.slice(12).search(/[.!?](?=\s+[A-Z0-9"'`(\[])/);
-    return clip(end >= 0 ? line.slice(0, 12 + end) : line, max);
+    for (const stop of line.matchAll(/[.!?](?=\s+[A-Z0-9"'`(\[])/g)) {
+      if (line.slice(0, stop.index).includes(' ')) return clip(line.slice(0, stop.index), max);
+    }
+    return clip(line, max);
   };
   const shortQuoted = (message) => String(message || '').replace(/"([^"]{97,})"/g, (_, title) => '"' + shortTitle(title) + '"');
   const elapsed = (from) => {
@@ -562,8 +564,10 @@
   };
   // Agent activity arrives as "<kind> <text>" with absolute worktree paths and environment prefixes.
   const tidyPaths = (text, worktree) => {
-    const plain = String(text || '')
-      .replace(/cd (?:"[^"\n]*"|\S+)[ \t]*(?:;|&&)[ \t]*/g, '')
+    // Only the step into the task's own working copy is noise; "cd packages/web && npm test" says where it ran.
+    const step = (path) => new RegExp('cd ["\']?' + path + '/?["\']?[ \\t]*(?:;|&&)[ \\t]*', 'g');
+    const entered = String(text || '').replace(step('/[^\\s"\']*/t-[0-9a-f]{8,}'), '');
+    const plain = (worktree ? entered.replace(step(worktree.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), '') : entered)
       .replace(/(?:export )?PATH="[^"\n]*(?:"|…)[ \t]*;?[ \t]*/g, '');
     const local = worktree ? plain.split(worktree + '/').join('').split(worktree).join('its working copy') : plain;
     return local.replace(/\/[^\s"']*\/t-[0-9a-f]{8,}(\/?)/g, (_, slash) => slash ? '' : 'its working copy');
@@ -1014,6 +1018,7 @@
     if (note) drafts.set(note.dataset.task, { value: note.value, start: note.selectionStart, end: note.selectionEnd, direction: note.selectionDirection });
     const scope = $('d-scope');
     if (scope && scope.value !== scope.getAttribute('value')) scopeDrafts.set(scope.dataset.task, scope.value);
+    else if (scope) scopeDrafts.delete(scope.dataset.task);
   }
   async function showTask(id, quiet) {
     saveDraft();

@@ -395,6 +395,10 @@ test('task titles are the first sentence of a request, not a clipped paragraph',
   assert.equal(taskTitle('Upgrade to v1.2 in package.json and README.md so installs work'), 'Upgrade to v1.2 in package.json and README.md so installs work');
   assert.equal(taskTitle('\n\n  Fix the login redirect!  Then tidy the tests.\nSecond line'), 'Fix the login redirect');
   assert.equal(taskTitle('Add CSV export'), 'Add CSV export');
+  assert.equal(taskTitle('Fix login. Then update the docs.'), 'Fix login');
+  // A one-word lead-in is not a sentence.
+  assert.equal(taskTitle('1. Fix the header. Then the footer.'), '1. Fix the header');
+  assert.equal(taskTitle('Dr. Smith cannot sign in'), 'Dr. Smith cannot sign in');
   assert.equal(taskTitle('x'.repeat(300)).length, 96);
   assert.equal(taskTitle(''), '');
 });
@@ -468,6 +472,13 @@ test('the owner can widen the files a stopped task may change; finished work and
     await assert.rejects(dispatch(methods, 'task.setScope', { id: task!.id, scope: ['  '] }), /Invalid input/);
     await assert.rejects(dispatch(methods, 'task.setScope', { id: task!.id, scope: 'src/**' }), /Invalid input/);
     await assert.rejects(dispatch(methods, 'task.setScope', { id: 't-missing', scope: [] }), /No task t-missing/);
+    // An attempt in flight keeps reserving the files it started with: its list can grow, not shrink.
+    await dispatch(methods, 'task.setScope', { id: task!.id, scope: ['src/chat/**'] });
+    coord.updateTask(task!.id, { status: 'running' });
+    await assert.rejects(dispatch(methods, 'task.setScope', { id: task!.id, scope: ['docs/**'] }), /is working\. Files can be added to its list now/);
+    assert.deepEqual((await dispatch(methods, 'task.setScope', { id: task!.id, scope: ['src/chat/**', 'docs/**'] }) as { scope: string[] }).scope, ['src/chat/**', 'docs/**']);
+    coord.updateTask(task!.id, { scope: [] });
+    await assert.rejects(dispatch(methods, 'task.setScope', { id: task!.id, scope: ['docs/**'] }), /Files can be added to its list now/);
     coord.updateTask(finished!.id, { status: 'done' });
     await assert.rejects(dispatch(methods, 'task.setScope', { id: finished!.id, scope: ['c/**'] }), /is done; its files can no longer change/);
   } finally { db.close(); }

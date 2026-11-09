@@ -175,23 +175,26 @@ test('each task is one row with a short name, plain phase, cleaned activity, tim
     { id: 't-wait', title: 'Queued fixture', status: 'queued', waiting: 'Both agent slots are busy' },
     { id: 't-run', title: long, status: 'running', agent: 'claude', model: 'opus', phase: 'agent', cost: 0.65, budget: 3, startedAt: now - 12 * 60_000, lastActivity: `tool Bash cd ${wt}; PATH="/home/fixture/.nvm/v22/b…` },
     { id: 't-edit', title: 'Editing fixture', status: 'running', agent: 'codex', phase: 'setup:spawning', startedAt: now - 30_000, lastActivity: `edit Write ${wt}/src/chat/message-response.tsx` },
+    { id: 't-cd', title: 'Fix login. Then update the docs.', status: 'running', agent: 'codex', lastActivity: `tool Bash cd ${wt} && cd packages/web && npm test` },
     { id: 't-check', title: 'Checked fixture', status: 'verifying', agent: 'codex', phase: 'review_wait', startedAt: now - 95 * 60_000 },
     { id: 't-ready', title: 'Approval fixture', status: 'ready', agent: 'claude', needsApproval: true, readyAt: now - 3 * 60_000 },
   ] });
   await h.api.refresh();
   const rows = all(h.$('board'), 'row');
   // Closest to merging first, then waiting, then finished.
-  assert.deepEqual(rows.map(row => row.getAttribute('data-focus')), ['task:t-ready', 'task:t-check', 'task:t-run', 'task:t-edit', 'task:t-wait', 'task:t-done']);
+  assert.deepEqual(rows.map(row => row.getAttribute('data-focus')), ['task:t-ready', 'task:t-check', 'task:t-run', 'task:t-edit', 'task:t-cd', 'task:t-wait', 'task:t-done']);
   const text = (id: string) => rows.find(row => row.getAttribute('data-focus') === 'task:' + id)!.textContent;
   assert.match(text('t-run'), /^WorkingCodingShop issue #148: isolate the math stylesheet from plain chatclaude · opusRunning a command12m\$0\.65 of \$3$/);
   assert.match(text('t-edit'), /Installing dependencies.*codexEditing src\/chat\/message-response\.tsxunder 1m/);
+  // Only the step into the task's own working copy is dropped; where a command ran stays visible.
+  assert.equal(text('t-cd'), 'WorkingFix logincodexRunning: cd packages/web && npm test');
   assert.match(text('t-check'), /^CheckingIn reviewChecked fixturecodex1h 35m$/);
   assert.match(text('t-ready'), /^Ready to mergeWaiting for your approvalApproval fixtureclaude3m ago$/);
   assert.match(text('t-wait'), /^WaitingQueued fixtureBoth agent slots are busy$/);
   assert.match(text('t-done'), /^DoneFinished fixtureMerged cleanly\.5m ago\$0\.20$/);
   assert.doesNotMatch(h.$('board').textContent, /\/home\/fixture|PATH=/);
-  assert.deepEqual(h.$('stages').children.map(node => node.children.at(-1)!.textContent), ['1', '2', '1', '1', '1']);
-  assert.equal(h.$('summary-line').textContent, '4 tasks in progress. 1 task waiting. Nothing needs you.');
+  assert.deepEqual(h.$('stages').children.map(node => node.children.at(-1)!.textContent), ['1', '3', '1', '1', '1']);
+  assert.equal(h.$('summary-line').textContent, '5 tasks in progress. 1 task waiting. Nothing needs you.');
 });
 
 test('a task waiting for approval is counted once and offers approval where the owner is asked', async () => {
@@ -274,6 +277,11 @@ test('a task stopped for touching other files can have its allowed files widened
   // An unsaved list survives the snapshot refresh that rebuilds the detail.
   await h.api.showTask('t-one', true);
   assert.equal(h.$('d-scope').value, 'src/chat/**, docs/ledger.json, docs/ledger.md, src/privacy/map.ts');
+  // Putting the saved list back discards the draft instead of restoring it on the next refresh.
+  h.$('d-scope').value = 'src/chat/**, docs/ledger.json';
+  await h.api.showTask('t-one', true);
+  assert.equal(h.$('d-scope').value, 'src/chat/**, docs/ledger.json');
+  await button('Add them to the list').dispatch('click');
   await button('Save allowed files').dispatch('click');
   const call = h.calls.find(c => c.method === 'task.setScope')!;
   assert.deepEqual(call.params, { id: 't-one', scope: ['src/chat/**', 'docs/ledger.json', 'docs/ledger.md', 'src/privacy/map.ts'], by: 'dashboard' });

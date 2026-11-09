@@ -3,7 +3,7 @@ import * as z from 'zod/v4';
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { checkLiveOverlap, type Coordinator, type TaskPatch } from './coordinator.ts';
-import { NewTaskSchema, STATUS_LABEL, TASK_STATUSES, TERMINAL_STATUSES, type Task, type TaskStatus } from './types.ts';
+import { ACTIVE_STATUSES, NewTaskSchema, STATUS_LABEL, TASK_STATUSES, TERMINAL_STATUSES, type Task, type TaskStatus } from './types.ts';
 import { paths } from './paths.ts';
 import { clip, formatUsd, tail } from './text.ts';
 import { revParse } from './git.ts';
@@ -242,6 +242,13 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       if (!task) throw new Error(`No task ${p.id}`);
       if (task.status === 'done' || task.status === 'canceled') throw new Error(`"${clip(task.title, 60)}" is ${STATUS_LABEL[task.status].toLowerCase()}; its files can no longer change.`);
       const scope = [...new Set(p.scope.map(normalizePattern))];
+      // The attempt in flight still works under the list it started with, and that list is what keeps
+      // overlapping tasks from starting. Files can be added to it now, never taken away. No declared list
+      // can mean "everything", so giving one to an active task would also take files away.
+      const narrows = task.scope.length ? task.scope.some((pattern) => !scope.includes(pattern)) : scope.length > 0;
+      if (ACTIVE_STATUSES.includes(task.status) && narrows) {
+        throw new Error(`"${clip(task.title, 60)}" is ${STATUS_LABEL[task.status].toLowerCase()}. Files can be added to its list now; remove files after this attempt ends.`);
+      }
       const next = coord.updateTask(p.id, { scope, scope_inferred: false }, { requestEdit: true });
       coord.event(task.project_id, task.id, 'info', 'task.scope', `${p.by} set the files "${task.title}" may change: ${scope.length ? clip(scope.join(', '), 300) : 'none declared'}`);
       return next;
