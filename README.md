@@ -70,7 +70,7 @@ Want to see it first without spending tokens? `ym demo` starts an isolated sandb
 | `ym doctor` | Check your setup |
 | `ym presets` | `frugal`, `balanced`, `fast`, `careful` |
 
-`ym add` options: `--files a,b` (what it will change), `--after t-123`, `--agent codex`, `--tier cheap|standard|strong`, `--verify "npm run e2e"` (extra checks, on top of the project's), `--budget 1.5`, `--best-of 2`, `--review always|never`, `--no-changes-ok` (for reviews and research).
+`ym add` options: `--files a,b` (what it will change), `--after t-123`, `--agent codex`, `--tier cheap|standard|strong`, `--verify "npm run e2e"` (extra checks, on top of the project's), `--budget 1.5`, `--best-of 2`, `--review always|never`, `--no-changes-ok` (for reviews and research). The first sentence of the request becomes the task's name; the whole request goes to the agent.
 
 ## Making agents better
 
@@ -241,7 +241,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). For the research behind it (Ga
 
 ## Status
 
-Early (0.9.1). Tested end to end with deterministic agents and real repositories, including the CI gate, guard, budget and audit against a mock GitHub API and real git pushes, policies, cross-model review rounds, lessons, critical-path ordering, races, merge trains, import-graph coupling, hooks, the minimal MCP profile, parallel scheduling, scopes, dependencies, loops, budgets, retries, conflicts, edit-time overlap, approval, cleanup safety, two-machine execution, the MCP server, pause/redirect, supervisor warnings, disk holds and artifact trimming. JEV tests cover routing, fallback, manual effort, retry escalation, shutdown/cancellation and worker-local configuration with fake subprocesses. Earlier releases were smoke-tested with real Claude Code and Codex; this JEV integration has no measured task-level savings claim. The Cursor and Gemini adapters follow their documented stream formats but haven't been run against live sessions yet.
+Early (0.9.2). Tested end to end with deterministic agents and real repositories, including the CI gate, guard, budget and audit against a mock GitHub API and real git pushes, policies, cross-model review rounds, lessons, critical-path ordering, races, merge trains, import-graph coupling, hooks, the minimal MCP profile, parallel scheduling, scopes, dependencies, loops, budgets, retries, conflicts, edit-time overlap, approval, cleanup safety, two-machine execution, the MCP server, pause/redirect, supervisor warnings, disk holds and artifact trimming. JEV tests cover routing, fallback, manual effort, retry escalation, shutdown/cancellation and worker-local configuration with fake subprocesses. Earlier releases were smoke-tested with real Claude Code and Codex; this JEV integration has no measured task-level savings claim. The Cursor and Gemini adapters follow their documented stream formats but haven't been run against live sessions yet.
 
 ## License
 
