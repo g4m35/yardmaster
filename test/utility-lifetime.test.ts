@@ -8,6 +8,7 @@ import { cloneTree } from '../src/fastfs.ts';
 import { currentProcessScopeSignal, groupAlive, isAlive, run, runOwnedProcess, UtilityProcessError, withProcessScope, type OwnedRunResult, type ProcessScopeOptions } from '../src/proc.ts';
 
 const dir = tempDir('ym-utility-life-');
+process.env.YARDMASTER_HOME = join(dir, 'home');
 const fixture = join(dir, 'fixture.mjs');
 writeFileSync(fixture, `
 import { writeFileSync } from 'node:fs';
@@ -132,7 +133,7 @@ for (const exitOffline of [false, true]) test(`a refused utility intent does not
     onSpawn: () => { spawned++; },
     onExit: (_token, result) => { assert.equal(result.pid, null); assert.equal(result.reaped, true); if (exitOffline) throw new Error('still offline'); },
   }, async () => {
-    const coding = runOwnedProcess(process.execPath, ['-e', 'setTimeout(()=>{},250)'], { signal: currentProcessScopeSignal() });
+    const coding = runOwnedProcess(process.execPath, ['-e', 'setTimeout(()=>{},250)'], { cwd: dir, env: { ...process.env }, signal: currentProcessScopeSignal() });
     await assert.rejects(run(process.execPath, ['-e', 'throw new Error("must not start")']), error => error instanceof Error && !(error instanceof UtilityProcessError) && /ECONNREFUSED/.test(error.message));
     assert.equal(currentProcessScopeSignal()!.aborted, false);
     assert.equal((await coding).end, 'exit');

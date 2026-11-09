@@ -4,7 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import { removeFast } from './fastfs.ts';
 import { LEASE_MS, type Coordinator } from './coordinator.ts';
 import { paths } from './paths.ts';
-import { git, gitOut, isAncestor, isClean, isLinkedWorktreeOf, listWorktrees, removeWorktree } from './git.ts';
+import { git, gitOut, isAncestor, isClean, isLinkedWorktreeOf, listWorktrees, removeWorktree, revParse } from './git.ts';
 import { isAlive, processStartTime, terminateRecordedProcess } from './proc.ts';
 import { recoverUtilities, runUtilityKey, taskHasPendingUtilities, utilitiesStopped, PENDING_UTILITY_SQL } from './utility-records.ts';
 import { tx } from './transaction.ts';
@@ -215,7 +215,8 @@ async function planProject(coord: Coordinator, project: Project, plan: CleanPlan
       plan.keep.push({ ...item, reason: `task ${task.id} (${task.status}) has unmerged commits` });
       continue;
     }
-    const sha = await gitOut(project.root, ['rev-parse', `refs/heads/${branch}`]);
+    const sha = await revParse(project.root, `refs/heads/${branch}`);
+    if (!sha) continue; // Concurrent successful integration may already have tidied this listed ref.
     plan.remove.push({ ...item, taskId: task.id, generation: task.generation, sha, reason: `merged; task ${task.id} is ${task.status}` });
   }
 }

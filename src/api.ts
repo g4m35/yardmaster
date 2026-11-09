@@ -17,7 +17,7 @@ import { PairingStore } from './pairing.ts';
 import { buildRegistry } from './registry.ts';
 import { tx } from './transaction.ts';
 import { WORKER_ACTIVE_STATUSES, WORKER_FINALIZE_STATUSES } from './worker-policy.ts';
-import { recordUtility, runUtilityKey, utilitiesStopped, utilities } from './utility-records.ts';
+import { recordUtility, runUtilityKey, utilitiesStopped, utilities, taskHasPendingUtilities } from './utility-records.ts';
 import { noteControllerActivity } from './controller-activity.ts';
 
 /**
@@ -225,7 +225,25 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       coord.updateTaskIfOwner(p.id, p.owner ?? { assignee: '' }, p.patch as TaskPatch),
     ),
     // Explicit administrative writes never masquerade as a worker claim.
-    'task.adminUpdate': method(z.object({ id: TaskId, patch: z.record(z.string(), z.unknown()) }), (p) => coord.updateTask(p.id, p.patch as TaskPatch)),
+    'task.adminUpdate': method(z.object({ id: TaskId, patch: z.record(z.string(), z.unknown()) }), (p) => coord.updateTask(p.id, p.patch as TaskPatch, { requestEdit: true })),
+    // A report never submits a code artifact for landing. Keep general worker `done` writes forbidden.
+    'task.completeReport': method(z.object({ taskId: TaskId, runId: RunId, owner: Owner.optional(), head: z.string().regex(/^[a-f0-9]{40,64}$/), summary: z.string().max(2000) }), (p) => tx(coord.db, () => {
+      const owner = p.owner && { ...p.owner, statuses: ['verifying', 'done'] as TaskStatus[] };
+      const run = coord.assertRunOwner(p.runId, owner, p.taskId);
+      const task = coord.getTask(p.taskId)!;
+      if (!task.allow_no_changes || task.head_sha !== p.head || run.role !== 'implement' || run.status !== 'succeeded' || run.pid !== null || run.touched.length ||
+          taskHasPendingUtilities(coord.db, task.id) || coord.runsFor(task.id).some(r => ['running', 'lost', 'cleanup_failed'].includes(r.status))) {
+        throw new Error('Report completion requires an explicit unchanged report and confirmed process exit. Code artifacts require verification and integration.');
+      }
+      if (task.status === 'done') return task; // A lost response cannot duplicate its completion event.
+      if (task.control) throw new Error(`Task control pending: ${task.control}`);
+      coord.confirmRunExit(run.id, task.id, owner!);
+      const completed = coord.updateTask(task.id, { status: 'done', finished_at: Date.now(), ready_at: null, lease_until: null,
+        summary: clip(p.summary, 1500), attention: null, retry_note: null, last_error: null, error_fp: null, same_error_count: 0 });
+      coord.cancelRaceRivals(completed);
+      coord.event(task.project_id, task.id, 'success', 'task.done', `Completed report "${task.title}" without file changes; no code integration requested.`, { runId: run.id, reportOnly: true });
+      return completed;
+    })),
     'task.context': method(z.object({ id: Id }), (p) => {
       const task = coord.getTask(p.id);
       if (!task) throw new Error(`No task ${p.id}`);
@@ -285,13 +303,13 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       }
     }),
 
-    // One round trip per hook (hooks run on every prompt and edit, so they must be cheap).
+    // Hook operations stay small; canonical session registration is a separate identity step.
     'hook.check': method(z.object({ projectId: Id, paths: z.array(z.string()).min(1).max(50), cwd: z.string(), sessionId: Id }), (p) => {
       const holders = coord.whoHas(p.projectId, p.paths);
       if (!holders.length) return null;
-      const mine = new Set(coord.listSessions(p.projectId).filter((x) => x.cwd === p.cwd).map((x) => x.id));
-      mine.add(p.sessionId);
-      return holders.find((h) => !mine.has(h.holder)) ?? null;
+      // A folder is shared workspace, not proof that two native clients are the same session.
+      const registered = coord.db.prepare('SELECT id FROM sessions WHERE id = ? AND project_id = ?').get(p.sessionId, p.projectId);
+      return holders.find((h) => !registered || h.holder !== p.sessionId) ?? null;
     }),
     'hook.reserve': method(z.object({ projectId: Id, sessionName: Id, cwd: z.string(), paths: z.array(z.string()).min(1).max(50), machineId: z.string().nullish() }), (p) => {
       const sessionId = coord.registerSession(p.sessionName, 'hooked-agent', p.projectId, p.cwd, p.machineId ?? null);
@@ -332,7 +350,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       p.claims.map((claim) => ({ taskId: claim.taskId, renewed: coord.renewSessionLease(claim.taskId, p.sessionId, claim.generation) })),
     ),
     'session.claim': method(z.object({ sessionId: Id, projectId: Id, taskId: z.string().optional() }), (p) => coord.claimForSession(p.sessionId, p.projectId, p.taskId)),
-    'session.finish': method(z.object({ sessionId: Id, taskId: Id, summary: z.string(), outcome: z.enum(['done', 'failed']).default('done'), branch: z.string().optional(), generation: Generation.optional() }), (p) =>
+    'session.finish': method(z.object({ sessionId: Id, taskId: Id, summary: z.string(), outcome: z.enum(['done', 'failed']).default('done'), branch: z.string().optional(), sourceCwd: z.string().min(1).max(4096).optional(), generation: Generation.optional() }), (p) =>
       p.branch ? (hooks.captureNative ? hooks.captureNative({ ...p, branch: p.branch }) : submitSessionHandoff(coord, hooks.machineId, { ...p, branch: p.branch })) : coord.finishForSession(p.sessionId, p.taskId, p.summary, p.outcome, undefined, p.generation),
     ),
 

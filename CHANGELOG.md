@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.1
+- Malformed unauthenticated request targets return400; rejected asynchronous handlers no longer terminate the hub.
+- Native hooks exempt only the exact canonical session. Session identities are scoped by project and machine, including MCP connections addressing multiple repositories; matching legacy claims remain intact. Native submissions retain the checkout captured at claim time across later nested-directory or linked-checkout status calls.
+- Owned-process cleanup includes ordinary detached descendants retaining an OS-visible inherited marker, with private durable receipts and identity-checked restart recovery. Inspection uncertainty keeps recovery holds; children clearing/hiding their environment and hostile children remain outside this containment.
+- Exact request deduplication preserves different scopes, instruction ordering and acceptance options; request edits invalidate stale identities. Learned routing keeps configured-model histories separate and never attributes legacy aggregate results to a replacement model.
+- Managed code changes without configured checks wait for attention; native code cannot bypass artifact verification by reporting completion without a branch. Explicit allowNoChanges research/report tasks with no changed files complete without code integration, including when file-scoped quick checks have no inputs. Requested failed/missing/unresolved reviews stop by default; explicit advisory review remains available through onUnresolved=proceed.
+- Scope lean-context savings to Claude Code and document connected-client, cache and containment limits.
+- Commit report completion and its notification together behind owner/control/process fences for local and paired workers. Report winners cancel best-of-N rivals through the normal race controls. Cleanup planning skips a merged branch concurrently removed by integration tidy rather than aborting the whole plan.
+
+Upgrade hub and workers together. Preserve the private process-owners directory with Yardmaster state. This release adds no database migration; old unverified ready work is held until checks are configured, and batch-local dependency keys are not treated as cross-request identity. Native hook/MCP cooperation now requires a deliberately shared unique YARDMASTER_SESSION value; shared cwd is never ownership.
+
 ## 0.9.0
 - Durable claim generations fence reclaimed work, native handoffs, usage and bundle uploads. Worker channels on the same machine have independent hub/project-scoped journals and exclusive recovery owners, with preserved legacy migration records.
 - Native branch submissions capture immutable committed artifacts for checks, review and integration. Reclaim/resubmit works after failure; stale cleanup preserves dirty, detached, locked, advanced, unmerged and process-held work, including ownership changes during artifact scans.

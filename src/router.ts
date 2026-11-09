@@ -29,6 +29,8 @@ export interface AgentStats {
   cost: number;
   ms: number;
   byTier: Record<string, { runs: number; verified: number; cost: number }>;
+  /** JSON-encoded configured model identity (including null) -> tier; legacy aggregates are not model evidence. */
+  byModel?: Record<string, Record<string, { runs: number; verified: number; cost: number }>>;
 }
 
 export interface RouteChoice {
@@ -77,7 +79,11 @@ export function chooseAgent(opts: {
   });
   if (forced) return pick(forced, 'requested');
   const learn = config.learning;
-  const tierStats = (a: string) => stats[a]?.byTier[tier] ?? { runs: 0, verified: 0, cost: 0 };
+  const tierStats = (a: string) => {
+    const model = agentSettings(config, a).models[tier];
+    // An unknown native default is not evidence for a particular current model.
+    return (model ? stats[a]?.byModel?.[JSON.stringify(model)]?.[tier] : undefined) ?? { runs: 0, verified: 0, cost: 0 };
+  };
   const hasHistory = available.some((a) => tierStats(a).runs >= learn.minRuns);
   if (!learn.routing || !hasHistory || available.length === 1) {
     return pick(available[0]!, `first available for ${tier} work`);

@@ -30,8 +30,9 @@ export function jaccard(a: Set<string>, b: Set<string>): number {
   return inter / (a.size + b.size - inter);
 }
 
-export function taskFingerprint(title: string, prompt: string): string {
-  return [...wordSet(`${title} ${prompt}`)].sort().join(' ');
+export function taskFingerprint(title: string, prompt: string, options: Record<string, unknown> = {}): string {
+  // Similar words are not task identity: order, case, scope and acceptance options can change the work.
+  return `request-v2:${sha1(canonicalJson({ title: title.trim(), prompt: prompt.trim(), options }))}`;
 }
 
 /** Normalizes noisy failure output (timestamps, durations, hex ids, line numbers) so repeated failures hash identically. */

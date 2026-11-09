@@ -45,3 +45,7 @@ The [Agent Client Protocol](https://agentclientprotocol.com) connects editors to
 agent). A2A connects agents across organizations. Yardmaster's problem is a third one: several agents, each in the
 tool its user chose, sharing one repository. MCP + hooks reach all of them today. An ACP adapter (driving agents
 that speak ACP as background workers) is a natural plugin.
+
+## Native session identity
+
+A working directory is not proof that two clients are the same session. Every hook uses its server-returned canonical project/machine-scoped ID; each MCP connection has an independent identity by default. If one interactive client should share reservations between its hooks and MCP tools, launch it with a unique `YARDMASTER_SESSION` inherited by both. If the client filters MCP environment variables, explicitly forward that value in its MCP configuration. Do not reuse it across independently editing clients. Release a conflicting MCP reservation before a hook edit when those identities are intentionally separate. Existing matching legacy registration IDs keep their locks and task claims.

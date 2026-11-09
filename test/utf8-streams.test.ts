@@ -4,6 +4,7 @@ import { run, runShell, withProcessScope } from '../src/proc.ts';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tempDir, until } from './helpers.ts';
+process.env.YARDMASTER_HOME = join(tempDir('ym-utf8-home-'), 'home');
 
 const quote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 const split = `const out=Buffer.from('é€😀'); const err=Buffer.from('文🦊');let i=0;

@@ -15,6 +15,7 @@ import { resolveConfig } from '../src/config.ts';
  */
 
 const dir = tempDir('ym-proc-');
+process.env.YARDMASTER_HOME = join(dir, 'home');
 const node = process.execPath;
 const fixture = join(dir, 'proc.mjs');
 writeFileSync(fixture, `

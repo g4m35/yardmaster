@@ -275,12 +275,12 @@ export async function runAttempt(ctx: RunContext): Promise<RunOutcome> {
   }, 250);
   try {
     const owner = claimOwner(ctx.task);
-    const fenced = new Set(['task.update', 'task.usage', 'task.touched', 'task.event', 'run.start', 'run.update', 'run.log', 'run.usage', 'run.utility', 'lesson.outcome']);
+    const fenced = new Set(['task.update', 'task.completeReport', 'task.usage', 'task.touched', 'task.event', 'run.start', 'run.update', 'run.log', 'run.usage', 'run.utility', 'lesson.outcome']);
     const api = new Proxy(ctx.api, { get: (target, key: string) => {
       const call = target[key as keyof Client];
       return fenced.has(key) ? (params: Record<string, unknown>) => {
         const status = (params.patch as TaskPatch | undefined)?.status;
-        if (lifetime.signal.aborted && (key === 'run.start' || (key === 'task.update' &&
+        if (lifetime.signal.aborted && (key === 'run.start' || key === 'task.completeReport' || (key === 'task.update' &&
             (status === 'ready' || (status === 'queued' && ['stopped', 'canceled', 'lost'].includes(stopped?.reason ?? '')))))) throw new Error('Task lifetime stopped.');
         return (call as (p: unknown) => unknown)({ ...params, owner });
       } : call;
@@ -845,8 +845,10 @@ async function acceptArtifact(ctx: RunContext, wt: string, baseSha: string, file
   if (hot.length) await event(ctx, 'info', 'task.hotfiles', `Touches shared files (${hot.join(', ')}); it will be merged on its own.`);
 
   // ---- verify: "done" is measured, not claimed ----
+  const reportOnly = task.allow_no_changes && files.length === 0;
+  if (reportOnly) await api['task.touched']({ taskId: task.id, runId, files });
   const commands = native ? verifyCommands(task, config) : taskChecks(task, config, files);
-  if (native && !commands.length) return finishNeedsHuman(ctx, 'Native handoff requires configured full verification commands.', runId);
+  if (!commands.length && !reportOnly) return finishNeedsHuman(ctx, `${native ? 'Native handoff' : 'Managed work'} requires configured verification commands. Work is preserved; add verify commands to yardmaster.json and retry.`, runId);
   const head = await revParse(wt, 'HEAD');
   await update(ctx, { status: 'verifying', head_sha: head, summary });
   if (commands.length) {
@@ -879,7 +881,7 @@ async function acceptArtifact(ctx: RunContext, wt: string, baseSha: string, file
     await api['run.update']({ runId, patch: { phase: 'collect', pid: null, proc_started: null } });
     if (head && (await isClean(wt))) await rememberChecked(wt, head, commands);
   } else {
-    await event(ctx, 'warn', 'task.unverified', 'No checks are configured, so this work was not tested. Add "verify" commands to yardmaster.json.');
+    await event(ctx, 'info', 'task.report', 'Explicit report-only task changed no files. No code verification is claimed.');
   }
   // ---- second opinion: a different model family reviews what tests can't judge ----
   let reviewNote = '';
@@ -938,7 +940,7 @@ async function acceptArtifact(ctx: RunContext, wt: string, baseSha: string, file
     if ('skipped' in outcome) {
       log.push(`review skipped: ${outcome.skipped}`);
       await event(ctx, 'warn', 'task.review_skipped', `Review skipped: ${outcome.skipped}.`);
-      if (native || outcome.required) return finishNeedsHuman(ctx, `Required review did not complete: ${outcome.skipped}`, runId);
+      if (native || outcome.required || config.review.onUnresolved === 'needs_human') return finishNeedsHuman(ctx, `${native || outcome.required ? 'Required' : 'Requested'} review did not complete: ${outcome.skipped}`, runId);
     } else {
       const issues = formatIssues(outcome.blocking);
       log.push(`review by ${outcome.reviewer}: ${outcome.review.verdict}${issues.length ? ` (${issues.length} issue${issues.length > 1 ? 's' : ''})` : ''}`);
@@ -979,6 +981,10 @@ async function acceptArtifact(ctx: RunContext, wt: string, baseSha: string, file
     }
   });
   await api['lesson.outcome']({ taskId: task.id, runId, summary: summary || 'completed', failureBefore: task.attempts > 1 ? task.last_error : null, reviewIssues: resolved.slice(0, 5) }).catch((err: Error) => { if (process.env.YARDMASTER_DEBUG) console.error('lesson.outcome', err.message); });
+  if (reportOnly) {
+    await api['task.completeReport']({ taskId: task.id, runId, head: head!, summary: clip(summary + reviewNote, 1500) });
+    return { status: 'done', message: summary };
+  }
   const needsApproval = (config.integration.requireApproval || task.needs_approval) && !task.approved;
   await update(ctx, {
     status: 'ready', ready_at: Date.now(), head_sha: head, summary: clip(summary + reviewNote, 1500), attention: needsApproval ? 'Waiting for your approval to merge' : null,

@@ -187,7 +187,8 @@ test('cancel and native reclaim fence an old queued generation and release only 
     assert.ok(next.generation > queued.generation); assert.equal(next.native_handoff, null);
     await assert.rejects(s.submit(), StaleAttemptError);
     await assert.rejects(s.client['session.finish']({ ...s.params, generation: undefined }), /valid claim generation/);
-    assert.equal((await s.client['session.finish']({ sessionId: s.sessionId, taskId: next.id, generation: next.generation, summary: 'reported only' })).status, 'done');
+    await assert.rejects(s.client['session.finish']({ sessionId: s.sessionId, taskId: next.id, generation: next.generation, summary: 'reported only' }), /committed branch submission/);
+    assert.equal(s.coord.getTask(next.id)!.status, 'running', 'unverified reporting cannot finish code work');
   } finally { s.coord.db.close(); }
 });
 

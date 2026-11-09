@@ -23,7 +23,7 @@ function latch() {
   return { promise, release };
 }
 
-for (const stage of ['agent', 'terminal', 'post-review', 'post-review-cancel'] as const) test(`a same-ID paired HTTP controller keeps its fresh ${stage} claim through hub recovery`, { timeout: 25_000 }, async () => {
+for (const stage of ['agent', 'terminal', 'post-review', 'post-review-cancel'] as const) test(`a same-ID paired HTTP controller keeps its fresh ${stage} claim through hub recovery`, { timeout: 45_000 }, async () => {
   const postReview = stage.startsWith('post-review');
   const box = sandbox({ maxParallel: 1, review: { mode: postReview ? 'always' : 'never', reviewers: ['mock'], crossFamily: false }, cleanup: { auto: false },
     worktree: { warmStart: 'off' }, disk: { minFreeGb: 0, maxWorktreesGb: null } });
@@ -66,7 +66,8 @@ for (const stage of ['agent', 'terminal', 'post-review', 'post-review-cancel'] a
     const task = hub.coord.addTasks(project.id, [{ title: `Same-ID ${stage}`, agent: 'mock',
       prompt: stage === 'agent' ? '@mock sleep 20000' : '@mock write saved.txt preserved artifact' }], 'fixture').created[0]!;
     await worker.heartbeat(); await worker.tick();
-    if (stage === 'terminal' || postReview) await until(() => terminalReached, value => value, 5000, 'terminal or post-review boundary');
+    // Ownership receipts and detached-child inspection add bounded OS work before this boundary.
+    if (stage === 'terminal' || postReview) await until(() => terminalReached, value => value, 15000, 'terminal or post-review boundary');
     else await until(() => hub.coord.latestRun(task.id), run => !!run?.pid && run.phase === 'agent', 5000, 'external mock PID');
     await worker.heartbeat();
     const before = hub.coord.getTask(task.id)!, run = hub.coord.latestRun(task.id)!;

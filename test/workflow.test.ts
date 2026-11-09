@@ -185,9 +185,10 @@ test('duplicates are skipped and dependency cycles rejected', async () => {
   const s = await startHub();
   s.hub.worker.stopAll('shutdown', 'test');
   const first = s.add([{ title: 'Add dark mode toggle to settings page', agent: 'mock' }]);
-  const again = s.add([{ title: 'add a dark-mode toggle to the settings page', agent: 'mock' }]);
+  const again = s.add([{ title: 'Add dark mode toggle to settings page', agent: 'mock' }]);
   assert.equal(again.created.length, 0);
   assert.equal(again.duplicates[0]!.existing, first.created[0]!.id);
+  assert.equal(s.add([{ title: 'add a dark-mode toggle to the settings page', agent: 'mock' }]).created.length, 1, 'similar wording is not automatically discarded');
   const x = s.add([{ title: 'Task x thing one', agent: 'mock' }]).created[0]!;
   assert.throws(() => s.add([{ key: 'y', title: 'Task y thing two', after: [x.id, 'z'] }, { key: 'z', title: 'Task z thing three', after: ['y'] }]), /wait on each other forever/);
 });

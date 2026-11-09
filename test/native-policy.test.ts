@@ -10,6 +10,7 @@ import { routeEffort, routedEffortOf } from '../src/jev.ts';
 import { runOneShot } from '../src/oneshot.ts';
 import { UsageMeter } from '../src/usage.ts';
 import { tempDir } from './helpers.ts';
+process.env.YARDMASTER_HOME = join(tempDir('ym-native-owner-home-'), 'home');
 
 type Ctx = AdapterContext & { routedEffort?: RoutedEffort };
 const ctx = (settings: Partial<AgentSettings> = {}, over: Partial<Ctx> = {}): Ctx =>
