@@ -5,6 +5,7 @@ import { delimiter, join } from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
+import { PROCESS_OWNER_ENV, combineProcessCleanup, forgetProcessOwnership, inheritedProcessOwnership, processOwnershipMarker, readProcessOwnership, recordProcessOwnership, terminateMarkedProcesses, type ProcessOwnership } from './process-ownership.ts';
 
 const execFileP = promisify(execFile);
 
@@ -232,6 +233,21 @@ async function listProcesses(): Promise<PsRow[] | null> {
  * pid wraparound plus a matching orphaned group and is not distinguished.
  */
 export async function terminateRecordedProcess(id: ProcessIdentity, opts: TerminateOptions = {}): Promise<TerminateResult> {
+  let ownership: ProcessOwnership | null;
+  try { ownership = readProcessOwnership(id); }
+  catch (error) { return { status: 'unverified', reason: (error as Error).message }; }
+  const group = await terminateRecordedGroup(id, opts);
+  // Legacy records have only process-group evidence. New launches retain a private inherited-tag receipt.
+  if (!ownership) return group;
+  const result = combineProcessCleanup(group, await terminateMarkedProcesses(ownership, opts));
+  if (['exited', 'terminated'].includes(result.status)) {
+    try { forgetProcessOwnership(ownership); }
+    catch { return { status: 'unverified', reason: 'Could not retire process ownership receipt safely.' }; }
+  }
+  return result;
+}
+
+async function terminateRecordedGroup(id: ProcessIdentity, opts: TerminateOptions): Promise<TerminateResult> {
   if (!signalable(id.pid)) return { status: 'unverified', reason: `refusing to signal pid ${id.pid}` };
   if (process.platform === 'win32') return { status: 'unverified', reason: 'process identity is not verifiable on Windows' };
   const rows = await listProcesses();
@@ -285,7 +301,7 @@ export interface OwnedRunResult {
   code: number | null;
   signal: NodeJS.Signals | null;
   pid: number | null;
-  /** Start identity of the leader (only read when `onSpawn` is given). */
+  /** Start identity of the leader, also bound to its private inherited-ownership receipt. */
   startedAt: number | null;
   launchedAt: number;
   endedAt: number;
@@ -293,7 +309,7 @@ export interface OwnedRunResult {
   pipeHeld: boolean;
   /** Cleanup of the whole group after the run, including normal exits. */
   reap: TerminateResult;
-  /** True when nothing from this run is still alive. False means do not start overlapping work. */
+  /** Original group and inherited-marker descendants are confirmed stopped. Deliberate environment clearing is not contained. */
   reaped: boolean;
   /** Spawn, hook or stop detail. */
   error: string;
@@ -317,7 +333,7 @@ function abortText(signal: AbortSignal): string {
 }
 
 /**
- * Spawns one child as its own process-group leader and owns its whole lifetime: abort, timeout, spawn/stdin errors,
+ * Spawns one child as its own process-group leader and supervises its lifetime: abort, timeout, spawn/stdin errors,
  * a registration hook, the exit-with-pipes-held fallback, and process-group cleanup on every path including a
  * normal exit. `done` never rejects and resolves only after the group cleanup finished (or reported `survived`).
  */
@@ -342,12 +358,13 @@ export function startOwnedProcess(command: string, args: readonly string[], opts
   const termOpts: TerminateOptions = { graceMs: opts.termGraceMs, killWaitMs: opts.killWaitMs };
 
   let finished = false;
+  let groupFinalized = false;
   const requestStop = (end: OwnedEnd, detail: string) => {
     // After the run resolved its group is gone and the pid may belong to someone else: never signal it again.
     if (stopEnd || finished) return;
     stopEnd = end;
     stopDetail = detail;
-    if (child?.pid) terminating = terminateOwnedGroup(child.pid, termOpts);
+    if (child?.pid && !groupFinalized) terminating = terminateOwnedGroup(child.pid, termOpts);
     onStopped();
     wake();
   };
@@ -362,9 +379,12 @@ export function startOwnedProcess(command: string, args: readonly string[], opts
     let closed = false as boolean;
     let exitInfo = null as { code: number | null; signal: NodeJS.Signals | null } | null;
     let exitedAt = 0;
+    let marker = '';
     try {
+      marker = processOwnershipMarker();
+      const env = opts.env ?? cleanEnv();
       child = spawn(command, args as string[], {
-        cwd: opts.cwd, env: opts.env, shell: opts.shell ?? false, detached: true,
+        cwd: opts.cwd, env: { ...env, [PROCESS_OWNER_ENV]: inheritedProcessOwnership(env, marker) }, shell: opts.shell ?? false, detached: true,
         stdio: [opts.stdin !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       });
     } catch (err) {
@@ -413,15 +433,19 @@ export function startOwnedProcess(command: string, args: readonly string[], opts
     opts.signal?.addEventListener('abort', onAbort, { once: true });
     if (opts.timeoutMs !== undefined) later(opts.timeoutMs, () => requestStop('timeout', `timed out after ${Math.round(opts.timeoutMs! / 1000)}s`));
 
-    let startedAt: number | null = null;
+    // The PID receipt is written before registration/prompt delivery. A crash between OS spawn and this write
+    // remains the caller's explicit spawning-window hold; no PID-only inference can close that gap.
+    const startedAt = await processStartTime(pid).catch(() => null);
+    const ownership: ProcessOwnership = { pid, startedAt, marker, uid: process.getuid?.() ?? -1 };
+    try { recordProcessOwnership(ownership, marker); }
+    catch (error) { requestStop('hook_failed', `process ownership registration failed: ${errText(error)}`); }
     if (opts.onSpawn) {
-      startedAt = await processStartTime(pid).catch(() => null);
       const hook = opts.onSpawn;
       const hookTimeout = opts.hookTimeoutMs ?? DEFAULT_HOOK_TIMEOUT_MS;
       let hookTimer: NodeJS.Timeout | undefined;
       try {
         await Promise.race([
-          Promise.resolve().then(() => hook({ pid, pgid: pid, startedAt, command, args })),
+          Promise.resolve().then(() => { if (!stopEnd) return hook({ pid, pgid: pid, startedAt, command, args }); }),
           new Promise<never>((_, reject) => {
             hookTimer = later(hookTimeout, () => reject(new Error(`did not finish within ${hookTimeout} ms`)));
           }),
@@ -453,7 +477,13 @@ export function startOwnedProcess(command: string, args: readonly string[], opts
     }
     const ex = exitInfo;
     const pipeHeld = !closed && ex !== null && !stopEnd;
-    const reap = terminating ? await terminating : await terminateOwnedGroup(pid, termOpts);
+    const groupReap = terminating ? await terminating : await terminateOwnedGroup(pid, termOpts);
+    groupFinalized = true; // A later abort must not signal a now-recyclable PGID during marker cleanup.
+    let reap = combineProcessCleanup(groupReap, await terminateMarkedProcesses(ownership, termOpts));
+    if (['exited', 'terminated'].includes(reap.status)) {
+      try { forgetProcessOwnership(ownership); }
+      catch { reap = { status: 'unverified', reason: 'Could not retire process ownership receipt safely.' }; }
+    }
     // Whatever survived, never let our pipe handles keep this process alive or deliver late output.
     if (!closed) {
       c.stdout?.destroy();
@@ -652,8 +682,8 @@ export interface ShellResult extends RunResult {
 
 /**
  * Runs a user-configured shell command (verification, setup). Shell is intended: these come from the repo owner's
- * config. The command leads its own process group, and the group is cleaned up on every path, so background
- * processes a check starts (servers, watchers) do not outlive it, even when the check itself exits 0.
+ * config. Its original process group and descendants retaining the inherited ownership marker are cleaned up
+ * on every path, including exit 0. This does not contain children that deliberately clear ownership markers.
  */
 export async function runShell(
   command: string,

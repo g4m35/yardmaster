@@ -4,6 +4,7 @@ import type { Client } from './api.ts';
 import { mainRepoRoot, projectIdFor, repoRoot } from './git.ts';
 import { paths, machineId } from './paths.ts';
 import { clip, sha1 } from './text.ts';
+import { nativeSessionName } from './hookclient.ts';
 
 /**
  * Hooks are the cheapest way to coordinate an interactive agent: they run outside the model, so they cost no
@@ -101,8 +102,9 @@ async function context(input: HookInput, client: ClientFactory) {
   const { info, c } = await repoInfo(cwd, client);
   if (!info.managed || !info.checkout || !info.root || !info.projectId || !c) return null;
   const { checkout, root, projectId } = info;
-  const sessionName = `hook-${sha1(input.session_id ?? String(process.ppid)).slice(0, 8)}`;
-  return { c, cwd, checkout, root, projectId, sessionName, sessionId: `session:${sessionName}` };
+  const sessionName = nativeSessionName(`hook-${sha1(input.session_id ?? String(process.ppid)).slice(0, 8)}`);
+  const sessionId = await c['session.register']({ name: sessionName, agent: 'hooked-agent', projectId, cwd, machineId: machineId() });
+  return { c, cwd, checkout, root, projectId, sessionName, sessionId };
 }
 
 /** Physical path, so /tmp vs /private/tmp (or any symlinked folder) can't hide a file from its repo. */
@@ -136,7 +138,7 @@ export async function preEdit(input: HookInput, client: ClientFactory): Promise<
   // Separate worktrees don't share files; any overlap surfaces at merge time instead.
   if (ctx.checkout !== ctx.root) return { code: 0 };
   const rel = files.map((f) => relToRoot(ctx.root, ctx.cwd, f));
-  // The hook can't see an MCP server's identity, so the hub treats sessions from this same folder as "mine".
+  // Registration returns the exact project/machine identity; other sessions in this folder remain independent.
   const other = await ctx.c['hook.check']({ projectId: ctx.projectId, paths: rel, cwd: ctx.cwd, sessionId: ctx.sessionId });
   if (!other) return { code: 0 };
   return { code: 2, stderr: `Yardmaster: ${other.path} is being changed by ${other.holder} (${other.detail}). Work on something else for now, or ask the user. The yard_who and yard_send tools help coordinate.` };
@@ -164,7 +166,6 @@ const INTRO = 'Yardmaster coordinates the coding agents on this repo. Files you 
 export async function sessionStart(input: HookInput, client: ClientFactory): Promise<HookResult> {
   const ctx = await context(input, client);
   if (!ctx) return { code: 0 };
-  await ctx.c['session.register']({ name: ctx.sessionName, agent: 'hooked-agent', projectId: ctx.projectId, cwd: ctx.cwd, machineId: machineId() }).catch(() => undefined);
   const board = await ctx.c['board.text']({ projectId: ctx.projectId });
   const lessons = (await ctx.c['lesson.list']({ projectId: ctx.projectId })).filter((l) => l.source === 'you' || l.source === 'review').slice(0, 3);
   remember(input, board);

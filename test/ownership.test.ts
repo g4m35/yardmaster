@@ -93,7 +93,7 @@ test('legacy workers fail clearly, administrative writes are explicit, and expir
 test('interactive completion requires the live session generation and never revives cancellation', async () => {
   const s = await fixture();
   try {
-    const task = s.coord.addTasks(s.project.id, [{ title: 'Implement scoped ownership', agent: 'mock', files: ['src/**'] }], 'test').created[0]!;
+    const task = s.coord.addTasks(s.project.id, [{ title: 'Report scoped ownership', agent: 'mock', files: ['src/**'], allowNoChanges: true }], 'test').created[0]!;
     const sessionId = 'session:interactive';
     const first = s.coord.claimForSession(sessionId, s.project.id, task.id)!;
     s.coord.claimLocks(s.project.id, sessionId, ['src/**'], 'interactive work', 30);
@@ -125,7 +125,7 @@ test('finishing one session task preserves another claim and unrelated manual re
   try {
     const session = 'session:multi';
     const tasks = s.coord.addTasks(s.project.id, [
-      { title: 'Change component alpha', agent: 'mock', files: ['alpha/**'] },
+      { title: 'Report component alpha', agent: 'mock', files: ['alpha/**'], allowNoChanges: true },
       { title: 'Change component beta', agent: 'mock', files: ['beta/**'] },
     ], 'test').created;
     const a = s.coord.claimForSession(session, s.project.id, tasks[0]!.id)!;

@@ -285,13 +285,13 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       }
     }),
 
-    // One round trip per hook (hooks run on every prompt and edit, so they must be cheap).
+    // Hook operations stay small; canonical session registration is a separate identity step.
     'hook.check': method(z.object({ projectId: Id, paths: z.array(z.string()).min(1).max(50), cwd: z.string(), sessionId: Id }), (p) => {
       const holders = coord.whoHas(p.projectId, p.paths);
       if (!holders.length) return null;
-      const mine = new Set(coord.listSessions(p.projectId).filter((x) => x.cwd === p.cwd).map((x) => x.id));
-      mine.add(p.sessionId);
-      return holders.find((h) => !mine.has(h.holder)) ?? null;
+      // A folder is shared workspace, not proof that two native clients are the same session.
+      const registered = coord.db.prepare('SELECT id FROM sessions WHERE id = ? AND project_id = ?').get(p.sessionId, p.projectId);
+      return holders.find((h) => !registered || h.holder !== p.sessionId) ?? null;
     }),
     'hook.reserve': method(z.object({ projectId: Id, sessionName: Id, cwd: z.string(), paths: z.array(z.string()).min(1).max(50), machineId: z.string().nullish() }), (p) => {
       const sessionId = coord.registerSession(p.sessionName, 'hooked-agent', p.projectId, p.cwd, p.machineId ?? null);

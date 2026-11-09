@@ -846,7 +846,7 @@ async function acceptArtifact(ctx: RunContext, wt: string, baseSha: string, file
 
   // ---- verify: "done" is measured, not claimed ----
   const commands = native ? verifyCommands(task, config) : taskChecks(task, config, files);
-  if (native && !commands.length) return finishNeedsHuman(ctx, 'Native handoff requires configured full verification commands.', runId);
+  if (!commands.length) return finishNeedsHuman(ctx, `${native ? 'Native handoff' : 'Managed work'} requires configured verification commands. Work is preserved; add verify commands to yardmaster.json and retry.`, runId);
   const head = await revParse(wt, 'HEAD');
   await update(ctx, { status: 'verifying', head_sha: head, summary });
   if (commands.length) {
@@ -938,7 +938,7 @@ async function acceptArtifact(ctx: RunContext, wt: string, baseSha: string, file
     if ('skipped' in outcome) {
       log.push(`review skipped: ${outcome.skipped}`);
       await event(ctx, 'warn', 'task.review_skipped', `Review skipped: ${outcome.skipped}.`);
-      if (native || outcome.required) return finishNeedsHuman(ctx, `Required review did not complete: ${outcome.skipped}`, runId);
+      if (native || outcome.required || config.review.onUnresolved === 'needs_human') return finishNeedsHuman(ctx, `${native || outcome.required ? 'Required' : 'Requested'} review did not complete: ${outcome.skipped}`, runId);
     } else {
       const issues = formatIssues(outcome.blocking);
       log.push(`review by ${outcome.reviewer}: ${outcome.review.verdict}${issues.length ? ` (${issues.length} issue${issues.length > 1 ? 's' : ''})` : ''}`);

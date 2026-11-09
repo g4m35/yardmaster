@@ -332,7 +332,7 @@ test('real remote mock attempt journals and uploads its ready artifact', async (
     const client = new Proxy(s.client, { get(target, key: keyof Client) {
       if (key === 'worker.claim') return async () => {
         if (claimed) return null; claimed = true;
-        return { task: original.task, project: s.project, config: loadConfig(), route: { agent: 'mock', model: null }, startPoint: sh(s.repo, 'git', ['rev-parse', 'HEAD']) };
+        return { task: original.task, project: s.project, config: s.coord.configFor(s.project.id), route: { agent: 'mock', model: null }, startPoint: sh(s.repo, 'git', ['rev-parse', 'HEAD']) };
       };
       return target[key];
     } });

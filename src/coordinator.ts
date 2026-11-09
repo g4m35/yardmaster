@@ -7,7 +7,7 @@ import { applyPolicies } from './policies.ts';
 import { coupling, type ImportGraph } from './imports.ts';
 import { addLesson, widenScope } from './lessons.ts';
 import { inferScope, normalizePattern, scopesOverlap } from './scope.ts';
-import { clip, jaccard, shortId, taskFingerprint, wordSet } from './text.ts';
+import { clip, sha1, shortId, taskFingerprint } from './text.ts';
 import {
   ACTIVE_STATUSES,
   TASK_STATUSES,
@@ -33,7 +33,6 @@ import { attachRun, createAllowanceReader, describeBudgetHold, enforcementFor, l
 
 type Row = Record<string, unknown>;
 
-const DUPLICATE_THRESHOLD = 0.85;
 export const LEASE_MS = 90_000;
 
 function toTask(r: Row): Task {
@@ -233,13 +232,19 @@ export class Coordinator {
       const keyToId = new Map<string, string>();
       const created: Task[] = [];
       const duplicates: AddResult['duplicates'] = [];
-      const batchSeen: { words: Set<string>; id: string; title: string }[] = open.map((t) => ({ words: wordSet(`${t.title} ${t.prompt}`), id: t.id, title: t.title }));
+      const batchSeen = open.map((t) => ({ fingerprint: t.fingerprint, id: t.id, title: t.title, prompt: t.prompt }));
+      const batchKeys = new Set(inputs.flatMap(input => input.key ? [input.key] : []));
+      const batchIdentity = shortId('batch');
       const now = Date.now();
 
       const plans = inputs.map((input) => {
         const prompt = input.prompt?.trim() || input.title;
-        const words = wordSet(`${input.title} ${prompt}`);
-        const dup = opts.force ? undefined : batchSeen.find((s) => jaccard(s.words, words) >= DUPLICATE_THRESHOLD);
+        const { key: _key, title: _title, prompt: _prompt, ...options } = input;
+        const fingerprint = taskFingerprint(input.title, prompt, { ...options,
+          files: [...new Set((input.files ?? []).map(normalizePattern))].sort(),
+          // A batch-local key can name different prerequisite work in the next request.
+          after: [...new Set((input.after ?? []).map(ref => batchKeys.has(ref) ? `${batchIdentity}:${ref}` : ref))].sort() });
+        const dup = opts.force ? undefined : batchSeen.find((s) => s.fingerprint === fingerprint && s.title.trim() === input.title.trim() && s.prompt === prompt);
         if (dup) {
           duplicates.push({ title: input.title, existing: dup.id, existingTitle: dup.title });
           if (input.key) keyToId.set(input.key, dup.id);
@@ -247,14 +252,14 @@ export class Coordinator {
         }
         const id = shortId('t');
         if (input.key) keyToId.set(input.key, id);
-        batchSeen.push({ words, id, title: input.title });
-        return { input, prompt, id };
+        batchSeen.push({ fingerprint, id, title: input.title, prompt });
+        return { input, prompt, id, fingerprint };
       });
 
       const raceVariants: { id: string; of: string }[] = [];
       for (const plan of plans) {
         if (!plan) continue;
-        const { input, prompt, id } = plan;
+        const { input, prompt, id, fingerprint } = plan;
         const explicit = input.files?.map(normalizePattern) ?? [];
         const scope = explicit.length ? explicit : inferScope(`${input.title}\n${prompt}`);
         const inferred = inferTier(`${input.title} ${prompt}`, cfg.defaultTier ?? 'standard');
@@ -272,7 +277,7 @@ export class Coordinator {
                VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             )
             .run(
-              taskId, projectId, title, prompt, taskFingerprint(title, prompt), input.priority ?? effects.priority ?? 0, tier, agent,
+              taskId, projectId, title, prompt, fingerprint, input.priority ?? effects.priority ?? 0, tier, agent,
               JSON.stringify(scope), explicit.length ? 0 : 1, (input.verify ?? effects.verify) ? JSON.stringify(input.verify ?? effects.verify) : null,
               input.allowNoChanges ? 1 : 0, effects.maxAttempts ?? cfg.retry.maxAttempts, input.budgetUsd ?? effects.budgetUsd ?? cfg.budget.perTaskUsd,
               createdBy, now, now, input.review ?? effects.review ?? null, raceGroup, effects.guidance ?? null, effects.requireApproval ? 1 : 0, JSON.stringify(matched), tier,
@@ -717,22 +722,24 @@ export class Coordinator {
   private agentStatsUncached(projectId: string): Record<string, AgentStats> {
     const rows = this.db
       .prepare(
-        `SELECT r.agent, COALESCE(r.tier, t.tier) AS tier, COUNT(*) AS runs,
+        `SELECT r.agent, r.model, COALESCE(r.tier, t.tier) AS tier, COUNT(*) AS runs,
                 SUM(CASE WHEN r.status = 'succeeded' THEN 1 ELSE 0 END) AS verified,
                 SUM(r.cost_usd) AS cost, SUM(CASE WHEN r.status = 'succeeded' THEN (r.ended_at - r.started_at) ELSE 0 END) AS ms
          FROM runs r JOIN tasks t ON t.id = r.task_id
          WHERE t.project_id = ? AND r.role = 'implement' AND r.status IN ('succeeded', 'failed', 'stopped')
-         GROUP BY r.agent, COALESCE(r.tier, t.tier)`,
+         GROUP BY r.agent, r.model, COALESCE(r.tier, t.tier)`,
       )
-      .all(projectId) as { agent: string; tier: string; runs: number; verified: number; cost: number; ms: number }[];
+      .all(projectId) as { agent: string; model: string | null; tier: string; runs: number; verified: number; cost: number; ms: number }[];
     const out: Record<string, AgentStats> = {};
     for (const r of rows) {
-      const a = (out[r.agent] ??= { runs: 0, verified: 0, cost: 0, ms: 0, byTier: {} });
+      const a = (out[r.agent] ??= { runs: 0, verified: 0, cost: 0, ms: 0, byTier: {}, byModel: {} });
       a.runs += r.runs;
       a.verified += r.verified;
       a.cost += r.cost ?? 0;
       a.ms += r.ms ?? 0;
-      a.byTier[r.tier] = { runs: r.runs, verified: r.verified, cost: r.cost ?? 0 };
+      const tier = (a.byTier[r.tier] ??= { runs: 0, verified: 0, cost: 0 });
+      tier.runs += r.runs; tier.verified += r.verified; tier.cost += r.cost ?? 0;
+      (a.byModel![JSON.stringify(r.model)] ??= {})[r.tier] = { runs: r.runs, verified: r.verified, cost: r.cost ?? 0 };
     }
     return out;
   }
@@ -782,7 +789,11 @@ export class Coordinator {
       for (const lock of this.activeLocks(task.project_id)) {
         if (lock.holder === task.id || lock.holder === reservationHolder) continue;
         const hits = scopesOverlap(mine, [lock.pattern]);
-        if (hits.length) return `Waiting: ${lock.holder} has reserved ${lock.pattern}${lock.reason ? ` (${clip(lock.reason, 40)})` : ''}`;
+        if (hits.length) {
+          const session = this.db.prepare('SELECT name FROM sessions WHERE id = ? AND project_id = ?').get(lock.holder, task.project_id) as { name: string } | undefined;
+          const label = session ? `${session.name} (${lock.holder})` : lock.holder;
+          return `Waiting: ${label} has reserved ${lock.pattern}${lock.reason ? ` (${clip(lock.reason, 40)})` : ''}`;
+        }
       }
     }
     const allowance = this.displayAllowance({ taskId: task.id, taskCapUsd: task.budget_usd,
@@ -1251,8 +1262,9 @@ export class Coordinator {
   }
 
   registerSession(name: string, agent: string | null, projectId: string | null, cwd: string | null, machineId: string | null): string {
-    const existing = this.db.prepare('SELECT id FROM sessions WHERE name = ? AND COALESCE(project_id, \'\') = COALESCE(?, \'\')').get(name, projectId) as { id: string } | undefined;
-    const id = existing?.id ?? `session:${name}`;
+    const existing = this.db.prepare('SELECT id FROM sessions WHERE name = ? AND COALESCE(project_id, \'\') = COALESCE(?, \'\') AND COALESCE(machine_id, \'\') = COALESCE(?, \'\') ORDER BY rowid LIMIT 1').get(name, projectId, machineId) as { id: string } | undefined;
+    // Retain matching legacy IDs, but never move another project's locks or claims by reusing its name.
+    const id = existing?.id ?? `session:${sha1(JSON.stringify([name, projectId, machineId])).slice(0, 24)}`;
     this.db.prepare(
       `INSERT INTO sessions (id, name, agent, project_id, cwd, machine_id, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen, cwd = excluded.cwd, agent = excluded.agent, machine_id = excluded.machine_id`,
@@ -1348,6 +1360,9 @@ export class Coordinator {
       const t = this.assertTaskOwner(taskId, { generation, assignee: sessionId, statuses: ['running'] });
       if (branch) {
         throw new Error('Branch submission requires the asynchronous session.finish API capture; no artifact accepted by direct finishForSession.');
+      }
+      if (outcome === 'done' && !t.allow_no_changes) {
+        throw new Error('Code work requires a committed branch submission for verification. Pass branch to session.finish; report-only completion requires an explicitly created allowNoChanges task.');
       }
       const next = this.updateTask(taskId, { status: outcome, summary: clip(summary, 1200), finished_at: Date.now(), lease_until: null, attention: null });
       this.releaseSessionTaskLocks(t, sessionId);

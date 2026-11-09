@@ -14,6 +14,7 @@ export interface VerificationResult {
 export async function verifyArtifact(cwd: string, commands: string[], timeoutMinutes: number, signal?: AbortSignal, onSpawn?: OwnedRunOptions['onSpawn'], lifecycle?: { beforeSpawn?: () => void | Promise<void>; onExit?: (reaped: boolean) => void | Promise<void> }): Promise<VerificationResult> {
   const sha = await revParse(cwd, 'HEAD');
   const fail = (command: string, output: string): VerificationResult => ({ ok: false, command, output, sha, reaped: true });
+  if (!commands.length) return fail('', 'No verification commands are configured. Add verify commands before accepting this artifact.');
   if (!sha || !(await isClean(cwd))) return fail(commands[0] ?? '', 'Verification requires a committed, clean worktree. Commit the intended artifact before checking it.');
   for (const command of commands) {
     if (signal?.aborted) return fail(command, 'Verification canceled before starting the next command.');

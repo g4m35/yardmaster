@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.1
+- Malformed unauthenticated request targets return400; rejected asynchronous handlers no longer terminate the hub.
+- Native hooks exempt only the exact canonical session. Session identities are scoped by project and machine, including MCP connections addressing multiple repositories; matching legacy claims remain intact.
+- Owned-process cleanup includes ordinary detached descendants retaining an inherited marker, with private durable receipts and identity-checked restart recovery. Inspection uncertainty keeps recovery holds; environment-clearing/hostile children remain outside this containment.
+- Exact request deduplication preserves different scopes, instruction ordering and acceptance options. Learned routing keeps configured-model histories separate and never attributes legacy aggregate results to a replacement model.
+- Managed work without configured checks waits for attention; native code cannot bypass artifact verification by reporting completion without a branch. Explicit allowNoChanges research/report tasks retain report-only completion. Requested failed/missing/unresolved reviews stop by default; explicit advisory review remains available through onUnresolved=proceed.
+- Scope lean-context savings to Claude Code and document connected-client, cache and containment limits.
+
+Upgrade hub and workers together. Preserve the private process-owners directory with Yardmaster state. This release adds no database migration; old unverified ready work is held until checks are configured, and batch-local dependency keys are not treated as cross-request identity. Native hook/MCP cooperation now requires a deliberately shared unique YARDMASTER_SESSION value; shared cwd is never ownership.
+
 ## 0.9.0
 - Durable claim generations fence reclaimed work, native handoffs, usage and bundle uploads. Worker channels on the same machine have independent hub/project-scoped journals and exclusive recovery owners, with preserved legacy migration records.
 - Native branch submissions capture immutable committed artifacts for checks, review and integration. Reclaim/resubmit works after failure; stale cleanup preserves dirty, detached, locked, advanced, unmerged and process-held work, including ownership changes during artifact scans.

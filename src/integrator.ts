@@ -299,7 +299,13 @@ export class Integrator {
     const config = this.coord.configFor(projectId);
     const ready = this.coord
       .listTasks(projectId, ['ready'])
-      .filter((t) => !(config.integration.requireApproval || t.needs_approval) || t.approved)
+      .filter((t) => {
+        if (!verifyCommands(t, config).length) {
+          this.transition(t, ['ready'], { status: 'needs_human', attention: 'No verification commands are configured. Work is preserved; add verify commands and retry.' });
+          return false;
+        }
+        return !(config.integration.requireApproval || t.needs_approval) || t.approved;
+      })
       .sort((a, b) => b.priority - a.priority || (a.ready_at ?? 0) - (b.ready_at ?? 0));
     let task: Task | undefined;
     for (const t of ready) {

@@ -31,7 +31,7 @@ queued ──claim──▶ running ──agent exits──▶ verifying ──c
                needs_human  (plain-language reason, one-click retry)
 ```
 
-1. **Create.** `task.add` dedupes (word-set similarity against open tasks), validates `after` links, rejects dependency cycles, infers a file scope from paths mentioned in the request, and infers a tier (cheap/standard/strong) from the wording.
+1. **Create.** `task.add` dedupes exact requests against open tasks (ordered instructions, case, scope, dependencies and acceptance options; similar wording is not automatically discarded), validates `after` links, rejects dependency cycles, infers a file scope from paths mentioned in the request, and infers a tier (cheap/standard/strong) from the wording.
 2. **Claim.** `claimNext` runs inside `BEGIN IMMEDIATE`, so any number of processes and machines can call it. A task is skipped if a dependency isn't done, its retry backoff hasn't passed, it is paused behind another task (`wait_for`), its scope overlaps an active task's declared scope *or files that task has actually touched*, a reservation (lock) overlaps it, or today's budget is spent. The router then picks the first installed agent with a free slot from the tier's preference list, skipping agents that keep failing on this project.
 3. **Run.** `runAttempt` creates `~/.yardmaster/worktrees/<repo>/<task>` on branch `yardmaster/<task>` from the integration head, builds a short brief (task, owned files, files others are editing, summaries of finished prerequisites, notes, previous failure), and spawns the agent CLI in its own process group with leaky git variables removed. Output is normalized by the adapter into events: tool calls, results, text, usage, final result.
 4. **Watch.** Every event goes through the watchdog and budget meter; a timer checks for silence, questions, runtime limits, cancel/stop requests, and polls the worktree diff to catch two agents editing the same file (the later one is paused and resumes after the first merges).
@@ -68,7 +68,7 @@ queued ──claim──▶ running ──agent exits──▶ verifying ──c
 - **No LLM supervisors.** Loops, stalls, budget, and conflicts are detected by code. Watching ten agents costs nothing.
 - **The integration branch, not your branch.** Agents never move your checkout. You decide when to land.
 - **Scopes are conservative.** A false overlap only costs parallelism; a missed one costs a merge conflict and tokens.
-- **Leases, not locks forever.** Reservations and running tasks expire, so a crashed agent or a closed laptop can't block the fleet.
+- **Leases, not locks forever.** Session reservations expire. Expired task leases detect missing owners; uncertain process exit retains a recovery hold until identity-checked exit or audited owner confirmation.
 - **Plain-language state.** Every status, wait reason, and failure is written for a person who doesn't read stack traces.
 - **Zero native dependencies.** Node ≥ 22.16 (`node:sqlite`), git, and whatever agents you already have. Runtime deps: `zod` and the official MCP server SDK.
 
@@ -86,3 +86,15 @@ Everything else (user worktrees, unknown branches, dirty or unmerged work, locke
 - **Adapters** (`src/adapters/`): `build(ctx) → { command, args, stdin }` and `parse(line) → events`. Built in: Claude Code, Codex, OpenCode, Cursor Agent, Gemini CLI, any plain-text CLI via `agents.<name>.command`, and a mock for tests.
 - **Plugins** (`~/.yardmaster/plugins`): adapters and notifiers in plain ESM. `ym plugin new <name> --describe "..." --with claude` has an agent write one and then contract-tests it.
 - **MCP tools** (`src/mcp.ts`): `yard_status`, `yard_add_tasks`, `yard_wait`, `yard_task`, `yard_claim_files`, `yard_release_files`, `yard_who`, `yard_take_task`, `yard_finish_task`, `yard_send`, `yard_inbox`, `yard_control`. Short text replies to keep agents' context small.
+
+## Process ownership and recovery
+
+Owned launches receive a random inherited marker and a private fsynced receipt under `$YARDMASTER_HOME/process-owners`. After stopping the original process group, cleanup finds same-user descendants retaining that marker, including ordinary detached/new-session processes. UID, PID, start identity and marker are rechecked before signaling; uncertainty retains the receipt and worktree hold. Restart recovery uses the same receipt. Preserve this directory with the rest of the Yardmaster home. Process environment output is bounded transient memory and is never logged or persisted.
+
+This is cooperative ownership tracking, not a hostile-code security boundary. Children clearing their environment, remote descendants and adversarial PID races are not contained. Unsupported or failed inspection cannot establish the marker-owned exit proof. Older receiptless records have only original-group evidence. A crash between OS spawn and receipt creation remains the existing spawning-window hold; lease expiry does not clear it. Use the native agent sandbox for its supported filesystem/network restrictions.
+
+Native session identities are scoped by registration name, project and machine. Matching legacy identities remain stable; moving across projects cannot reassign their existing locks/claims. Hooks exempt only the canonical session returned by registration. MCP connections are independent unless the operator deliberately shares `YARDMASTER_SESSION` with that client's hooks.
+
+Managed and native artifacts require configured verification commands before acceptance. A selected review that cannot complete or still objects stops for attention by default (`review.onUnresolved: "needs_human"`). Explicit `"proceed"` preserves advisory review; `review.required: true` additionally forces a review. Automatic selection and explicit `review: "never"` remain available when review is not required.
+
+Learned routing groups outcomes by agent, tier and the configured model setting. Unknown native defaults and legacy agent-only aggregates do not count as current-model evidence. This is a configured identity, not proof of a provider alias's resolved revision or hidden client-profile configuration.

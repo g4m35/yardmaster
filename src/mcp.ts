@@ -1,13 +1,15 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import * as z from 'zod/v4';
-import { basename, relative } from 'node:path';
+import { relative } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import type { Client } from './api.ts';
 import { mainRepoRoot, projectIdFor } from './git.ts';
 import { NewTaskSchema } from './types.ts';
 import { clip, formatUsd } from './text.ts';
 import { machineId } from './paths.ts';
 import { VERSION } from './version.ts';
+import { nativeSessionName } from './hookclient.ts';
 
 /**
  * The MCP server is how Yardmaster meets people inside the agent they already use. Any MCP client
@@ -20,9 +22,16 @@ const INSTRUCTIONS = `Yardmaster coordinates several coding agents on one repo s
 - Before editing shared files yourself, call yard_claim_files (automatic when Yardmaster hooks are installed).
 - yard_status shows what everyone is doing and anything that needs the user. yard_learn saves repo knowledge for future agents.`;
 
-type Ctx = { client: Client; cwd: string; identity: string; agentName: string | null; profile?: 'full' | 'minimal'; claims?: Map<string, number> };
+type SessionRegistration = { identity: string; cwd: string };
+type Ctx = {
+  client: Client; cwd: string; identity: string; agentName: string | null; profile?: 'full' | 'minimal';
+  claims?: Map<string, number>; claimOwners?: Map<string, string>;
+  /** Present for interactive connections, whose canonical identity is registered separately for each project. */
+  sessionName?: string;
+  sessions?: Map<string | null, SessionRegistration>;
+};
 
-async function projectId(ctx: Ctx, repo?: string): Promise<{ id: string; root: string }> {
+async function projectId(ctx: Ctx, repo?: string): Promise<{ id: string; root: string; identity: string }> {
   const cwd = repo ?? ctx.cwd;
   const root = await mainRepoRoot(cwd);
   if (!root) throw new Error(`${cwd} is not inside a git repository.`);
@@ -32,7 +41,12 @@ async function projectId(ctx: Ctx, repo?: string): Promise<{ id: string; root: s
   } catch {
     await ctx.client['project.register']({ cwd: root });
   }
-  return { id, root };
+  let identity = ctx.identity;
+  if (ctx.sessionName) {
+    identity = await ctx.client['session.register']({ name: ctx.sessionName, agent: ctx.agentName, projectId: id, cwd, machineId: machineId() });
+    (ctx.sessions ??= new Map()).set(id, { identity, cwd });
+  }
+  return { id, root, identity };
 }
 
 const text = (s: string) => ({ content: [{ type: 'text' as const, text: s }] });
@@ -40,6 +54,7 @@ const fail = (err: unknown) => ({ content: [{ type: 'text' as const, text: `Erro
 
 export function buildMcpServer(ctx: Ctx): McpServer {
   const claims = ctx.claims ?? new Map<string, number>();
+  const claimOwners = ctx.claimOwners ??= new Map<string, string>();
   const server = new McpServer({ name: 'yardmaster', version: VERSION }, { instructions: INSTRUCTIONS });
   const repoArg = { repo: z.string().optional().describe('Path inside the repo; defaults to the current directory.') };
 
@@ -66,7 +81,7 @@ export function buildMcpServer(ctx: Ctx): McpServer {
     z.object({ tasks: z.array(NewTaskSchema).min(1).max(30), ...repoArg }),
     async (a) => {
       const p = await projectId(ctx, a.repo);
-      const r = await ctx.client['task.add']({ projectId: p.id, tasks: a.tasks, createdBy: ctx.identity });
+      const r = await ctx.client['task.add']({ projectId: p.id, tasks: a.tasks, createdBy: p.identity });
       const lines = r.created.map((t) => `+ ${t.id} ${clip(t.title, 70)} [${t.tier}${t.scope.length ? `; ${t.scope.join(', ')}` : ''}]`);
       for (const d of r.duplicates) lines.push(`= skipped "${clip(d.title, 50)}": same as ${d.existing}`);
       lines.push(`Use yard_wait with these ids to get results.`);
@@ -97,14 +112,14 @@ export function buildMcpServer(ctx: Ctx): McpServer {
   tool('yard_claim_files', 'Reserve files/globs before you edit them so background agents and other sessions stay away. Returns who holds them if taken.', z.object({ patterns: z.array(z.string()).min(1), reason: z.string().optional(), minutes: z.number().min(1).max(480).default(30), ...repoArg }), async (a) => {
     const p = await projectId(ctx, a.repo);
     const patterns = a.patterns.map((x) => (x.startsWith('/') ? relative(p.root, x) : x));
-    const r = await ctx.client['lock.claim']({ projectId: p.id, holder: ctx.identity, patterns, reason: a.reason ?? null, ttlMinutes: a.minutes });
+    const r = await ctx.client['lock.claim']({ projectId: p.id, holder: p.identity, patterns, reason: a.reason ?? null, ttlMinutes: a.minutes });
     if (r.ok) return `Reserved ${patterns.join(', ')} for ${a.minutes} min.`;
     return `Not reserved. Taken:\n${r.conflicts.map((c) => `- ${c.pattern} by ${c.holder}${c.reason ? ` (${c.reason})` : ''}`).join('\n')}\nWork on something else, or coordinate with yard_send.`;
   });
 
   tool('yard_release_files', 'Release files you reserved (all of them if none listed).', z.object({ patterns: z.array(z.string()).optional(), ...repoArg }), async (a) => {
     const p = await projectId(ctx, a.repo);
-    const n = await ctx.client['lock.release']({ projectId: p.id, holder: ctx.identity, patterns: a.patterns });
+    const n = await ctx.client['lock.release']({ projectId: p.id, holder: p.identity, patterns: a.patterns });
     return `Released ${n} reservation(s).`;
   });
 
@@ -116,36 +131,42 @@ export function buildMcpServer(ctx: Ctx): McpServer {
 
   tool('yard_take_task', 'Take a queued task to do yourself, or take a native task needing changes again by its id (next best queued task if no id).', z.object({ id: z.string().optional(), ...repoArg }), async (a) => {
     const p = await projectId(ctx, a.repo);
-    const t = await ctx.client['session.claim']({ sessionId: ctx.identity, projectId: p.id, taskId: a.id });
+    const t = await ctx.client['session.claim']({ sessionId: p.identity, projectId: p.id, taskId: a.id });
     if (!t) return 'Nothing is ready to take right now.';
     claims.set(t.id, t.generation);
-    if (t.scope.length) await ctx.client['lock.claim']({ projectId: p.id, holder: ctx.identity, patterns: t.scope, reason: t.title, ttlMinutes: 60 }).catch(() => undefined);
-    return `You have ${t.id}: ${t.title}\n${t.prompt !== t.title ? t.prompt + '\n' : ''}${t.scope.length ? `Files: ${t.scope.join(', ')}\n` : ''}When finished call yard_finish_task with a short summary.`;
+    claimOwners.set(t.id, p.identity);
+    if (t.scope.length) await ctx.client['lock.claim']({ projectId: p.id, holder: p.identity, patterns: t.scope, reason: t.title, ttlMinutes: 60 }).catch(() => undefined);
+    return `You have ${t.id}: ${t.title}\n${t.prompt !== t.title ? t.prompt + '\n' : ''}${t.scope.length ? `Files: ${t.scope.join(', ')}\n` : ''}When finished call yard_finish_task with a short summary${t.allow_no_changes ? '.' : ' and the committed local branch to verify.'}`;
   });
 
-  tool('yard_finish_task', 'Report a task this connection took as finished (or failed). An optional local branch queues its committed clean artifact for full checks, review and integration without rerunning coding. Remote native export is unsupported.', z.object({ id: z.string(), summary: z.string(), outcome: z.enum(['done', 'failed']).default('done'), branch: z.string().optional() }), async (a) => {
+  tool('yard_finish_task', 'Submit a task this connection took. Code work requires a committed clean local branch for full checks, review and integration without rerunning coding. Only explicit allowNoChanges report/research tasks may finish without a branch. Remote native export is unsupported.', z.object({ id: z.string(), summary: z.string(), outcome: z.enum(['done', 'failed']).default('done'), branch: z.string().optional() }), async (a) => {
     const generation = claims.get(a.id);
     if (generation === undefined) throw new Error('This connection has no captured claim for that task. Do not finish a claim owned by another or restarted connection; retry/reclaim it through Yardmaster first.');
-    const t = await ctx.client['session.finish']({ sessionId: ctx.identity, taskId: a.id, generation, summary: a.summary, outcome: a.outcome, branch: a.branch }).catch(async error => {
+    const identity = claimOwners.get(a.id) ?? ctx.identity;
+    const t = await ctx.client['session.finish']({ sessionId: identity, taskId: a.id, generation, summary: a.summary, outcome: a.outcome, branch: a.branch }).catch(async error => {
       // A rejected capture may have durably retired this generation. Never borrow a new one on retry/restart.
       const current = await ctx.client['task.peek']({ id: a.id }).catch(() => null);
-      if (current && (current.generation !== generation || current.assignee !== ctx.identity || current.status !== 'running')) claims.delete(a.id);
+      if (current && (current.generation !== generation || current.assignee !== identity || current.status !== 'running')) {
+        claims.delete(a.id);
+        claimOwners.delete(a.id);
+      }
       throw error;
     });
     claims.delete(a.id);
+    claimOwners.delete(a.id);
     const artifact = ['ready', 'merging'].includes(t.status) ? 'Native artifact passed checks; integration is pending.' : t.status === 'done' ? 'Native artifact completed integration.' : 'Native artifact captured; checks/review and integration are pending.';
     return `${t.id} is now ${t.status}.${a.branch ? ` ${artifact} Source branch/worktree are preserved.` : ' Reported outcome only; no automated verification claimed.'}`;
   });
 
   tool('yard_send', 'Leave a short note for a task id, a session, or "*" for everyone (handoffs, warnings about shared APIs).', z.object({ to: z.string(), body: z.string().max(2000), taskId: z.string().optional(), ...repoArg }), async (a) => {
     const p = await projectId(ctx, a.repo);
-    await ctx.client['msg.send']({ projectId: p.id, from: ctx.identity, to: a.to, body: a.body, taskId: a.taskId });
+    await ctx.client['msg.send']({ projectId: p.id, from: p.identity, to: a.to, body: a.body, taskId: a.taskId });
     return 'Sent.';
   });
 
   tool('yard_inbox', 'Notes other agents left for you.', z.object(repoArg), async (a) => {
     const p = await projectId(ctx, a.repo);
-    const msgs = await ctx.client['msg.inbox']({ projectId: p.id, reader: ctx.identity, aliases: process.env.YARDMASTER_TASK_ID ? [process.env.YARDMASTER_TASK_ID] : [] });
+    const msgs = await ctx.client['msg.inbox']({ projectId: p.id, reader: p.identity, aliases: process.env.YARDMASTER_TASK_ID ? [process.env.YARDMASTER_TASK_ID] : [] });
     return msgs.length ? msgs.map((m) => `${m.from}: ${m.body}`).join('\n') : 'No new notes.';
   });
 
@@ -195,19 +216,23 @@ export async function runMcp(client: Client, opts: { cwd?: string } = {}): Promi
   const cwd = opts.cwd ?? process.cwd();
   const taskId = process.env.YARDMASTER_TASK_ID;
   const agentName = process.env.YARDMASTER_AGENT ?? null;
-  const identity = taskId ?? `session:${process.env.YARDMASTER_SESSION ?? `${basename(cwd)}-${process.ppid}`}`;
-  const ctx: Ctx = { client, cwd, identity, agentName, claims: new Map(), profile: process.env.YARDMASTER_MCP_PROFILE === 'minimal' ? 'minimal' : 'full' };
+  const sessionName = nativeSessionName(`mcp-${randomUUID()}`);
+  const ctx: Ctx = { client, cwd, identity: taskId ?? '', agentName, claims: new Map(), claimOwners: new Map(),
+    sessionName: taskId ? undefined : sessionName, sessions: new Map(), profile: process.env.YARDMASTER_MCP_PROFILE === 'minimal' ? 'minimal' : 'full' };
   if (!taskId) {
     const root = await mainRepoRoot(cwd).catch(() => null);
     let pid: string | null = null;
     if (root) pid = await projectIdFor(root).catch(() => null);
-    await client['session.register']({ name: identity.replace(/^session:/, ''), agent: agentName, projectId: pid, cwd, machineId: machineId() }).catch(() => undefined);
+    ctx.identity = await client['session.register']({ name: sessionName, agent: agentName, projectId: pid, cwd, machineId: machineId() });
+    ctx.sessions!.set(pid, { identity: ctx.identity, cwd });
     setInterval(() => {
-      void client['session.register']({ name: identity.replace(/^session:/, ''), agent: agentName, projectId: pid, cwd, machineId: machineId() }).catch(() => undefined);
-      const claims = [...ctx.claims!].map(([taskId, generation]) => ({ taskId, generation }));
-      if (claims.length) void client['session.heartbeat']({ sessionId: identity, claims }).then((results) => {
-        for (const r of results) if (!r.renewed) ctx.claims!.delete(r.taskId);
-      }).catch(() => undefined);
+      for (const [projectId, session] of ctx.sessions!) {
+        void client['session.register']({ name: sessionName, agent: agentName, projectId, cwd: session.cwd, machineId: machineId() }).catch(() => undefined);
+        const claims = [...ctx.claims!].filter(([id]) => ctx.claimOwners!.get(id) === session.identity).map(([taskId, generation]) => ({ taskId, generation }));
+        if (claims.length) void client['session.heartbeat']({ sessionId: session.identity, claims }).then((results) => {
+          for (const r of results) if (!r.renewed) { ctx.claims!.delete(r.taskId); ctx.claimOwners!.delete(r.taskId); }
+        }).catch(() => undefined);
+      }
     }, 60_000).unref();
   }
   const server = buildMcpServer(ctx);

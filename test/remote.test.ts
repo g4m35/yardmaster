@@ -360,7 +360,8 @@ test('the MCP server lets an interactive agent queue, wait for, and coordinate w
   const firstDone = textOf(await mcp.callTool({ name: 'yard_wait', arguments: { ids: [ids[0]], timeoutSec: 30 } }));
   assert.match(firstDone, /\[Done\]/);
   const status = textOf(await mcp.callTool({ name: 'yard_status', arguments: {} }));
-  assert.match(status, /claude-test has reserved docs\/guide.md/, status);
+  const session = hub.coord.listSessions(project.id).find(s => s.name === 'claude-test')!;
+  assert.ok(session && status.includes(session.id) && status.includes('claude-test') && status.includes('has reserved docs/guide.md'), status);
 
   // A Claude Code edit hook from another folder sees the reservation and blocks the edit.
   const blocked = await claudePreTool(JSON.stringify({ cwd: join(box.root), tool_name: 'Edit', tool_input: { file_path: join(box.repo, 'docs/guide.md') } }), async () => remoteClient(url, 'tok2'));
@@ -368,7 +369,7 @@ test('the MCP server lets an interactive agent queue, wait for, and coordinate w
   mkdirSync(join(box.repo, 'packages'), { recursive: true });
   const otherSession = await claudePreTool(JSON.stringify({ cwd: join(box.repo, 'packages'), tool_name: 'Write', tool_input: { file_path: join(box.repo, 'docs/guide.md') } }), async () => remoteClient(url, 'tok2'));
   assert.equal(otherSession.code, 2);
-  assert.match(otherSession.message!, /claude-test/);
+  assert.ok(otherSession.message!.includes(session.id), otherSession.message);
 
   textOf(await mcp.callTool({ name: 'yard_release_files', arguments: {} }));
   const both = textOf(await mcp.callTool({ name: 'yard_wait', arguments: { ids, timeoutSec: 30 } }));

@@ -42,8 +42,9 @@ const AgentSettingsSchema = z.object({
   /** Passed to agents that support permission modes. Headless runs cannot answer prompts. */
   autonomy: z.enum(['full', 'workspace']).default('workspace'),
   /**
-   * "lean" (default): background runs skip your MCP servers, skills and slash commands, and Claude Code's optional
-   * tools. Your CLAUDE.md/AGENTS.md, hooks and permission rules still apply. Measured on Claude Code 2.1: the context
+   * "lean" (default): Claude Code skips optional MCP servers, skills, slash commands and tools.
+   * Other adapters do not promise equivalent context isolation. Your CLAUDE.md/AGENTS.md, hooks and permission
+   * rules still apply. Measured on Claude Code 2.1: the context
    * every turn re-reads drops from about 61k to 14k tokens, and startup is roughly twice as fast.
    * "full": load everything your interactive sessions load.
    */
@@ -236,18 +237,19 @@ export const ConfigSchema = z.object({
       /** Preferred reviewers; a different model family from the implementer is chosen when possible. */
       reviewers: z.array(z.string()).default(['claude', 'codex', 'gemini', 'cursor', 'opencode']),
       crossFamily: z.boolean().default(true),
-      /** If the reviewer still objects after the last round: proceed with a note, or stop for a person. */
-      onUnresolved: z.enum(['proceed', 'needs_human']).default('proceed'),
+      /** If a requested review fails, is unavailable, or still objects: stop for a person by default. */
+      onUnresolved: z.enum(['proceed', 'needs_human']).default('needs_human'),
       /** A review reads the diff it's given plus a few files; these caps keep one from turning into a long session. */
       maxTurns: z.number().int().min(1).default(15),
       budgetUsd: z.number().positive().default(1),
       /**
        * Strict review: when a review is requested, a missing, failed, canceled or unreadable review does not let the
-       * change through. Off by default, where such a review is reported and the verified change proceeds.
+       * change through. Also forces review regardless of the automatic selection rules. The normal default uses
+       * onUnresolved=needs_human to require completion only when a review was selected.
        */
       required: z.boolean().default(false),
     })
-    .default({ mode: 'auto', minChangedLines: 200, maxRounds: 1, reviewers: ['claude', 'codex', 'gemini', 'cursor', 'opencode'], crossFamily: true, onUnresolved: 'proceed', maxTurns: 15, budgetUsd: 1, required: false }),
+    .default({ mode: 'auto', minChangedLines: 200, maxRounds: 1, reviewers: ['claude', 'codex', 'gemini', 'cursor', 'opencode'], crossFamily: true, onUnresolved: 'needs_human', maxTurns: 15, budgetUsd: 1, required: false }),
   learning: z
     .object({
       /** Pick agents by their verified track record on this repo, not just list order. */

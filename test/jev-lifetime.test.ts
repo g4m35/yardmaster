@@ -6,6 +6,7 @@ import { defaultAgentSettings, EffortRoutingSchema } from '../src/config.ts';
 import { routeEffort } from '../src/jev.ts';
 import { groupAlive, isAlive, terminateOwnedGroup, type OwnedProcessInfo } from '../src/proc.ts';
 import { tempDir, until } from './helpers.ts';
+process.env.YARDMASTER_HOME = join(tempDir('ym-jev-owner-home-'), 'home');
 
 function fixture(mode: 'resist' | 'pipes' | 'reply' = 'resist') {
   const root = tempDir('ym-jev-lifetime-');
@@ -144,7 +145,8 @@ test('a judge that survives termination returns an explicit hold instead of time
       registered = info;
       // Fault injection only for this fake judge group: emulate signals accepted but unable to stop it.
       process.kill = ((pid: number, signal?: number | NodeJS.Signals) => {
-        if (pid === -info.pid && (signal === 'SIGTERM' || signal === 'SIGKILL')) return true;
+        // Both original-group and new inherited-marker cleanup must be unable to stop this exact judge.
+        if ((pid === -info.pid || pid === info.pid) && (signal === 'SIGTERM' || signal === 'SIGKILL')) return true;
         return originalKill(pid, signal);
       }) as typeof process.kill;
     } });

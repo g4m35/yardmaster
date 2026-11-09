@@ -150,7 +150,14 @@ export class Hub {
     this.reportConfig();
     const host = this.opts.host ?? cfg.hub.host;
     const port = this.opts.port ?? cfg.hub.port;
-    this.server = createServer((req, res) => void this.handle(req, res));
+    this.server = createServer((req, res) => {
+      // A rejected async handler must never become an unhandled rejection that kills the hub.
+      void this.handle(req, res).catch(() => {
+        if (res.destroyed || res.writableEnded) return;
+        if (res.headersSent) res.destroy();
+        else json(res, 500, { ok: false, error: 'Request failed.' });
+      });
+    });
     await new Promise<void>((resolve, reject) => {
       this.server!.once('error', reject);
       this.server!.listen(port, host, () => resolve());
@@ -346,7 +353,9 @@ export class Hub {
   }
 
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const url = new URL(req.url ?? '/', 'http://localhost');
+    let url: URL;
+    try { url = new URL(req.url ?? '/', 'http://localhost'); }
+    catch { return json(res, 400, { ok: false, error: 'Invalid request target.' }); }
     res.setHeader('x-content-type-options', 'nosniff');
     try {
       if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) return this.serveDashboard(res);
