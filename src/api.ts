@@ -17,7 +17,7 @@ import { PairingStore } from './pairing.ts';
 import { buildRegistry } from './registry.ts';
 import { tx } from './transaction.ts';
 import { WORKER_ACTIVE_STATUSES, WORKER_FINALIZE_STATUSES } from './worker-policy.ts';
-import { recordUtility, runUtilityKey, utilitiesStopped, utilities } from './utility-records.ts';
+import { recordUtility, runUtilityKey, utilitiesStopped, utilities, taskHasPendingUtilities } from './utility-records.ts';
 import { noteControllerActivity } from './controller-activity.ts';
 
 /**
@@ -226,6 +226,23 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
     ),
     // Explicit administrative writes never masquerade as a worker claim.
     'task.adminUpdate': method(z.object({ id: TaskId, patch: z.record(z.string(), z.unknown()) }), (p) => coord.updateTask(p.id, p.patch as TaskPatch, { requestEdit: true })),
+    // A report never submits a code artifact for landing. Keep general worker `done` writes forbidden.
+    'task.completeReport': method(z.object({ taskId: TaskId, runId: RunId, owner: Owner.optional(), head: z.string().regex(/^[a-f0-9]{40,64}$/), summary: z.string().max(2000) }), (p) => tx(coord.db, () => {
+      const owner = p.owner && { ...p.owner, statuses: ['verifying', 'done'] as TaskStatus[] };
+      const run = coord.assertRunOwner(p.runId, owner, p.taskId);
+      const task = coord.getTask(p.taskId)!;
+      if (!task.allow_no_changes || task.head_sha !== p.head || run.role !== 'implement' || run.status !== 'succeeded' || run.pid !== null || run.touched.length ||
+          taskHasPendingUtilities(coord.db, task.id) || coord.runsFor(task.id).some(r => ['running', 'lost', 'cleanup_failed'].includes(r.status))) {
+        throw new Error('Report completion requires an explicit unchanged report and confirmed process exit. Code artifacts require verification and integration.');
+      }
+      if (task.status === 'done') return task; // A lost response cannot duplicate its completion event.
+      if (task.control) throw new Error(`Task control pending: ${task.control}`);
+      coord.confirmRunExit(run.id, task.id, owner!);
+      const completed = coord.updateTask(task.id, { status: 'done', finished_at: Date.now(), ready_at: null, lease_until: null,
+        summary: clip(p.summary, 1500), attention: null, retry_note: null, last_error: null, error_fp: null, same_error_count: 0 });
+      coord.event(task.project_id, task.id, 'success', 'task.done', `Completed report "${task.title}" without file changes; no code integration requested.`, { runId: run.id, reportOnly: true });
+      return completed;
+    })),
     'task.context': method(z.object({ id: Id }), (p) => {
       const task = coord.getTask(p.id);
       if (!task) throw new Error(`No task ${p.id}`);

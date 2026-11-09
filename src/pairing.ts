@@ -275,6 +275,12 @@ export function authorizeWorkerRpc(coord: Coordinator, who: WorkerIdentity, meth
       if ('status' in patch && !['queued', 'running', 'verifying', 'ready', 'needs_human', 'failed'].includes(String(patch.status))) fail();
       return;
     }
+    case 'task.completeReport': {
+      const t = currentTask(coord, who, p.taskId, p.owner, ['verifying', 'done']);
+      ownRun(coord, who, p.runId, p.owner, p.taskId, false, ['verifying', 'done']);
+      if (!t.allow_no_changes) fail();
+      return;
+    }
     case 'run.start':
       if (p.machineId !== who.machineId) fail();
       currentTask(coord, who, p.taskId, p.owner); return;

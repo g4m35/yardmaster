@@ -99,4 +99,6 @@ Managed and native artifacts require configured verification commands before acc
 
 Explicit `allowNoChanges` tasks with no changed files can complete as reports when no checks apply, including file-scoped quick checks with no inputs. Configured applicable checks and selected reviews still run. Reports go directly to done without code integration or a claim that code passed checks; any changed file retains the artifact verification gate.
 
+Report completion uses a narrow Hub transaction, available to scoped workers: matching task/run ownership, an explicit report flag, recorded empty changed-file set, matching head, stopped processes/utilities and pending controls are checked before completion and its event commit together. Replays do not duplicate the event. General worker `done` writes remain forbidden; this transition accepts a report, not a remotely asserted code artifact.
+
 Learned routing groups outcomes by agent, tier and the configured model setting. Unknown native defaults and legacy agent-only aggregates do not count as current-model evidence. This is a configured identity, not proof of a provider alias's resolved revision or hidden client-profile configuration.

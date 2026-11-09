@@ -275,12 +275,12 @@ export async function runAttempt(ctx: RunContext): Promise<RunOutcome> {
   }, 250);
   try {
     const owner = claimOwner(ctx.task);
-    const fenced = new Set(['task.update', 'task.usage', 'task.touched', 'task.event', 'run.start', 'run.update', 'run.log', 'run.usage', 'run.utility', 'lesson.outcome']);
+    const fenced = new Set(['task.update', 'task.completeReport', 'task.usage', 'task.touched', 'task.event', 'run.start', 'run.update', 'run.log', 'run.usage', 'run.utility', 'lesson.outcome']);
     const api = new Proxy(ctx.api, { get: (target, key: string) => {
       const call = target[key as keyof Client];
       return fenced.has(key) ? (params: Record<string, unknown>) => {
         const status = (params.patch as TaskPatch | undefined)?.status;
-        if (lifetime.signal.aborted && (key === 'run.start' || (key === 'task.update' &&
+        if (lifetime.signal.aborted && (key === 'run.start' || key === 'task.completeReport' || (key === 'task.update' &&
             (status === 'ready' || (status === 'queued' && ['stopped', 'canceled', 'lost'].includes(stopped?.reason ?? '')))))) throw new Error('Task lifetime stopped.');
         return (call as (p: unknown) => unknown)({ ...params, owner });
       } : call;
@@ -846,6 +846,7 @@ async function acceptArtifact(ctx: RunContext, wt: string, baseSha: string, file
 
   // ---- verify: "done" is measured, not claimed ----
   const reportOnly = task.allow_no_changes && files.length === 0;
+  if (reportOnly) await api['task.touched']({ taskId: task.id, runId, files });
   const commands = native ? verifyCommands(task, config) : taskChecks(task, config, files);
   if (!commands.length && !reportOnly) return finishNeedsHuman(ctx, `${native ? 'Native handoff' : 'Managed work'} requires configured verification commands. Work is preserved; add verify commands to yardmaster.json and retry.`, runId);
   const head = await revParse(wt, 'HEAD');
@@ -980,15 +981,19 @@ async function acceptArtifact(ctx: RunContext, wt: string, baseSha: string, file
     }
   });
   await api['lesson.outcome']({ taskId: task.id, runId, summary: summary || 'completed', failureBefore: task.attempts > 1 ? task.last_error : null, reviewIssues: resolved.slice(0, 5) }).catch((err: Error) => { if (process.env.YARDMASTER_DEBUG) console.error('lesson.outcome', err.message); });
+  if (reportOnly) {
+    await api['task.completeReport']({ taskId: task.id, runId, head: head!, summary: clip(summary + reviewNote, 1500) });
+    return { status: 'done', message: summary };
+  }
   const needsApproval = (config.integration.requireApproval || task.needs_approval) && !task.approved;
   await update(ctx, {
-    status: reportOnly ? 'done' : 'ready', ready_at: reportOnly ? null : Date.now(), ...(reportOnly ? { finished_at: Date.now() } : {}), head_sha: head, summary: clip(summary + reviewNote, 1500), attention: !reportOnly && needsApproval ? 'Waiting for your approval to merge' : null,
+    status: 'ready', ready_at: Date.now(), head_sha: head, summary: clip(summary + reviewNote, 1500), attention: needsApproval ? 'Waiting for your approval to merge' : null,
     retry_note: null, lease_until: null,
     // A failure that only shows up at merge time is kept on record, so a repeat of it stops early.
     ...(task.error_fp?.startsWith('merge:') ? {} : { last_error: null, error_fp: null, same_error_count: 0 }),
   });
-  await event(ctx, 'success', reportOnly ? 'task.done' : 'task.ready', reportOnly ? `Completed report "${task.title}" without file changes; no code integration requested.` : `"${task.title}" passed checks (${files.length} file${files.length === 1 ? '' : 's'} changed, ${formatUsd(task.cost_usd + cost)})${needsApproval ? '. Waiting for your approval to merge.' : ''}`);
-  return { status: reportOnly ? 'done' : 'ready', message: summary };
+  await event(ctx, 'success', 'task.ready', `"${task.title}" passed checks (${files.length} file${files.length === 1 ? '' : 's'} changed, ${formatUsd(task.cost_usd + cost)})${needsApproval ? '. Waiting for your approval to merge.' : ''}`);
+  return { status: 'ready', message: summary };
 }
 
 export { runVerify };

@@ -79,6 +79,14 @@ for (const scenario of ['no checks', 'file quick checks', 'changed files', 'unav
         assert.ok(final!.finished_at);
         assert.equal(final!.ready_at, null);
         assert.equal(final!.head_sha, initial);
+        const events = () => h.coord.eventsSince(0, p.id, 100, task.id).filter(e => e.kind === 'task.done');
+        assert.equal(events().length, 1, 'completion and its event commit together');
+        assert.match(events()[0]!.message, /Completed report.*no code integration/);
+        assert.doesNotMatch(events()[0]!.message, /passed checks/);
+        const run = h.coord.runsFor(task.id).find(r => r.role === 'implement')!;
+        await h.client['task.completeReport']({ taskId: task.id, runId: run.id, head: final!.head_sha!, summary: 'replayed response', owner: { generation: final!.generation, assignee: final!.assignee! } });
+        assert.equal(events().length, 1, 'a lost response cannot duplicate completion');
+        assert.notEqual(h.coord.getTask(task.id)!.summary, 'replayed response');
       } else assert.match(final!.attention!, scenario === 'changed files' ? /verification commands/ : /review did not complete/);
     } finally { await h.stop(); h.coord.db.close(); rmSync(box.root, { recursive: true, force: true }); }
   });

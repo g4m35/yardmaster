@@ -462,7 +462,7 @@ export class Coordinator {
   updateTaskIfOwner(id: string, owner: ClaimOwner, patch: TaskPatch): Task {
     return tx(this.db, () => {
       const task = this.assertTaskOwner(id, owner);
-      if (patch.status === 'ready' && task.control) throw new Error(`Task control pending: ${task.control}`);
+      if ((patch.status === 'ready' || patch.status === 'done') && task.control) throw new Error(`Task control pending: ${task.control}`);
       const updated = this.updateTask(id, patch);
       if (patch.status && !['running', 'verifying'].includes(patch.status)) {
         // An explicit owner handback with no attached run is conclusive no-launch proof. Lease recovery uses
@@ -1372,6 +1372,7 @@ export class Coordinator {
       if (branch) {
         throw new Error('Branch submission requires the asynchronous session.finish API capture; no artifact accepted by direct finishForSession.');
       }
+      if (outcome === 'done' && t.control) throw new Error(`Task control pending: ${t.control}`);
       if (outcome === 'done' && !t.allow_no_changes) {
         throw new Error('Code work requires a committed branch submission for verification. Pass branch to session.finish; report-only completion requires an explicitly created allowNoChanges task.');
       }

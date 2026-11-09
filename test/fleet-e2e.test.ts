@@ -85,6 +85,32 @@ async function fleet() {
   }
 }
 
+test('paired HTTP worker completes an unchanged report with one event and no code upload', { timeout: 30000 }, async () => {
+  const f = await fleet();
+  try {
+    const machine = f.machines[0]!;
+    let uploads = 0;
+    const worker = machine.createWorker({ fetchBase: (...args) => machine.transport.fetchBase(...args),
+      uploadBranch: async () => { uploads++; throw new Error('A report must never upload code.'); } });
+    const task = f.hub.coord.addTasks(f.project.id, [{ title: 'Research project conventions', prompt: 'Report conventions without changing files', allowNoChanges: true, agent: 'mock' }], 'fleet report').created[0]!;
+    const before = await f.hub.integrator.head(f.project.id);
+    assert.ok(before, 'the fixture integration base is initialized before claiming the report');
+    await worker.tick(); f.pump(worker);
+    const [done] = await settleTasks(f.hub.coord, [task.id], f.root, 20000);
+    assert.equal(done!.status, 'done', done!.attention ?? '');
+    await worker.drain();
+    const events = () => f.hub.coord.eventsSince(0, f.project.id, 100, task.id).filter(e => e.kind === 'task.done');
+    assert.equal(events().length, 1);
+    assert.match(events()[0]!.message, /Completed report/);
+    assert.equal(uploads, 0);
+    assert.equal(sh(f.repo, 'git', ['rev-parse', 'yardmaster/integration']), before);
+    assert.equal(listHeld(f.hub.coord.db).length, 0, 'the report releases confirmed-exit allowance');
+    const run = f.hub.coord.runsFor(task.id).find(r => r.role === 'implement')!;
+    await machine.client['task.completeReport']({ taskId: task.id, runId: run.id, head: done!.head_sha!, summary: 'retry after lost response', owner: { generation: done!.generation, assignee: done!.assignee! } });
+    assert.equal(events().length, 1);
+  } finally { await f.close(); }
+});
+
 function latch() {
   let release!: () => void;
   const promise = new Promise<void>(resolve => { release = resolve; });
