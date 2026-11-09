@@ -565,9 +565,11 @@
   // Agent activity arrives as "<kind> <text>" with absolute worktree paths and environment prefixes.
   const tidyPaths = (text, worktree) => {
     // Only the step into the task's own working copy is noise; "cd packages/web && npm test" says where it ran.
-    const step = (path) => new RegExp('cd ["\']?' + path + '/?["\']?[ \\t]*(?:;|&&)[ \\t]*', 'g');
-    const entered = String(text || '').replace(step('/[^\\s"\']*/t-[0-9a-f]{8,}'), '');
-    const plain = (worktree ? entered.replace(step(worktree.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), '') : entered)
+    // A quoted path may hold spaces; an unquoted one cannot. Either must end at the task's own folder.
+    const step = (quoted, bare) => new RegExp('cd (?:"' + quoted('"') + '/?"|\'' + quoted('\'') + '/?\'|' + bare + '/?)[ \\t]*(?:;|&&)[ \\t]*', 'g');
+    const entered = String(text || '').replace(step((quote) => '/[^' + quote + '\\n]*/t-[0-9a-f]{8,}', '/[^\\s"\']*/t-[0-9a-f]{8,}'), '');
+    const exact = worktree ? worktree.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : '';
+    const plain = (worktree ? entered.replace(step(() => exact, exact), '') : entered)
       .replace(/(?:export )?PATH="[^"\n]*(?:"|…)[ \t]*;?[ \t]*/g, '');
     const local = worktree ? plain.split(worktree + '/').join('').split(worktree).join('its working copy') : plain;
     return local.replace(/\/[^\s"']*\/t-[0-9a-f]{8,}(\/?)/g, (_, slash) => slash ? '' : 'its working copy');

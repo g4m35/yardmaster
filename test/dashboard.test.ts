@@ -176,25 +176,27 @@ test('each task is one row with a short name, plain phase, cleaned activity, tim
     { id: 't-run', title: long, status: 'running', agent: 'claude', model: 'opus', phase: 'agent', cost: 0.65, budget: 3, startedAt: now - 12 * 60_000, lastActivity: `tool Bash cd ${wt}; PATH="/home/fixture/.nvm/v22/b…` },
     { id: 't-edit', title: 'Editing fixture', status: 'running', agent: 'codex', phase: 'setup:spawning', startedAt: now - 30_000, lastActivity: `edit Write ${wt}/src/chat/message-response.tsx` },
     { id: 't-cd', title: 'Fix login. Then update the docs.', status: 'running', agent: 'codex', lastActivity: `tool Bash cd ${wt} && cd packages/web && npm test` },
+    { id: 't-space', title: 'Quoted path fixture', status: 'running', agent: 'codex', lastActivity: 'tool Bash cd "/Users/owner/real outreach/worktrees/t-0123456789ab" && cd \'my app\' && npm test' },
     { id: 't-check', title: 'Checked fixture', status: 'verifying', agent: 'codex', phase: 'review_wait', startedAt: now - 95 * 60_000 },
     { id: 't-ready', title: 'Approval fixture', status: 'ready', agent: 'claude', needsApproval: true, readyAt: now - 3 * 60_000 },
   ] });
   await h.api.refresh();
   const rows = all(h.$('board'), 'row');
   // Closest to merging first, then waiting, then finished.
-  assert.deepEqual(rows.map(row => row.getAttribute('data-focus')), ['task:t-ready', 'task:t-check', 'task:t-run', 'task:t-edit', 'task:t-cd', 'task:t-wait', 'task:t-done']);
+  assert.deepEqual(rows.map(row => row.getAttribute('data-focus')), ['task:t-ready', 'task:t-check', 'task:t-run', 'task:t-edit', 'task:t-cd', 'task:t-space', 'task:t-wait', 'task:t-done']);
   const text = (id: string) => rows.find(row => row.getAttribute('data-focus') === 'task:' + id)!.textContent;
   assert.match(text('t-run'), /^WorkingCodingShop issue #148: isolate the math stylesheet from plain chatclaude · opusRunning a command12m\$0\.65 of \$3$/);
   assert.match(text('t-edit'), /Installing dependencies.*codexEditing src\/chat\/message-response\.tsxunder 1m/);
   // Only the step into the task's own working copy is dropped; where a command ran stays visible.
   assert.equal(text('t-cd'), 'WorkingFix logincodexRunning: cd packages/web && npm test');
+  assert.equal(text('t-space'), "WorkingQuoted path fixturecodexRunning: cd 'my app' && npm test");
   assert.match(text('t-check'), /^CheckingIn reviewChecked fixturecodex1h 35m$/);
   assert.match(text('t-ready'), /^Ready to mergeWaiting for your approvalApproval fixtureclaude3m ago$/);
   assert.match(text('t-wait'), /^WaitingQueued fixtureBoth agent slots are busy$/);
   assert.match(text('t-done'), /^DoneFinished fixtureMerged cleanly\.5m ago\$0\.20$/);
   assert.doesNotMatch(h.$('board').textContent, /\/home\/fixture|PATH=/);
-  assert.deepEqual(h.$('stages').children.map(node => node.children.at(-1)!.textContent), ['1', '3', '1', '1', '1']);
-  assert.equal(h.$('summary-line').textContent, '5 tasks in progress. 1 task waiting. Nothing needs you.');
+  assert.deepEqual(h.$('stages').children.map(node => node.children.at(-1)!.textContent), ['1', '4', '1', '1', '1']);
+  assert.equal(h.$('summary-line').textContent, '6 tasks in progress. 1 task waiting. Nothing needs you.');
 });
 
 test('a task waiting for approval is counted once and offers approval where the owner is asked', async () => {
@@ -233,7 +235,7 @@ test('task detail shows stage, changed files, the full request and history, and 
       started_at: now - 20 * 60_000, branch: 'yardmaster/t-one', base_sha: 'bf5811951c3f618a8a43c5648eae95f7014215cc', worktree: wt },
     runs: [{ role: 'implement', agent: 'claude', model: 'opus', effort: 'high', phase: 'verify', cost_estimated: true, touched: ['src/a.ts', 'src/b.ts'] }],
     events: [{ id: 1, ts: now - 60_000, message: 'claude (opus) started "Exact fixture task"' }] };
-  h.respond(method => method === 'task.get' ? full : method === 'task.logs' ? `16:24 tool Bash cd ${wt}; npm test\n16:25 edit Write ${wt}/src/a.ts` : method === 'registry.list' ? snapshot() : board());
+  h.respond(method => method === 'task.get' ? full : method === 'task.logs' ? `16:24 tool Bash cd "${wt}"; npm test\n16:25 edit Write ${wt}/src/a.ts` : method === 'registry.list' ? snapshot() : board());
   await h.api.showTask('t-one'); await new Promise(resolve => setImmediate(resolve));
   assert.equal(h.$('d-title').textContent, 'Exact fixture task');
   assert.equal(h.$('d-status').textContent, 'CheckingRunning checks');
