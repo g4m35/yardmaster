@@ -108,3 +108,23 @@ test('native report completion also preserves pending stop and redirect controls
     }
   } finally { await hub.stop(); db.close(); rmSync(box.root, { recursive: true, force: true }); }
 });
+
+test('native report winner cancels queued race rivals and satisfies the primary dependency', async () => {
+  const box = sandbox(); const db = openDb(':memory:');
+  const hub = new Hub({ db, token: 'fixture', machineId: 'm-hub', includeMock: true });
+  try {
+    const project = await hub.coord.registerProject(box.repo);
+    const { created } = hub.coord.addTasks(project.id, [
+      { key: 'research', title: 'Race native research', allowNoChanges: true, bestOf: 2 },
+      { title: 'Follow completed research', after: ['research'] },
+    ], 'fixture');
+    const primary = created[0]!;
+    const alternate = created.find(t => t.race_group === primary.race_group && t.id !== primary.id)!;
+    const dependent = created.find(t => !t.race_group)!;
+    const owned = hub.coord.claimForSession('session:race-winner', project.id, alternate.id)!;
+    hub.coord.finishForSession(owned.assignee!, owned.id, 'Research complete', 'done', undefined, owned.generation);
+    assert.equal(hub.coord.getTask(primary.id)!.status, 'canceled');
+    assert.equal(hub.coord.depState(hub.coord.depsOf(dependent.id)[0]!), 'done');
+    assert.equal(hub.coord.eventsSince(0, project.id, 100, primary.id).filter(e => e.kind === 'race.lost').length, 1);
+  } finally { await hub.stop(); db.close(); rmSync(box.root, { recursive: true, force: true }); }
+});

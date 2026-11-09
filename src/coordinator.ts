@@ -389,6 +389,15 @@ export class Coordinator {
     return (this.db.prepare('SELECT * FROM tasks WHERE race_group = ? ORDER BY created_at').all(group) as Row[]).map(toTask);
   }
 
+  /** One accepted result ends the race; cancellation retains the rivals' process and work fences. */
+  cancelRaceRivals(winner: Task): void {
+    if (!winner.race_group) return;
+    for (const rival of this.raceMembers(winner.race_group).filter(t => t.id !== winner.id && !TERMINAL_STATUSES.includes(t.status))) {
+      this.control(rival.id, 'cancel', 'the race');
+      this.event(winner.project_id, rival.id, 'info', 'race.lost', `"${winner.title}" finished first; stopped "${rival.title}".`);
+    }
+  }
+
   /** How many tasks are in each status, and what they cost in total, without loading them. */
   taskTotals(projectId?: string | null): { counts: Record<string, number>; spent: number } {
     const rows = (projectId
@@ -1377,6 +1386,7 @@ export class Coordinator {
         throw new Error('Code work requires a committed branch submission for verification. Pass branch to session.finish; report-only completion requires an explicitly created allowNoChanges task.');
       }
       const next = this.updateTask(taskId, { status: outcome, summary: clip(summary, 1200), finished_at: Date.now(), lease_until: null, attention: null });
+      if (outcome === 'done') this.cancelRaceRivals(next);
       this.releaseSessionTaskLocks(t, sessionId);
       this.event(t.project_id, taskId, outcome === 'done' ? 'success' : 'error', `task.${outcome}`, `${sessionId.replace('session:', '')} finished "${t.title}": ${clip(summary, 160)}`);
       return next;

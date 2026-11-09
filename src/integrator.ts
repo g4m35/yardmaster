@@ -341,13 +341,7 @@ export class Integrator {
         }
       }
     }
-    if (task.race_group) {
-      // Best-of-N: the first verified attempt wins; stop the others so they don't spend more.
-      for (const rival of this.coord.raceMembers(task!.race_group!).filter((t) => t.id !== task!.id && !['done', 'failed', 'canceled'].includes(t.status))) {
-        this.coord.control(rival.id, 'cancel', 'the race');
-        this.coord.event(projectId, rival.id, 'info', 'race.lost', `"${task.title}" finished first; stopped "${rival.title}".`);
-      }
-    }
+    this.coord.cancelRaceRivals(task);
     this.busy.add(projectId);
     try {
       await this.lock.run(projectId, () => this.owned(projectId, () => this.integrate(project, task!, config)));

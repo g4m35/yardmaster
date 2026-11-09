@@ -1,8 +1,8 @@
 # Yardmaster roadmap
 
-Based on a six-sector audit of v0.6.0 (architecture, performance, agent cost, security, product, tests and releases), November 2026. Items are ranked by how much they improve speed and cost, the two leading factors for this project. Security details stay out of this public copy until they're fixed.
+Historical planning notes from a six-sector audit of v0.6.0, November 2026. The states, measurements and priorities below describe that older release; they are not current production-readiness evidence. See the [current README](https://github.com/g4m35/yardmaster#readme) and [release changes](https://github.com/g4m35/yardmaster/blob/main/CHANGELOG.md) for implemented behavior and its limits.
 
-## Where things stand
+## Where things stood in v0.6.0
 
 | Sector | State | Strongest point | Biggest gap |
 |---|---|---|---|
@@ -13,7 +13,9 @@ Based on a six-sector audit of v0.6.0 (architecture, performance, agent cost, se
 | Product | Powerful, hard first run | Zero-token hooks, live overlap pause | No review or land from inside the agent; 8 to 10 setup steps |
 | Tests and releases | Good coverage | 81% of lines, 26 s suite | Cleanup and merge rollback untested; release checks |
 
-## Measured
+## Historical measurements
+
+These older fixtures do not establish current throughput, universal agent savings or provider cache hits. The lean-context measurements below and elsewhere on this page apply to Claude Code, not every adapter.
 
 | What | Number |
 |---|---|
@@ -85,17 +87,9 @@ Done in 0.7.0: cheap-first routing, stopping the rescans of finished tasks, Code
 - Split `runner.ts` and `coordinator.ts` once the fixes above have landed.
 - Homebrew tap, update notice, opt-in local models for trivial tasks.
 
-## Who else does this
+## Comparison work
 
-| Tool | Overlap |
-|---|---|
-| Bernstein (Apache-2.0) | Closest: worktrees, cross-model review, cheap-model router, MCP, 53 adapters, web dashboard with diffs |
-| Agent Orchestrator | Open source; a lead agent plans and spawns workers in worktrees |
-| Claude Code, Codex, Cursor 3 | Parallel agents within one vendor |
-| Copilot Agent HQ | Several vendors' agents, GitHub's cloud only |
-| Conductor, claude-squad, Orca | Local multi-agent apps without a planner, merge train or cost control |
-
-Yardmaster is ahead on zero-token hooks, pausing agents that touch the same file, measured lean launches, CI cost control, multiple machines over plain git and a single binary. It's behind on diff review, the number of agents supported, npm and Windows.
+A current competitor comparison remains unverified. Yardmaster focuses on coordinating existing native coding clients, private worker connections and Git artifacts; that design focus is not evidence of superiority, independent adoption or universal cache and cost gains.
 
 ## Updating this page
 

@@ -409,3 +409,55 @@ test('a paired worker reconnects and reuploads its durable verified branch witho
     assert.equal(sh(f.repo, 'git', ['show', 'yardmaster/integration:recovered.txt']), 'durable');
   } finally { await f.close(); }
 });
+
+for (const state of ['queued', 'running'] as const) {
+  test(`paired report winner cancels ${state} race rivals and releases dependencies`, { timeout: 45000 }, async () => {
+    const f = await fleet();
+    try {
+      const [a, b] = f.machines; assert.ok(a && b);
+      let uploads = 0;
+      const noUpload = (machine: typeof a): BranchTransport => ({ fetchBase: (...args) => machine.transport.fetchBase(...args),
+        uploadBranch: async () => { uploads++; throw new Error('Report race must not upload code.'); } });
+      const wa = a.createWorker(noUpload(a));
+      const before = await f.hub.integrator.head(f.project.id); assert.ok(before);
+      const { created } = f.hub.coord.addTasks(f.project.id, [
+        { key: 'report', title: 'Race convention reports', prompt: 'Report repository conventions without changing files', allowNoChanges: true, bestOf: 2, agent: 'mock' },
+        { title: 'Read the winning convention report', prompt: 'Summarize the completed research without changing files', allowNoChanges: true, after: ['report'], agent: 'mock' },
+      ], 'report race');
+      const primary = created[0]!;
+      const alternate = created.find(t => t.race_group === primary.race_group && t.id !== primary.id)!;
+      const dependent = created.find(t => !t.race_group)!;
+      assert.ok(alternate && dependent);
+      f.hub.coord.updateTask(primary.id, { priority: 5, ...(state === 'running' ? { prompt: '@mock sleep 60000\nReport conventions without changing files' } : {}) });
+      await wa.tick(); f.pump(wa);
+      let rivalPid: number | null = null;
+      let wb: WorkerLoop | undefined;
+      if (state === 'running') {
+        rivalPid = await until(() => f.hub.coord.latestRun(primary.id)?.pid ?? null, pid => pid !== null, 15000, 'rival coding process to be live');
+        assert.ok(rivalPid && groupAlive(rivalPid));
+        wb = b.createWorker(noUpload(b));
+        await wb.tick(); f.pump(wb);
+      }
+      const winner = state === 'running' ? alternate : primary;
+      const rival = state === 'running' ? primary : alternate;
+      const [won, followed] = await settleTasks(f.hub.coord, [winner.id, dependent.id], f.root, 25000);
+      assert.equal(won!.status, 'done', won!.attention ?? '');
+      assert.equal(followed!.status, 'done', followed!.attention ?? '');
+      assert.equal(f.hub.coord.getTask(rival.id)!.status, 'canceled');
+      await wa.drain(); await wb?.drain();
+      if (rivalPid) assert.equal(groupAlive(rivalPid), false, 'running rival is reaped before replacement work settles');
+      else assert.equal(f.hub.coord.runsFor(rival.id).length, 0, 'queued rival never launches');
+      const lost = () => f.hub.coord.eventsSince(0, f.project.id, 100, rival.id).filter(e => e.kind === 'race.lost');
+      assert.equal(lost().length, 1);
+      assert.equal(f.hub.coord.raceMembers(primary.race_group!).filter(t => t.status === 'done').length, 1);
+      assert.equal(listHeld(f.hub.coord.db).length, 0);
+      assert.equal(uploads, 0);
+      assert.equal(sh(f.repo, 'git', ['rev-parse', 'yardmaster/integration']), before);
+      const machine = state === 'running' ? b : a;
+      const run = f.hub.coord.runsFor(winner.id).find(r => r.role === 'implement')!;
+      await machine.client['task.completeReport']({ taskId: winner.id, runId: run.id, head: won!.head_sha!, summary: 'replay winner', owner: { generation: won!.generation, assignee: won!.assignee! } });
+      assert.equal(lost().length, 1, 'completion replay does not re-cancel rivals');
+      assert.equal(f.hub.coord.eventsSince(0, f.project.id, 100, winner.id).filter(e => e.kind === 'task.done').length, 1);
+    } finally { await f.close(); }
+  });
+}

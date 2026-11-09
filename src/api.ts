@@ -240,6 +240,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       coord.confirmRunExit(run.id, task.id, owner!);
       const completed = coord.updateTask(task.id, { status: 'done', finished_at: Date.now(), ready_at: null, lease_until: null,
         summary: clip(p.summary, 1500), attention: null, retry_note: null, last_error: null, error_fp: null, same_error_count: 0 });
+      coord.cancelRaceRivals(completed);
       coord.event(task.project_id, task.id, 'success', 'task.done', `Completed report "${task.title}" without file changes; no code integration requested.`, { runId: run.id, reportOnly: true });
       return completed;
     })),
