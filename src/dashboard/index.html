@@ -7,240 +7,360 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231C2A28'/%3E%3Ccircle cx='16' cy='10' r='4' fill='%23E0A019'/%3E%3Ccircle cx='16' cy='22' r='4' fill='%232F8A5B'/%3E%3C/svg%3E">
 <style>
   :root {
-    --bg: #E4EAE8;
-    --panel: #F6F8F7;
-    --ink: #1C2A28;
-    --ink-2: #4A5856;
-    --steel: #596B66;
-    --rule: #C9D3D0;
+    color-scheme: light;
+    --bg: #ECF0EE;
+    --panel: #FFFFFF;
+    --panel-2: #F4F7F5;
+    --ink: #16211F;
+    --ink-2: #44524F;
+    --ink-3: #5A6A66;
+    --rule: #D3DCD8;
+    --rule-2: #AEBBB6;
+    --bar: #16211F;
+    --bar-ink: #EEF3F1;
+    --bar-ink-2: #C5D1CE;
+    --bar-rule: #3E504D;
     --amber: #E0A019;
+    --amber-ink: #7A5300;
     --amber-wash: #FBF1D9;
+    --amber-rule: #E3CB8E;
+    --on-amber-wash: #4B3A12;
     --green: #246E49;
-    --red: #C3352C;
+    --green-ink: #1F6A43;
+    --red: #B3261E;
     --red-wash: #F8E1DF;
-    --blue: #2B6CB0;
+    --blue: #235FA0;
+    --blue-wash: #E3ECF5;
+    --steel: #596B66;
+    --steel-wash: #DCE3E1;
+    --log-bg: #16211F;
+    --log-ink: #D7E2DF;
+    --shadow: 0 30px 80px rgba(20, 35, 32, .35);
     --sign: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
     --body: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     --r-sm: 4px;
     --r-md: 8px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --bg: #0E1514;
+      --panel: #162120;
+      --panel-2: #1C2928;
+      --ink: #E8EFEC;
+      --ink-2: #B7C4C0;
+      --ink-3: #95A6A1;
+      --rule: #2B3A38;
+      --rule-2: #4A5C58;
+      --bar: #0A100F;
+      --bar-rule: #33433F;
+      --amber-ink: #F0BC4E;
+      --amber-wash: #33290F;
+      --amber-rule: #5C4A1B;
+      --on-amber-wash: #F6E7BF;
+      --green-ink: #62D29E;
+      --red: #FF8E85;
+      --red-wash: #3A1917;
+      --blue: #86B8F2;
+      --blue-wash: #16283B;
+      --steel: #93A49F;
+      --steel-wash: #1F2B29;
+      --log-bg: #0A100F;
+      --shadow: 0 30px 80px rgba(0, 0, 0, .6);
+    }
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; }
   body { background: var(--bg); color: var(--ink); font: 15px/1.5 var(--body); -webkit-font-smoothing: antialiased; }
   button, input, textarea, select { font: inherit; color: inherit; }
   :focus-visible { outline: 3px solid var(--blue); outline-offset: 2px; border-radius: var(--r-sm); }
-  .num { font-family: var(--sign); font-variant-numeric: tabular-nums; }
+  .num { font-variant-numeric: tabular-nums; }
+  [hidden] { display: none !important; }
+  h1 { font-size: 22px; margin: 0; font-weight: 650; }
+  h2 { font-family: var(--sign); font-weight: 650; font-size: 17px; margin: 0 0 12px; letter-spacing: .005em; }
+  h2 small { font-family: var(--body); font-size: 13px; font-weight: 400; color: var(--ink-2); margin-left: 8px; }
+  h3 { font-size: 12px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); margin: 0; }
+  h4 { margin: 0 0 6px; font-size: 14px; }
+  a { color: var(--blue); }
+  p { overflow-wrap: anywhere; }
+  .muted { color: var(--ink-2); font-size: 13.5px; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 
   /* ---- top bar ---- */
-  header.bar { display: flex; align-items: center; gap: 20px; padding: 14px 28px; background: var(--ink); color: #EEF3F1; flex-wrap: wrap; }
-  .brand { display: flex; align-items: center; gap: 10px; font-family: var(--sign); font-size: 22px; letter-spacing: .01em; }
+  header.bar { display: flex; align-items: center; gap: 16px 20px; padding: 12px 28px; background: var(--bar); color: var(--bar-ink); flex-wrap: wrap; border-bottom: 1px solid var(--bar-rule); }
+  .brand { display: flex; align-items: center; gap: 10px; font-family: var(--sign); font-size: 20px; letter-spacing: .01em; color: var(--bar-ink); }
   .brand .lamps { display: grid; gap: 3px; }
   .brand .lamps i { width: 8px; height: 8px; border-radius: 50%; display: block; }
-  .bar select { background: #2A3B38; border: 1px solid #3E504D; border-radius: var(--r-sm); padding: 5px 8px; color: #EEF3F1; }
+  .bar select { background: #2A3B38; border: 1px solid var(--bar-rule); border-radius: var(--r-sm); padding: 5px 8px; color: var(--bar-ink); max-width: 100%; }
   .bar .spacer { flex: 1; }
-  .meter { display: grid; gap: 4px; min-width: 190px; font-size: 13px; color: #C5D1CE; }
-  .meter .track { height: 6px; background: #34463F; border-radius: 3px; overflow: hidden; }
-  .meter .fill { height: 100%; background: var(--green); width: 0; transition: width .4s; }
+  .meter { display: grid; gap: 4px; min-width: 190px; font-size: 13px; color: var(--bar-ink-2); }
+  .meter .bar-track { height: 6px; background: #34463F; border-radius: 3px; overflow: hidden; }
+  .meter .fill { height: 100%; background: #3FA774; width: 0; transition: width .4s; }
   .meter .fill.warn { background: var(--amber); }
-  .meter .fill.over { background: var(--red); }
+  .meter .fill.over { background: #E5584E; }
   .meter b { color: #fff; font-weight: 600; }
-  .conn { font-size: 13px; color: #C5D1CE; display: flex; align-items: center; gap: 6px; }
-  .conn i { width: 8px; height: 8px; border-radius: 50%; background: var(--steel); }
+  .meter small { color: #E9C46A; display: block; }
+  .conn { font-size: 13px; color: var(--bar-ink-2); display: flex; align-items: center; gap: 6px; }
+  .conn i { width: 8px; height: 8px; border-radius: 50%; background: #7C8E89; }
   .conn.live i { background: #4CC38A; }
-  .btn { border: 1px solid var(--rule); background: var(--panel); border-radius: var(--r-sm); padding: 6px 12px; cursor: pointer; font-weight: 550; }
-  .btn:hover { border-color: var(--steel); }
+  .bar-acts { display: flex; gap: 10px; flex-wrap: wrap; }
+
+  .btn { border: 1px solid var(--rule-2); background: var(--panel); color: var(--ink); border-radius: var(--r-sm); padding: 6px 12px; cursor: pointer; font-weight: 550; min-height: 38px; }
+  .btn:hover { border-color: var(--ink-3); }
   .btn.primary { background: var(--amber); border-color: var(--amber); color: #231A04; }
   .btn.primary:hover { background: #EBAE2A; }
   .btn.go { background: var(--green); border-color: var(--green); color: #fff; }
+  .btn.go:hover { background: #2B7F55; }
   .btn.danger { color: var(--red); }
   .btn:disabled { opacity: .5; cursor: default; }
+  .bar .btn.ghost { background: transparent; color: var(--bar-ink); border-color: var(--bar-rule); }
+  .bar .btn.ghost:hover { border-color: #9FB0AC; }
+  select { min-height: 38px; }
 
-  main { max-width: 1320px; margin: 0 auto; padding: 24px 28px 64px; display: grid; gap: 28px; }
-  h2 { font-family: var(--sign); font-weight: 600; font-size: 20px; margin: 0 0 12px; letter-spacing: .005em; }
-  h2 small { font-family: var(--body); font-size: 13px; font-weight: 400; color: var(--ink-2); margin-left: 8px; }
+  main { max-width: 1280px; margin: 0 auto; padding: 22px 28px 64px; display: grid; gap: 22px; }
+  main > *, .cols > *, .rail > *, .lead > *, .registry-row > *, .machine > * { min-width: 0; }
+  .panel { background: var(--panel); border: 1px solid var(--rule); border-radius: var(--r-md); padding: 16px 18px; }
+
+  /* ---- banners ---- */
+  .notice { background: var(--amber-wash); color: var(--on-amber-wash); border: 1px solid var(--amber-rule); border-radius: var(--r-md); padding: 12px 16px; }
+  .notice p { margin: 0 0 8px; }
+  .notice code { background: rgba(0, 0, 0, .08); padding: 1px 5px; border-radius: 3px; }
+  .banner { border: 1px solid var(--rule); border-left: 6px solid var(--steel); background: var(--steel-wash); border-radius: var(--r-md); padding: 12px 18px; display: flex; gap: 12px 16px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+  .banner b { font-family: var(--sign); font-size: 17px; font-weight: 650; margin-right: 6px; }
+  .banner .acts { display: flex; gap: 8px; flex-wrap: wrap; }
+  .pause-ask { border-left-color: var(--ink); background: var(--panel); }
+  #headsup { border: 1px solid var(--rule); border-left: 6px solid var(--blue); background: var(--blue-wash); border-radius: var(--r-md); padding: 14px 18px; }
+  #headsup h2 { margin-bottom: 6px; }
+  #headsup ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+  #headsup a { color: inherit; text-decoration: none; }
+  #headsup a:hover { text-decoration: underline; }
+
+  /* ---- status headline ---- */
+  .headline { margin: 2px 0 0; font-family: var(--sign); font-size: 26px; line-height: 1.2; font-weight: 650; letter-spacing: -.01em; }
+  .headline-sub { margin: 4px 0 0; color: var(--ink-2); }
 
   /* ---- needs you ---- */
-  #attention { border-left: 6px solid var(--amber); background: var(--amber-wash); border-radius: var(--r-md); padding: 16px 20px; }
-  #attention[hidden] { display: none; }
-  .need { display: grid; grid-template-columns: 1fr auto; gap: 6px 18px; padding: 12px 0; border-top: 1px solid #EAD9AE; }
+  #attention { border: 1px solid var(--amber-rule); border-left: 6px solid var(--amber); background: var(--amber-wash); color: var(--on-amber-wash); border-radius: var(--r-md); padding: 14px 18px 6px; }
+  #attention h2 { margin-bottom: 2px; }
+  #attention h2 small { color: inherit; opacity: .85; }
+  .need { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 18px; padding: 12px 0; border-top: 1px solid var(--amber-rule); }
   .need:first-of-type { border-top: 0; }
-  .need .t { font-weight: 650; }
-  .need .why { color: #4B3A12; max-width: 78ch; }
+  .need .t { font-weight: 650; overflow-wrap: anywhere; }
+  .need .why { max-width: 78ch; overflow-wrap: anywhere; }
   .need .acts { display: flex; gap: 8px; align-items: start; flex-wrap: wrap; justify-content: end; grid-row: span 2; }
 
-  #paused { border-left: 6px solid var(--steel); background: #DCE3E1; border-radius: var(--r-md); padding: 12px 20px; display: flex; gap: 16px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
-  #paused[hidden], #headsup[hidden], #pause-ask[hidden] { display: none; }
-  .pause-ask { border-left: 6px solid var(--ink); background: var(--panel); border: 1px solid var(--rule); border-left-width: 6px; border-radius: var(--r-md); padding: 12px 20px; display: flex; gap: 16px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
-  .pause-ask b { font-family: var(--sign); font-size: 18px; font-weight: 600; margin-right: 6px; }
-  #headsup a { text-decoration: none; }
-  #headsup a:hover { text-decoration: underline; }
-  #paused b { font-family: var(--sign); font-size: 18px; font-weight: 600; }
-  #headsup { border-left: 6px solid var(--blue); background: #E3ECF5; border-radius: var(--r-md); padding: 14px 20px; }
-  #headsup h2 { font-size: 18px; margin-bottom: 6px; }
-  #headsup ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
-  #headsup a { color: inherit; }
-  .bar .btn.ghost { background: transparent; color: #EEF3F1; border-color: #3E504D; }
-  .bar .btn.ghost:hover { border-color: #9FB0AC; }
-  .meter small { color: #E9C46A; display: block; }
+  /* ---- layout: board + rail ---- */
+  .cols { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 22px; align-items: start; }
+  .rail, .lead { display: grid; gap: 22px; }
+  .section-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
+  .section-head h2 { margin: 0; }
+  .section-head select { max-width: 100%; padding: 6px 8px; background: var(--panel); border: 1px solid var(--rule-2); border-radius: var(--r-sm); }
+
+  /* ---- the line: five stages with counts ---- */
+  .work { padding: 0; overflow: hidden; }
+  .work > .section-head { padding: 16px 18px 0; }
+  .stages { list-style: none; margin: 0; padding: 4px 18px 16px; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); position: relative; }
+  .stages::before { content: ""; position: absolute; left: calc(18px + 10%); right: calc(18px + 10%); top: 12px; height: 3px; background: repeating-linear-gradient(90deg, var(--rule-2) 0 10px, transparent 10px 16px); }
+  .stage { display: grid; grid-template-rows: auto 1fr auto; justify-items: center; gap: 4px; position: relative; text-align: center; min-width: 0; }
+  .stage .stop { width: 18px; height: 18px; border-radius: 50%; background: var(--panel); border: 3px solid var(--rule-2); }
+  .stage[data-n="some"][data-s="queued"] .stop { border-color: var(--steel); }
+  .stage[data-n="some"][data-s="running"] .stop, .stage[data-n="some"][data-s="verifying"] .stop { border-color: var(--blue); }
+  .stage[data-n="some"][data-s="ready"] .stop { border-color: var(--amber); }
+  .stage[data-n="some"][data-s="done"] .stop { border-color: var(--green); background: var(--green); }
+  .stage-name { font-size: 13px; color: var(--ink-2); overflow-wrap: anywhere; }
+  .stage-count { font-family: var(--sign); font-size: 20px; font-weight: 650; line-height: 1; }
+  .stage[data-n="none"] .stage-count { color: var(--ink-3); font-weight: 500; }
+
+  /* ---- departure board: one row per task ---- */
+  .board { border-top: 1px solid var(--rule); }
+  .board-cols, .row { display: grid; grid-template-columns: 136px minmax(0, 1fr) 84px 64px 96px; gap: 4px 16px; align-items: center; }
+  .board-cols { padding: 8px 18px; font-size: 11px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); background: var(--panel-2); border-bottom: 1px solid var(--rule); }
+  .board-cols span:nth-child(n+4) { text-align: right; }
+  .group > h3 { padding: 14px 18px 6px; }
+  .rows { list-style: none; margin: 0; padding: 0; }
+  .rows li + li { border-top: 1px solid var(--rule); }
+  .group + .group { border-top: 1px solid var(--rule); }
+  .row { width: 100%; text-align: left; background: none; border: 0; border-left: 4px solid transparent; padding: 12px 18px 12px 14px; cursor: pointer; }
+  .row:hover { background: var(--panel-2); }
+  .row:focus-visible { outline-offset: -3px; }
+  .row[data-s="running"], .row[data-s="verifying"] { border-left-color: var(--blue); }
+  .row[data-s="ready"], .row[data-s="merging"] { border-left-color: var(--amber); }
+  .row-status { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0 8px; align-items: center; min-width: 0; }
+  .row-label { font-weight: 650; }
+  .row-sub { grid-column: 2; font-size: 12.5px; color: var(--ink-2); overflow-wrap: anywhere; }
+  .row-main { display: grid; gap: 2px; min-width: 0; }
+  .row-main .t { font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
+  .row-main .d { font-size: 13px; color: var(--ink-2); overflow-wrap: anywhere; }
+  .row-main .who { color: var(--ink); font-weight: 550; }
+  .row-main .who + .what::before { content: " · "; }
+  .row-time, .row-cost { font-size: 13.5px; text-align: right; color: var(--ink-2); white-space: nowrap; }
+  .row-time { color: var(--ink); }
+  .lamp { width: 9px; height: 9px; border-radius: 50%; background: var(--steel); display: inline-block; flex: none; }
+  [data-s="running"] > .row-status .lamp, [data-s="running"] > .lamp { background: var(--blue); animation: pulse 1.8s ease-in-out infinite; }
+  [data-s="verifying"] > .row-status .lamp, [data-s="verifying"] > .lamp { background: var(--blue); }
+  [data-s="ready"] > .row-status .lamp, [data-s="merging"] > .row-status .lamp, [data-s="ready"] > .lamp, [data-s="merging"] > .lamp { background: var(--amber); }
+  [data-s="done"] > .row-status .lamp, [data-s="done"] > .lamp { background: var(--green); }
+  [data-s="needs_human"] > .lamp, [data-s="failed"] > .lamp { background: var(--red); }
+  @keyframes pulse { 50% { opacity: .35; } }
+  .track { display: flex; align-items: center; }
+  .track i { width: 9px; height: 9px; border-radius: 50%; border: 2px solid var(--rule-2); margin-left: 12px; position: relative; flex: none; }
+  .track i:first-child { margin-left: 0; }
+  .track i:not(:first-child)::before { content: ""; position: absolute; right: calc(100% + 2px); top: 50%; width: 12px; height: 2px; margin-top: -1px; background: var(--rule-2); }
+  .track i.past { background: var(--ink-3); border-color: var(--ink-3); }
+  .track i.past + i::before { background: var(--ink-3); }
+  .track i.now { width: 13px; height: 13px; border-width: 3px; border-color: var(--blue); background: var(--panel); }
+  .track[data-s="queued"] i.now { border-color: var(--steel); }
+  .track[data-s="ready"] i.now, .track[data-s="merging"] i.now { border-color: var(--amber); }
+  .track[data-s="done"] i.now { border-color: var(--green); background: var(--green); }
+  .board-empty { padding: 30px 18px 34px; display: grid; gap: 8px; justify-items: center; text-align: center; }
+  .board-empty strong { font-family: var(--sign); font-size: 18px; }
+  .board-empty p { margin: 0; color: var(--ink-2); max-width: 56ch; }
+  .board-empty .btn { margin-top: 8px; }
+  .board-note { margin: 0; padding: 16px 18px; color: var(--ink-2); }
+  @media (prefers-reduced-motion: reduce) { .lamp { animation: none !important; } .meter .fill { transition: none; } }
+
+  /* ---- rail panels ---- */
+  .feed { list-style: none; margin: 0; padding: 0; }
+  #feed-more { margin-top: 10px; font-size: 14px; }
+  .feed li { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; padding: 6px 0; border-top: 1px solid var(--rule); font-size: 13.5px; }
+  .feed li:first-child { border-top: 0; }
+  .feed time { color: var(--ink-3); font-size: 12.5px; font-variant-numeric: tabular-nums; white-space: nowrap; padding-top: 1px; min-width: 44px; }
+  .feed span { overflow-wrap: anywhere; }
+  .feed li[data-l="warn"] span { color: var(--amber-ink); }
+  .feed li[data-l="error"] span { color: var(--red); }
+  .feed li[data-l="success"] span { color: var(--green-ink); }
+  .feed a { color: inherit; text-decoration: none; }
+  .feed a:hover { text-decoration: underline; }
+  .feed-empty { margin: 0; color: var(--ink-2); font-size: 13.5px; }
+  .machines { display: grid; gap: 12px; margin: 0 0 12px; }
+  .machine { display: grid; grid-template-columns: auto 1fr auto; gap: 4px 10px; align-items: center; }
+  .machine .lamp.on { background: var(--green); }
+  .machine .n { font-weight: 600; overflow-wrap: anywhere; }
+  .machine .a { grid-column: 2 / -1; font-size: 13px; color: var(--ink-2); overflow-wrap: anywhere; }
+  .slots { display: flex; gap: 3px; flex-wrap: wrap; max-width: 100px; }
+  .slots i { width: 10px; height: 14px; border-radius: 2px; border: 1px solid var(--steel); }
+  .slots i.used { background: var(--blue); border-color: var(--blue); }
   .disk { grid-column: 2 / -1; display: grid; gap: 3px; font-size: 12.5px; color: var(--ink-2); }
-  .disk .track { height: 5px; background: #DCE3E1; border-radius: 3px; overflow: hidden; }
+  .disk .track-bar { height: 5px; background: var(--steel-wash); border-radius: 3px; overflow: hidden; }
   .disk .fill { height: 100%; background: var(--steel); }
   .disk.low { color: var(--red); }
   .disk.low .fill { background: var(--red); }
-  .redirect { display: grid; gap: 6px; }
-  .redirect textarea { width: 100%; min-height: 64px; border: 1px solid var(--rule); border-radius: var(--r-sm); padding: 8px 10px; background: #fff; resize: vertical; }
-
-  /* ---- the line: board of stations ---- */
-  .line { position: relative; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 14px; }
-  .line::before { content: ""; position: absolute; left: 10%; right: 10%; top: 13px; height: 4px; background: repeating-linear-gradient(90deg, var(--steel) 0 14px, transparent 14px 20px); opacity: .55; }
-  .station { position: relative; display: grid; align-content: start; gap: 10px; min-width: 0; }
-  .station > header { display: grid; justify-items: center; gap: 6px; margin-bottom: 4px; }
-  .station > header .stop { width: 30px; height: 30px; border-radius: 50%; background: var(--panel); border: 4px solid var(--steel); position: relative; z-index: 1; }
-  .station[data-s="running"] .stop, .station[data-s="verifying"] .stop { border-color: var(--blue); }
-  .station[data-s="ready"] .stop { border-color: var(--amber); }
-  .station[data-s="done"] .stop { border-color: var(--green); background: var(--green); }
-  .station > header span { font-family: var(--sign); font-size: 17px; }
-  .station > header em { font-style: normal; color: var(--ink-2); font-size: 13px; }
-  .ticket { text-align: left; width: 100%; background: var(--panel); border: 1px solid var(--rule); border-radius: var(--r-sm); padding: 10px 12px 10px 14px; position: relative; cursor: pointer; display: grid; gap: 4px; }
-  .ticket:hover { border-color: var(--steel); }
-  .ticket::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 3px; border-radius: 2px; background: var(--steel); }
-  .ticket[data-s="running"]::before, .ticket[data-s="verifying"]::before { background: var(--blue); }
-  .ticket[data-s="ready"]::before, .ticket[data-s="merging"]::before { background: var(--amber); }
-  .ticket[data-s="done"]::before { background: var(--green); }
-  .ticket .t { font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
-  .ticket .m { font-size: 12.5px; color: var(--ink-2); display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-  .ticket .d { font-size: 12.5px; color: var(--ink-2); overflow-wrap: anywhere; }
-  .lamp { width: 9px; height: 9px; border-radius: 50%; background: var(--steel); display: inline-block; flex: none; }
-  .ticket[data-s="running"] .lamp { background: var(--blue); animation: pulse 1.8s ease-in-out infinite; }
-  .ticket[data-s="verifying"] .lamp { background: var(--blue); }
-  .ticket[data-s="ready"] .lamp, .ticket[data-s="merging"] .lamp { background: var(--amber); }
-  .ticket[data-s="done"] .lamp { background: var(--green); }
-  @keyframes pulse { 50% { opacity: .35; } }
-  @media (prefers-reduced-motion: reduce) { .ticket .lamp { animation: none !important; } .meter .fill { transition: none; } }
-  .empty-station { font-size: 13px; color: var(--steel); text-align: center; padding: 8px 4px; }
-  .board-empty { grid-column: 1 / -1; text-align: center; color: var(--ink-2); padding: 18px; }
-
-  /* ---- lower panels ---- */
-  .lower { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: 28px; align-items: start; }
-  .panel { background: var(--panel); border: 1px solid var(--rule); border-radius: var(--r-md); padding: 18px 20px; }
-  .feed { list-style: none; margin: 0; padding: 0; max-height: 420px; overflow: auto; }
-  .feed li { display: grid; grid-template-columns: 70px 1fr; gap: 10px; padding: 6px 0; border-top: 1px solid #E3E9E7; font-size: 14px; }
-  .feed li:first-child { border-top: 0; }
-  .feed time { color: var(--steel); font-family: var(--sign); font-variant-numeric: tabular-nums; }
-  .feed li[data-l="warn"] span { color: #7A5300; }
-  .feed li[data-l="error"] span { color: var(--red); }
-  .feed li[data-l="success"] span { color: #1F6A43; }
-  .feed a { color: inherit; text-decoration: none; }
-  .feed a:hover { text-decoration: underline; }
-  .machines { display: grid; gap: 10px; margin: 0 0 22px; }
-  .machine { display: grid; grid-template-columns: auto 1fr auto; gap: 4px 10px; align-items: center; }
-  .machine .lamp.on { background: var(--green); }
-  .machine .n { font-weight: 600; }
-  .machine .a { grid-column: 2 / -1; font-size: 13px; color: var(--ink-2); }
-  .slots { display: flex; gap: 3px; }
-  .slots i { width: 10px; height: 14px; border-radius: 2px; border: 1px solid var(--steel); }
-  .slots i.used { background: var(--blue); border-color: var(--blue); }
   .clean-list { font-size: 13.5px; margin: 8px 0 12px; padding-left: 18px; color: var(--ink-2); }
   .clean-list li { margin: 3px 0; overflow-wrap: anywhere; }
-  .clean-list.keep li::marker { color: var(--amber); }
-  .muted { color: var(--ink-2); font-size: 13.5px; }
+  .clean-list.keep li::marker { color: var(--amber-ink); }
 
-  /* ---- add work dialog ---- */
-  dialog { border: 0; border-radius: var(--r-md); padding: 0; width: min(620px, calc(100vw - 32px)); background: var(--panel); color: var(--ink); box-shadow: 0 30px 80px rgba(20, 35, 32, .35); }
-  dialog::backdrop { background: rgba(28, 42, 40, .45); }
-  form.add { display: grid; gap: 16px; padding: 22px 24px; }
-  form.add label { display: grid; gap: 6px; font-weight: 600; }
-  form.add label small { font-weight: 400; color: var(--ink-2); }
-  form.add textarea, form.add input[type=text], form.add select { width: 100%; border: 1px solid var(--rule); border-radius: var(--r-sm); padding: 9px 11px; background: #fff; font-weight: 400; }
-  form.add textarea { min-height: 120px; resize: vertical; }
-  .choice { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; border: 0; padding: 0; margin: 0; }
-  .choice legend { font-weight: 600; margin-bottom: 6px; padding: 0; }
-  .choice label { border: 1px solid var(--rule); border-radius: var(--r-sm); padding: 8px 10px; font-weight: 500; cursor: pointer; display: grid; gap: 2px; background: #fff; }
-  .choice label small { font-size: 12px; }
-  .choice input { position: absolute; opacity: 0; pointer-events: none; }
-  .choice label:has(input:checked) { border-color: var(--ink); box-shadow: inset 0 0 0 1px var(--ink); }
-  .choice label:has(input:focus-visible) { outline: 3px solid var(--blue); outline-offset: 2px; }
-  .form-acts { display: flex; justify-content: end; gap: 10px; }
-  .form-msg { font-size: 14px; min-height: 1.5em; }
-
-  /* ---- drawer ---- */
-  dialog.drawer { position: fixed; inset: 0 0 0 auto; margin: 0; width: min(600px, 100%); max-width: 100%; height: 100dvh; max-height: 100dvh; border-radius: 0; border-left: 1px solid var(--rule); }
-  dialog.drawer[open] { display: grid; grid-template-rows: minmax(0, auto) auto minmax(0, 1fr); }
-  .drawer .head { max-height: 48dvh; overflow: auto; }
-  .drawer .head { padding: 18px 22px 12px; border-bottom: 1px solid var(--rule); display: grid; gap: 8px; }
-  .drawer .head h2 { overflow-wrap: anywhere; font-family: var(--sign); font-size: 21px; font-weight: 600; margin: 0; line-height: 1.25; padding-right: 36px; }
-  .drawer .close { position: absolute; top: 14px; right: 16px; border: 0; background: none; font-size: 22px; cursor: pointer; line-height: 1; padding: 4px 8px; }
-  .facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; font-size: 14px; margin: 0; }
-  .facts dt { color: var(--ink-2); }
-  .facts dd { margin: 0; overflow-wrap: anywhere; }
-  .drawer .acts { display: flex; gap: 8px; flex-wrap: wrap; padding: 12px 22px; border-bottom: 1px solid var(--rule); }
-  .drawer .body { overflow: auto; padding: 14px 22px 30px; display: grid; gap: 16px; align-content: start; }
-  .callout { border-radius: var(--r-sm); padding: 10px 12px; font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
-  .callout.amber { background: var(--amber-wash); border-left: 4px solid var(--amber); }
-  .callout.red { background: var(--red-wash); border-left: 4px solid var(--red); }
-  .callout.plain { background: #EDF2F0; }
-  pre.log { margin: 0; background: var(--ink); color: #D7E2DF; border-radius: var(--r-sm); padding: 12px 14px; font: 12.5px/1.55 ui-monospace, "SF Mono", Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 46vh; overflow: auto; }
-  h4 { margin: 0 0 6px; font-size: 14px; }
-
-  /* ---- auth gate ---- */
-  .gate { max-width: 560px; margin: 12vh auto; background: var(--panel); border: 1px solid var(--rule); border-radius: var(--r-md); padding: 28px 30px; }
-  .gate h1 { font-family: var(--sign); margin: 0 0 8px; font-weight: 600; }
-  .gate code { background: #E4EAE8; padding: 2px 6px; border-radius: 3px; }
-
-  [hidden] { display: none !important; }
-  h1 { font-size: 22px; margin: 0; font-weight: 650; }
-  a { color: #245B95; }
-  main > *, .lower > *, .registry-row > *, .machine > * { min-width: 0; }
-  p { overflow-wrap: anywhere; }
-  .section-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
-  .section-head h2 { margin: 0; }
-  .section-head select { max-width: 100%; padding: 6px 8px; background: var(--panel); border: 1px solid var(--rule); border-radius: var(--r-sm); }
-  .notice { background: var(--amber-wash); border: 1px solid #D8BF83; border-radius: var(--r-md); padding: 12px 16px; }
-  .notice p { margin: 0 0 8px; }
+  /* ---- agents and connections (diagnostics, folded) ---- */
+  .connections { padding: 0; }
+  .connections > summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; padding: 14px 18px; cursor: pointer; list-style: none; }
+  .connections > summary::-webkit-details-marker { display: none; }
+  .connections > summary::before { content: ""; width: 7px; height: 7px; border-right: 2px solid var(--ink-3); border-bottom: 2px solid var(--ink-3); transform: rotate(-45deg); align-self: center; margin-right: 2px; flex: none; }
+  .connections[open] > summary::before { transform: rotate(45deg); }
+  .connections > summary h2 { margin: 0; }
+  .connections-body { padding: 0 18px 16px; display: grid; gap: 12px; }
+  .connections-body > * { margin: 0; }
   .registry-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-  .registry-row { background: var(--panel); border: 1px solid var(--rule); border-radius: var(--r-md); padding: 14px 16px; display: grid; align-content: start; gap: 8px; overflow-wrap: anywhere; }
+  .registry-row { background: var(--panel-2); border: 1px solid var(--rule); border-radius: var(--r-md); padding: 12px 14px; display: grid; align-content: start; gap: 6px; overflow-wrap: anywhere; }
   .registry-top { display: flex; align-items: baseline; gap: 8px; justify-content: space-between; }
-  .registry-top strong { font-size: 16px; min-width: 0; }
-  .registry-state { flex-shrink: 0; font-size: 14px; color: var(--ink-2); }
-  .registry-row[data-state="stale"] { border-left: 4px solid #9A6900; }
+  .registry-top strong { font-size: 15px; min-width: 0; }
+  .registry-state { flex-shrink: 0; font-size: 13px; color: var(--ink-2); border: 1px solid var(--rule-2); border-radius: 999px; padding: 0 8px; }
+  .registry-row[data-state="stale"] { border-left: 4px solid var(--amber-ink); }
+  .registry-row[data-state="stale"] .registry-state { color: var(--amber-ink); border-color: var(--amber-ink); }
   .registry-row p { margin: 0; }
   .registry-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
   .registry-actions .btn { font-size: 14px; }
   .privacy { margin: 0; }
-  .need .t, .need .why, .machine .n, .machine .a { overflow-wrap: anywhere; }
-  .feed span, .gate { overflow-wrap: anywhere; }
-  .gate { width: calc(100% - 32px); }
-  .machine .slots { flex-wrap: wrap; max-width: 100px; }
-  .btn, select { min-height: 38px; }
-  .drawer .close { min-height: 40px; min-width: 40px; }
-  .facts { grid-template-columns: minmax(0, 100px) minmax(0, 1fr); }
-  .facts dt, .facts dd { overflow-wrap: anywhere; }
-  .form-acts { flex-wrap: wrap; }
-  @media (max-width: 650px) {
+
+  /* ---- add work dialog ---- */
+  dialog { border: 1px solid var(--rule); border-radius: var(--r-md); padding: 0; width: min(620px, calc(100vw - 32px)); background: var(--panel); color: var(--ink); box-shadow: var(--shadow); }
+  dialog::backdrop { background: rgba(10, 18, 16, .55); }
+  form.add { display: grid; gap: 16px; padding: 22px 24px; }
+  form.add h2 { margin: 0; font-size: 20px; }
+  form.add label { display: grid; gap: 6px; font-weight: 600; }
+  form.add label small { font-weight: 400; color: var(--ink-2); }
+  form.add textarea, form.add input[type=text], form.add select, .redirect textarea { width: 100%; border: 1px solid var(--rule-2); border-radius: var(--r-sm); padding: 9px 11px; background: var(--panel-2); color: var(--ink); font-weight: 400; }
+  form.add textarea { min-height: 120px; resize: vertical; }
+  .choice { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; border: 0; padding: 0; margin: 0; }
+  .choice legend { font-weight: 600; margin-bottom: 6px; padding: 0; }
+  .choice label { border: 1px solid var(--rule-2); border-radius: var(--r-sm); padding: 8px 10px; font-weight: 500; cursor: pointer; display: grid; gap: 2px; background: var(--panel-2); }
+  .choice label small { font-size: 12px; }
+  .choice input { position: absolute; opacity: 0; pointer-events: none; }
+  .choice label:has(input:checked) { border-color: var(--ink); box-shadow: inset 0 0 0 1px var(--ink); }
+  .choice label:has(input:focus-visible) { outline: 3px solid var(--blue); outline-offset: 2px; }
+  .form-acts { display: flex; justify-content: end; gap: 10px; flex-wrap: wrap; }
+  .form-msg { font-size: 14px; min-height: 1.5em; }
+
+  /* ---- detail drawer ---- */
+  dialog.drawer { position: fixed; inset: 0 0 0 auto; margin: 0; width: min(620px, 100%); max-width: 100%; height: 100dvh; max-height: 100dvh; border-radius: 0; border-width: 0 0 0 1px; }
+  dialog.drawer[open] { display: grid; grid-template-rows: minmax(0, auto) auto minmax(0, 1fr); }
+  .drawer .head { max-height: 52dvh; overflow: auto; padding: 18px 22px 14px; border-bottom: 1px solid var(--rule); display: grid; gap: 10px; }
+  .drawer .head h2 { overflow-wrap: anywhere; font-size: 20px; margin: 0; line-height: 1.25; padding-right: 40px; }
+  .drawer .close { position: absolute; top: 12px; right: 14px; border: 0; background: none; color: var(--ink); font-size: 22px; cursor: pointer; line-height: 1; padding: 4px 8px; min-height: 40px; min-width: 40px; }
+  .d-status { display: flex; align-items: center; gap: 8px; font-weight: 650; padding-right: 40px; flex-wrap: wrap; }
+  .d-status .row-sub { grid-column: auto; font-weight: 400; font-size: 13.5px; }
+  .d-track { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px; }
+  .d-track li { border-top: 4px solid var(--rule-2); padding-top: 6px; font-size: 12.5px; color: var(--ink-3); overflow-wrap: anywhere; }
+  .d-track li.past { border-top-color: var(--ink-3); color: var(--ink-2); }
+  .d-track li.now { border-top-color: var(--blue); color: var(--ink); font-weight: 650; }
+  .d-track[data-s="queued"] li.now { border-top-color: var(--steel); }
+  .d-track[data-s="ready"] li.now, .d-track[data-s="merging"] li.now { border-top-color: var(--amber); }
+  .d-track[data-s="done"] li.now { border-top-color: var(--green); }
+  .facts { display: grid; grid-template-columns: minmax(0, 104px) minmax(0, 1fr); gap: 4px 14px; font-size: 14px; margin: 0; }
+  .facts dt { color: var(--ink-2); overflow-wrap: anywhere; }
+  .facts dd { margin: 0; overflow-wrap: anywhere; }
+  .drawer .acts { display: flex; gap: 8px; flex-wrap: wrap; padding: 12px 22px; border-bottom: 1px solid var(--rule); }
+  .drawer .acts:empty { display: none; }
+  .drawer .body { overflow: auto; padding: 16px 22px 30px; display: grid; gap: 18px; align-content: start; }
+  .drawer .body > details > summary { cursor: pointer; font-weight: 650; font-size: 14px; }
+  .drawer .body > details > *:not(summary) { margin-top: 8px; }
+  .callout { border-radius: var(--r-sm); padding: 10px 12px; font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .callout.amber { background: var(--amber-wash); color: var(--on-amber-wash); border-left: 4px solid var(--amber); }
+  .callout.red { background: var(--red-wash); border-left: 4px solid var(--red); }
+  .callout.plain { background: var(--panel-2); border: 1px solid var(--rule); }
+  .files { margin: 0; padding-left: 18px; font: 12.5px/1.6 var(--mono); overflow-wrap: anywhere; }
+  .history { list-style: none; margin: 0; padding: 0; font-size: 13.5px; }
+  .history li { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; padding: 4px 0; }
+  .history time { color: var(--ink-3); font-size: 12.5px; font-variant-numeric: tabular-nums; white-space: nowrap; padding-top: 1px; min-width: 44px; }
+  .history span { overflow-wrap: anywhere; }
+  .redirect, .scope-edit { display: grid; gap: 6px; }
+  .redirect label, .scope-edit label { font-weight: 650; font-size: 14px; }
+  .scope-edit input { width: 100%; border: 1px solid var(--rule-2); border-radius: var(--r-sm); padding: 9px 11px; background: var(--panel-2); color: var(--ink); font-family: var(--mono); font-size: 13px; min-height: 38px; }
+  .redirect textarea { min-height: 64px; resize: vertical; }
+  pre.log { margin: 0; background: var(--log-bg); color: var(--log-ink); border-radius: var(--r-sm); padding: 12px 14px; font: 12.5px/1.55 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 46vh; overflow: auto; }
+  code.cmd { display: block; font: 12.5px/1.5 var(--mono); background: var(--panel-2); border: 1px solid var(--rule); border-radius: var(--r-sm); padding: 8px 10px; overflow-wrap: anywhere; user-select: all; }
+
+  /* ---- auth gate ---- */
+  .gate { max-width: 560px; width: calc(100% - 32px); margin: 12vh auto; background: var(--panel); border: 1px solid var(--rule); border-radius: var(--r-md); padding: 28px 30px; overflow-wrap: anywhere; }
+  .gate h1 { font-family: var(--sign); margin: 0 0 8px; }
+  .gate code { background: var(--panel-2); border: 1px solid var(--rule); padding: 2px 6px; border-radius: 3px; }
+
+  .toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); background: #16211F; color: #fff; border: 1px solid #3E504D; padding: 9px 16px; border-radius: var(--r-sm); font-size: 14px; z-index: 30; max-width: calc(100vw - 32px); }
+
+  @media (max-width: 1040px) {
+    .cols { grid-template-columns: minmax(0, 1fr); }
+    .choice { grid-template-columns: 1fr 1fr; }
+  }
+  @media (max-width: 860px) {
+    header.bar { padding: 12px 16px; gap: 12px; }
+    header.bar .spacer { display: none; }
+    .meter { min-width: 150px; flex: 1; }
+    .bar-acts { width: 100%; }
+    .bar-acts .btn { flex: 1; }
+    .bar select { max-width: 210px; }
+    main { padding: 16px 16px 48px; gap: 18px; }
+    .headline { font-size: 22px; }
+    .board-cols { display: none; }
+    .row { grid-template-columns: minmax(0, 1fr) auto auto; grid-template-areas: "status time cost" "main main main" "track track track"; gap: 6px 12px; }
+    .row-status { grid-area: status; }
+    .row-main { grid-area: main; }
+    .row .track { grid-area: track; }
+    .row-time { grid-area: time; }
+    .row-cost { grid-area: cost; }
+    .stage-name { font-size: 12px; }
     .registry-list { grid-template-columns: minmax(0, 1fr); }
     .need { grid-template-columns: minmax(0, 1fr); }
     .need .acts { grid-row: auto; justify-content: start; order: 3; }
-    .panel { padding: 16px; }
-    .meter { min-width: 150px; flex: 1; }
-    header.bar .spacer { display: none; }
-    .bar select { max-width: 210px; }
     .drawer .head, .drawer .acts, .drawer .body { padding-left: 16px; padding-right: 16px; }
-  }
-  .toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); background: var(--ink); color: #fff; padding: 9px 16px; border-radius: var(--r-sm); font-size: 14px; z-index: 30; }
-  .toast[hidden] { display: none; }
-  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
-
-  @media (max-width: 1000px) {
-    .line { grid-template-columns: 1fr; }
-    .line::before { left: 14px; right: auto; top: 10px; bottom: 10px; width: 4px; height: auto; background: repeating-linear-gradient(180deg, var(--steel) 0 14px, transparent 14px 20px); }
-    .station > header { grid-template-columns: auto auto 1fr; justify-items: start; align-items: center; gap: 10px; }
-    .station { padding-left: 0; }
-    .ticket, .empty-station { margin-left: 44px; width: calc(100% - 44px); }
-    .empty-station { text-align: left; }
-    .lower { grid-template-columns: 1fr; }
-    .choice { grid-template-columns: 1fr 1fr; }
-    header.bar { padding: 12px 16px; gap: 12px; }
-    main { padding: 18px 16px 48px; }
   }
 </style>
 </head>
@@ -266,11 +386,13 @@
     <div class="conn" id="conn" role="status"><i></i><span>Connecting</span></div>
     <div class="meter" id="meter" aria-live="polite">
       <div><b class="num" id="spent">$0</b> spent today <span id="budget-of"></span></div>
-      <div class="track"><div class="fill" id="fill"></div></div>
+      <div class="bar-track"><div class="fill" id="fill"></div></div>
       <small id="burn" hidden></small>
     </div>
-    <button class="btn ghost" id="pause-btn" type="button">Pause new work</button>
-    <button class="btn primary" id="open-add" type="button">Add work</button>
+    <div class="bar-acts">
+      <button class="btn ghost" id="pause-btn" type="button">Pause new work</button>
+      <button class="btn primary" id="open-add" type="button">Add work</button>
+    </div>
   </header>
   <main id="main">
     <section id="load-state" class="notice" role="status">
@@ -280,17 +402,21 @@
     <section id="setup" class="notice" hidden aria-label="Set up a project">
       <p>Start with a repository. Run <code>ym init</code> there, then <code>ym connect all</code> to connect supported coding clients. Return here and refresh.</p>
     </section>
-    <section id="pause-ask" hidden aria-labelledby="pa-h" class="pause-ask">
+    <section id="summary" aria-label="Status">
+      <p class="headline" id="summary-line" role="status">Loading your work…</p>
+      <p class="headline-sub" id="summary-sub"></p>
+    </section>
+    <section id="pause-ask" hidden aria-labelledby="pa-h" class="banner pause-ask">
       <div><b id="pa-h">Pause new work?</b> Coding agents can finish, or stop now and keep their work for later. Checks and reviews already running can finish.</div>
-      <div style="display:flex; gap:8px; flex-wrap:wrap">
+      <div class="acts">
         <button class="btn primary" id="pause-soft" type="button">Pause, let them finish</button>
         <button class="btn" id="pause-now" type="button">Pause and stop coding</button>
         <button class="btn" id="pause-cancel" type="button">Keep going</button>
       </div>
     </section>
-    <section id="paused" hidden role="status">
+    <section id="paused" class="banner" hidden role="status">
       <div><b>Paused</b> <span id="paused-by"></span> No new work starts until you resume.</div>
-      <div style="display:flex; gap:8px"><button class="btn go" id="resume-btn" type="button">Resume</button></div>
+      <div class="acts"><button class="btn go" id="resume-btn" type="button">Resume</button></div>
     </section>
     <section id="attention" hidden aria-labelledby="att-h">
       <h2 id="att-h">Needs you <small id="att-count"></small></h2>
@@ -300,28 +426,34 @@
       <h2 id="hu-h">Heads up</h2>
       <ul id="hu-list"></ul>
     </section>
-    <section aria-labelledby="agents-h">
-      <div class="section-head">
-        <h2 id="agents-h">Agents and processes</h2>
-        <label><span class="sr">Registry view</span><select id="registry-view"><option value="current">Current connections</option><option value="all">Include recent runs</option></select></label>
-      </div>
-      <p id="registry-status" class="muted" role="status">Loading connected agents…</p>
-      <div id="registry" class="registry-list"></div>
-      <details id="registry-coverage"><summary>What this view can see</summary>
-        <p class="muted">Managed: Yardmaster run records. Observed: connected native sessions. Stale: connection or ownership evidence is out of date. Unconnected: a machine reports an installed client, without a connected session. A heartbeat does not prove a process is alive.</p>
-        <p class="muted" id="coverage"></p>
-      </details>
-    </section>
-    <section aria-labelledby="board-h">
-      <h2 id="board-h">Work</h2>
-      <div class="line" id="board"></div>
-    </section>
-    <div class="lower">
-      <section class="panel" aria-labelledby="feed-h">
-        <h2 id="feed-h">What just happened</h2>
-        <ol class="feed" id="feed" aria-live="polite"></ol>
+    <div class="cols">
+      <div class="lead">
+      <section class="panel work" aria-labelledby="board-h">
+        <div class="section-head"><h2 id="board-h">Work</h2></div>
+        <ol class="stages" id="stages" aria-label="Tasks at each stage"></ol>
+        <div class="board" id="board"></div>
       </section>
-      <div style="display:grid; gap:28px">
+    <details class="panel connections" id="conn-details">
+      <summary><h2 id="agents-h">Agents and connections</h2><span class="muted" id="conn-summary"></span></summary>
+      <div class="connections-body">
+        <div class="section-head">
+          <p id="registry-status" class="muted" role="status">Loading connected agents…</p>
+          <label><span class="sr">Registry view</span><select id="registry-view"><option value="current">Current connections</option><option value="all">Include recent runs</option></select></label>
+        </div>
+        <div id="registry" class="registry-list"></div>
+        <details id="registry-coverage"><summary>What this view can see</summary>
+          <p class="muted">Managed: Yardmaster run records. Observed: connected native sessions. Stale: connection or ownership evidence is out of date. Unconnected: a machine reports an installed client, without a connected session. A heartbeat does not prove a process is alive.</p>
+          <p class="muted" id="coverage"></p>
+        </details>
+      </div>
+    </details>
+      </div>
+      <div class="rail">
+        <section class="panel" aria-labelledby="feed-h">
+          <h2 id="feed-h">What just happened</h2>
+          <ol class="feed" id="feed" aria-live="polite"></ol>
+          <button class="btn" id="feed-more" type="button" hidden></button>
+        </section>
         <section class="panel" aria-labelledby="mach-h">
           <h2 id="mach-h">Machines</h2>
           <div class="machines" id="machines"></div>
@@ -331,7 +463,7 @@
           <h2 id="clean-h">Cleanup</h2>
           <p class="muted">Finished worktrees, merged branches and expired reservations are removed. Review the plan first. Changed or unmerged work is kept when the hub cannot confirm it is safe to remove.</p>
           <div id="clean"></div>
-          <div style="display:flex; gap:8px; flex-wrap:wrap"><button class="btn" id="clean-preview" type="button">Check what can be removed</button><button class="btn go" id="clean-run" type="button" hidden>Clean up now</button></div>
+          <div class="registry-actions"><button class="btn" id="clean-preview" type="button">Check what can be removed</button><button class="btn go" id="clean-run" type="button" hidden>Clean up now</button></div>
         </section>
       </div>
     </div>
@@ -342,7 +474,7 @@
     <form class="add" id="add-form" method="dialog">
       <h2 id="add-h">Add work</h2>
       <label>What should be done?
-        <small>Write it like you would to a colleague. Mention files if you know them.</small>
+        <small>Write it like you would to a colleague. The first sentence becomes the task's name.</small>
         <textarea name="text" required placeholder="Add a dark mode toggle to the settings page and remember the choice"></textarea>
       </label>
       <label>Files it will change <small>Optional. Separate with commas, for example src/settings/**, README.md</small>
@@ -369,7 +501,9 @@
   <dialog class="drawer" id="drawer" aria-labelledby="d-title">
     <div class="head">
       <button class="close" id="d-close" type="button" aria-label="Close details">×</button>
+      <div class="d-status" id="d-status"></div>
       <h2 id="d-title"></h2>
+      <ol class="d-track" id="d-track" hidden></ol>
       <dl class="facts" id="d-facts"></dl>
     </div>
     <div class="acts" id="d-acts"></div>
@@ -379,13 +513,16 @@
 
 <script>
 (() => {
-  const STATIONS = [
+  const STAGES = [
     { s: 'queued', name: 'Waiting', match: ['queued'] },
     { s: 'running', name: 'Working', match: ['running'] },
     { s: 'verifying', name: 'Checking', match: ['verifying'] },
     { s: 'ready', name: 'Ready to merge', match: ['ready', 'merging'] },
     { s: 'done', name: 'Done', match: ['done'] },
   ];
+  const stageIndex = (status) => STAGES.findIndex((st) => st.match.includes(status));
+  // What the latest run is doing inside a stage, in plain words. Unknown phases show nothing.
+  const PHASE = { prepare: 'Setting up', setup: 'Installing dependencies', route: 'Choosing a model', agent: 'Coding', collect: 'Saving its work', verify: 'Running checks', review_wait: 'In review', review: 'In review' };
   const LABEL = { queued: 'Waiting', running: 'Working', verifying: 'Checking', ready: 'Ready to merge', merging: 'Merging', done: 'Done', needs_human: 'Needs you', failed: 'Failed', canceled: 'Canceled' };
 
   // The key arrives in the URL fragment (never sent to servers or logs), then lives in localStorage.
@@ -411,8 +548,51 @@
   };
   const usd = (n) => !n ? '$0' : n < 0.01 ? '<$0.01' : '$' + n.toFixed(2);
   const clip = (s, n) => !s ? '' : s.length > n ? s.slice(0, n - 1) + '…' : s;
-  const time = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-
+  const time = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  // Requests are written as paragraphs; a row needs the gist. Mirrors taskTitle() in src/text.ts for
+  // titles stored by older hubs and CLIs, which kept up to 200 characters of the request.
+  const shortTitle = (s, max = 96) => {
+    const line = String(s || '').replace(/\s+/g, ' ').trim();
+    for (const stop of line.matchAll(/[.!?](?=\s+[A-Z0-9"'`(\[])/g)) {
+      if (line.slice(0, stop.index).includes(' ')) return clip(line.slice(0, stop.index), max);
+    }
+    return clip(line, max);
+  };
+  const shortQuoted = (message) => String(message || '').replace(/"([^"]{97,})"/g, (_, title) => '"' + shortTitle(title) + '"');
+  const elapsed = (from) => {
+    if (!from || from > Date.now()) return '';
+    const m = Math.floor((Date.now() - from) / 60000);
+    return m < 1 ? 'under 1m' : m < 60 ? m + 'm' : Math.floor(m / 60) + 'h ' + String(m % 60).padStart(2, '0') + 'm';
+  };
+  // Agent activity arrives as "<kind> <text>" with absolute worktree paths and environment prefixes.
+  const tidyPaths = (text, worktree) => {
+    // Only the step into the task's own working copy is noise; "cd packages/web && npm test" says where it ran.
+    // A quoted path may hold spaces; an unquoted one cannot. Either must end at the task's own folder.
+    const step = (quoted, bare) => new RegExp('cd (?:"' + quoted('"') + '/?"|\'' + quoted('\'') + '/?\'|' + bare + '/?)[ \\t]*(?:;|&&)[ \\t]*', 'g');
+    const entered = String(text || '').replace(step((quote) => '/[^' + quote + '\\n]*/t-[0-9a-f]{8,}', '/[^\\s"\']*/t-[0-9a-f]{8,}'), '');
+    const exact = worktree ? worktree.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : '';
+    const plain = (worktree ? entered.replace(step(() => exact, exact), '') : entered)
+      .replace(/(?:export )?PATH="[^"\n]*(?:"|…)[ \t]*;?[ \t]*/g, '');
+    const local = worktree ? plain.split(worktree + '/').join('').split(worktree).join('its working copy') : plain;
+    return local.replace(/\/[^\s"']*\/t-[0-9a-f]{8,}(\/?)/g, (_, slash) => slash ? '' : 'its working copy');
+  };
+  const tidyActivity = (line) => {
+    const text = tidyPaths(line).trim();
+    const [kind, ...rest] = text.split(' ');
+    const body = rest.join(' ');
+    if (kind === 'says') return body;
+    if (kind === 'tool') return /^Bash\s*…?$/.test(body) ? 'Running a command' : body.replace(/^Bash /, 'Running: ');
+    if (kind === 'edit') return 'Editing ' + body.replace(/^(?:Write|Edit|MultiEdit) /, '');
+    if (kind === 'start') return 'Started ' + body.replace(/ in\s*$/, '');
+    return text;
+  };
+  const phaseOf = (t) => {
+    if (t.status === 'ready') return t.needsApproval || t.attention ? 'Waiting for your approval' : '';
+    // A phase describes live work; a stopped or finished task keeps its last one only as history.
+    if (t.status !== 'running' && t.status !== 'verifying') return '';
+    return PHASE[String(t.phase || '').split(':')[0]] || '';
+  };
+  const costOf = (cost, budget) => cost ? usd(cost) + (budget ? ' of $' + budget : '') : '';
   let projectId = localStorage.getItem('ym-project') || '';
   let board = null;
   let openTask = null;
@@ -432,6 +612,8 @@
   let drawerOrigin = null;
   let detailSequence = 0;
   const drafts = new Map();
+  const sectionOpen = new Map();
+  const scopeDrafts = new Map();
   const unknown = (value) => value === null || value === undefined || value === '' ? 'Unknown' : String(value);
   const age = (at) => {
     if (at === null || at === undefined || at > Date.now()) return 'age unknown';
@@ -503,7 +685,7 @@
     $('pause-btn').hidden = p.paused;
     const ws = board.warnings;
     $('headsup').hidden = !ws.length;
-    $('hu-list').replaceChildren(...ws.map((w) => el('li', {}, w.taskId ? el('a', { href: '#', onclick: (e) => { e.preventDefault(); showTask(w.taskId); } }, w.message) : w.message)));
+    $('hu-list').replaceChildren(...ws.map((w) => el('li', {}, w.taskId ? el('a', { href: '#', onclick: (e) => { e.preventDefault(); showTask(w.taskId); } }, shortQuoted(w.message)) : shortQuoted(w.message))));
     const burn = $('burn');
     burn.hidden = !board.budgetRunsOutAt;
     if (board.budgetRunsOutAt) burn.textContent = 'At this pace it runs out around ' + new Date(board.budgetRunsOutAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -546,40 +728,82 @@
     box.hidden = !board.attention.length;
     $('att-count').textContent = board.attention.length > 1 ? `${board.attention.length} items` : '';
     $('att-list').replaceChildren(...board.attention.map((a) => el('div', { class: 'need' },
-      el('div', { class: 't' }, a.title),
-      el('div', { class: 'acts' }, actionButtons(a, true)),
+      el('div', { class: 't' }, shortTitle(a.title)),
+      el('div', { class: 'acts' }, actionButtons({ ...a, attention: a.why }, true)),
       el('div', { class: 'why' }, clip(a.why, 420)),
     )));
   }
 
-  function ticket(t) {
+  // One plain sentence first: what is happening, and whether anything waits on the owner.
+  function renderSummary() {
+    const n = (count, one, many) => count + ' ' + (count === 1 ? one : many);
+    // A task waiting for approval is in both lists; count it once, as needing the owner.
+    const asked = new Set(board.attention.map((a) => a.id));
+    const active = board.active.filter((t) => !asked.has(t.id));
+    const moving = active.filter((t) => t.status !== 'queued').length;
+    const waiting = active.length - moving;
+    const needs = board.attention.length;
+    const parts = [];
+    if (needs) parts.push(n(needs, 'task needs', 'tasks need') + ' you.');
+    if (moving) parts.push(n(moving, 'task', 'tasks') + ' in progress.');
+    if (waiting) parts.push(n(waiting, 'task', 'tasks') + ' waiting' + (board.paused.paused ? ' while paused.' : '.'));
+    if (!parts.length) parts.push(!board.projects.length ? 'No project yet.' : board.paused.paused ? 'Paused. Nothing is waiting.' : 'All quiet. Nothing is running.');
+    else if (!needs) parts.push('Nothing needs you.');
+    $('summary-line').textContent = parts.join(' ');
+    const names = board.projects.map((p) => p.name);
+    const scope = projectId ? names.filter((_, i) => board.projects[i].id === projectId) : names;
+    $('summary-sub').textContent = [scope.length ? clip(scope.join(', '), 80) : '', board.recentDone.length ? n(board.recentDone.length, 'task', 'tasks') + ' finished recently' : ''].filter(Boolean).join(' · ');
+  }
+
+  function track(status) {
+    const at = stageIndex(status);
+    return el('span', { class: 'track', 'aria-hidden': 'true', 'data-s': status }, STAGES.map((_, i) => el('i', { class: i < at ? 'past' : i === at ? 'now' : '' })));
+  }
+
+  function row(t) {
     const who = t.assignee && t.assignee.startsWith('session:') ? t.assignee.slice(8) + ' (in its own session)' : t.agent;
-    const detail = t.waiting || t.lastActivity || t.summary || '';
-    return el('button', { class: 'ticket', type: 'button', 'data-s': t.status, 'data-focus': 'task:' + t.id, onclick: () => showTask(t.id), 'aria-label': `${t.title}, ${LABEL[t.status] || t.status}` },
-      el('span', { class: 't' }, clip(t.title, 90)),
-      el('span', { class: 'm' }, el('span', { class: 'lamp', 'aria-hidden': 'true' }), who ? el('span', {}, who) : null, t.cost ? el('span', { class: 'num' }, usd(t.cost)) : null, t.status === 'merging' ? el('span', {}, 'merging') : null),
-      detail ? el('span', { class: 'd' }, clip(detail, 120)) : null,
-    );
+    const label = LABEL[t.status] || t.status;
+    const sub = phaseOf(t);
+    const detail = t.status === 'running' ? tidyActivity(t.lastActivity) : t.waiting || t.summary || '';
+    const agent = who ? who + (t.model && t.status !== 'done' ? ' · ' + t.model : '') : '';
+    const when = t.status === 'done' ? (t.finishedAt ? age(t.finishedAt) : '') : t.status === 'queued' ? '' : t.status === 'ready' && t.readyAt ? age(t.readyAt) : elapsed(t.startedAt);
+    return el('li', {}, el('button', { class: 'row', type: 'button', 'data-s': t.status, 'data-focus': 'task:' + t.id, onclick: () => showTask(t.id), 'aria-label': `${shortTitle(t.title)}, ${label}${sub ? ', ' + sub : ''}` },
+      el('span', { class: 'row-status' }, el('span', { class: 'lamp', 'aria-hidden': 'true' }), el('span', { class: 'row-label' }, label), sub ? el('span', { class: 'row-sub' }, sub) : null),
+      el('span', { class: 'row-main' }, el('span', { class: 't' }, shortTitle(t.title)),
+        agent || detail ? el('span', { class: 'd' }, agent ? el('span', { class: 'who' }, agent) : null, detail ? el('span', { class: 'what' }, clip(detail, 140)) : null) : null),
+      track(t.status),
+      el('span', { class: 'row-time num' }, when),
+      el('span', { class: 'row-cost num' }, costOf(t.cost, t.status === 'done' ? null : t.budget)),
+    ));
   }
 
   function renderBoard() {
     const items = [...board.active, ...board.recentDone.map((d) => ({ ...d, status: 'done' }))];
+    $('stages').replaceChildren(...STAGES.map((st) => {
+      const count = items.filter((t) => st.match.includes(t.status)).length;
+      return el('li', { class: 'stage', 'data-s': st.s, 'data-n': count ? 'some' : 'none' },
+        el('span', { class: 'stop', 'aria-hidden': 'true' }), el('span', { class: 'stage-name' }, st.name), el('span', { class: 'stage-count num' }, String(count)));
+    }));
     const root = $('board');
-    if (!items.length && !board.attention.length) {
-      root.replaceChildren(...STATIONS.map(st => stationHead(st, 0)), el('p', { class: 'board-empty' }, 'Nothing queued. Choose “Add work”, or ask your coding agent to split a job into parallel tasks with Yardmaster.'));
+    if (!items.length) {
+      root.replaceChildren(board.attention.length
+        ? el('p', { class: 'board-note' }, 'Nothing else is in progress. The items above are waiting for you.')
+        : el('div', { class: 'board-empty' },
+          el('strong', {}, 'Nothing queued'),
+          el('p', {}, 'Choose “Add work”, or ask your coding agent to split a job into parallel tasks with Yardmaster.'),
+          el('p', {}, 'Each task gets its own working copy and branch, so agents never edit the same files at once.'),
+          el('button', { class: 'btn primary', type: 'button', 'data-focus': 'empty-add', text: 'Add work', onclick: openAdd })));
       return;
     }
-    root.replaceChildren(...STATIONS.map((st) => {
-      const here = items.filter((t) => st.match.includes(t.status));
-      const node = stationHead(st, here.length);
-      node.append(...(here.length ? here.map(ticket) : [el('div', { class: 'empty-station' }, st.s === 'queued' ? 'No waiting work' : 'Empty')]));
-      return node;
-    }));
-  }
-
-  function stationHead(st, n) {
-    return el('div', { class: 'station', 'data-s': st.s },
-      el('header', {}, el('span', { class: 'stop', 'aria-hidden': 'true' }), el('span', {}, st.name), el('em', { class: 'num' }, n === undefined ? '' : String(n))));
+    const order = ['ready', 'merging', 'verifying', 'running'];
+    const groups = [
+      ['In progress', items.filter((t) => order.includes(t.status)).sort((a, b) => order.indexOf(a.status) - order.indexOf(b.status))],
+      ['Up next', items.filter((t) => t.status === 'queued')],
+      ['Finished', items.filter((t) => t.status === 'done')],
+    ].filter(([, list]) => list.length);
+    root.replaceChildren(
+      el('div', { class: 'board-cols', 'aria-hidden': 'true' }, ['Status', 'Task', 'Stage', 'Time', 'Cost'].map((name) => el('span', {}, name))),
+      ...groups.map(([name, list]) => el('div', { class: 'group' }, el('h3', {}, name + ' · ' + list.length), el('ul', { class: 'rows' }, list.map(row)))));
   }
 
   function diskBar(m) {
@@ -589,7 +813,7 @@
     const pct = Math.min(100, (used / Math.max(used + free, 0.001)) * 100);
     return el('div', { class: 'disk' + (low ? ' low' : ''), title: 'Disk used by Yardmaster worktrees vs free space' },
       el('span', {}, `${free.toFixed(1)} GB free · worktrees ${used < 1 ? Math.round(used * 1000) + ' MB' : used.toFixed(1) + ' GB'}${low ? ' · new work is on hold' : ''}`),
-      el('div', { class: 'track' }, el('div', { class: 'fill', style: `width:${Math.max(2, pct)}%` })));
+      el('div', { class: 'track-bar' }, el('div', { class: 'fill', style: `width:${Math.max(2, pct)}%` })));
   }
 
   function renderMachines() {
@@ -647,12 +871,13 @@
   function showEntry(id, quiet = false) {
     const entry = registry?.entries.find(e => e.id === id);
     if (!entry) {
-      if (quiet) { $('d-acts').replaceChildren(); $('d-facts').replaceChildren(); $('d-title').textContent = 'Record no longer reported'; $('d-body').replaceChildren(el('p', {}, 'This record is no longer in the latest registry snapshot. Close details and refresh.')); }
+      if (quiet) { $('d-acts').replaceChildren(); $('d-facts').replaceChildren(); $('d-status').replaceChildren(); $('d-track').hidden = true; $('d-title').textContent = 'Record no longer reported'; $('d-body').replaceChildren(el('p', {}, 'This record is no longer in the latest registry snapshot. Close details and refresh.')); }
       return;
     }
     saveDraft(); openTask = null; openEntry = id; ++detailSequence; clearInterval(logTimer);
     const saved = captureFocus($('drawer'));
     $('d-title').textContent = unknown(entry.agent) + ' · ' + entry.state;
+    $('d-status').replaceChildren(); $('d-track').hidden = true;
     renderFacts(entryFacts(entry));
     const actions = [
       entry.taskId && entry.capabilities?.inspect ? el('button', { class: 'btn', type: 'button', 'data-focus': 'open-task:' + entry.taskId, text: 'Open exact task', onclick: () => showTask(entry.taskId) }) : null,
@@ -663,19 +888,29 @@
     if (!quiet) presentDrawer();
     restoreFocus(saved, $('drawer'));
   }
+  // Connection records are diagnostics: folded by default, opened once when something there needs a look.
+  let registryAlerted = false;
+  function renderRegistrySummary(entries) {
+    const trouble = !!registryError || entries.some(e => e.state === 'stale');
+    if (trouble && !registryAlerted) $('conn-details').open = true;
+    registryAlerted = trouble;
+    const shown = entries.slice(0, 6).map(e => unknown(e.agent) + ' ' + e.state);
+    $('conn-summary').textContent = registryError ? 'Could not refresh' : !registry ? '' : entries.length ? shown.join(' · ') + (entries.length > 6 ? ' · ' + (entries.length - 6) + ' more' : '') : 'None reported';
+  }
   function renderRegistry() {
     const root = $('registry');
     const status = $('registry-status');
-    if (!registry) { root.replaceChildren(); status.textContent = registryError ? 'Agent view unavailable. ' + registryError + ' Use Refresh now to retry.' : 'Loading connected agents…'; return; }
+    if (!registry) { root.replaceChildren(); renderRegistrySummary([]); status.textContent = registryError ? 'Agent view unavailable. ' + registryError + ' Use Refresh now to retry.' : 'Loading connected agents…'; return; }
     const entries = registry.entries.filter(e => $('registry-view').value === 'all' || e.source !== 'run' || e.status === 'running' || e.exitUnconfirmed === true || ['lost', 'cleanup_failed'].includes(e.status) || (e.utilityChildren || []).length > 0);
-    const taskNames = new Map([...(board?.active || []), ...(board?.attention || []), ...(board?.recentDone || [])].map(t => [t.id, t.title]));
+    renderRegistrySummary(entries);
+    const taskNames = new Map([...(board?.active || []), ...(board?.attention || []), ...(board?.recentDone || [])].map(t => [t.id, shortTitle(t.title)]));
     status.textContent = registryError ? 'Agent view could not refresh. Showing snapshot from ' + age(registryReceivedAt) + '. Use Refresh now to retry.' : 'Snapshot received ' + age(registryReceivedAt) + '. ' + (entries.length ? 'Only connected or machine-reported clients are visible.' : 'No connected agents reported. Run “ym connect all” in an initialized repository, then refresh.');
     root.replaceChildren(...entries.map(e => el('article', { class: 'registry-row', 'data-state': e.state },
       el('div', { class: 'registry-top' }, el('strong', {}, unknown(e.agent)), el('span', { class: 'registry-state' }, e.state)),
       el('p', {}, unknown(e.machineName || e.machineId) + (e.model ? ' · ' + e.model : '') + (e.role ? ' · ' + e.role : '')),
       el('p', { class: 'muted' }, unknown(e.status) + ' · ' + unknown(e.freshness) + ' · last seen ' + age(e.lastSeenAt)),
       e.taskId ? el('p', {}, clip(taskNames.get(e.taskId) || e.taskId, 120)) : null,
-      e.lastActivity ? el('p', { class: 'muted' }, clip(e.lastActivity, 150)) : null,
+      e.lastActivity ? el('p', { class: 'muted' }, clip(tidyActivity(e.lastActivity), 150)) : null,
       el('div', { class: 'registry-actions' }, el('button', { class: 'btn', type: 'button', 'data-focus': 'entry:' + e.id, 'aria-label': 'Inspect ' + unknown(e.agent) + ' on ' + unknown(e.machineName || e.machineId), text: 'Inspect', onclick: () => showEntry(e.id) }),
         e.taskId && e.capabilities?.requestStop && !registryError ? el('button', { class: 'btn', type: 'button', 'data-focus': 'stop:' + e.id, text: 'Request stop', onclick: () => requestStop(e.taskId) }) : null),
     )));
@@ -707,7 +942,7 @@
       if (r.status === 'fulfilled') { registry = r.value; registryReceivedAt = Date.now(); }
       if (b.status === 'fulfilled') {
         board = b.value; boardReceivedAt = Date.now();
-        renderProjects(); renderMeter(); renderSupervision(); renderAttention(); renderBoard(); renderMachines();
+        renderProjects(); renderMeter(); renderSupervision(); renderSummary(); renderAttention(); renderBoard(); renderMachines();
       }
       renderRegistry();
       const errors = b.status === 'rejected' || r.status === 'rejected';
@@ -728,9 +963,18 @@
     if (authFailed) return;
     for (const e of evs) if (!projectId || !e.project_id || e.project_id === projectId) feed.unshift(e);
     feed.splice(150);
-    $('feed').replaceChildren(...feed.map((e) => el('li', { 'data-l': e.level },
+    renderFeed();
+  }
+  // The latest few events; older ones open in place rather than in a scroll box inside the page.
+  const FEED_RECENT = 8;
+  let feedAll = false;
+  function renderFeed() {
+    const more = $('feed-more');
+    more.hidden = feed.length <= FEED_RECENT;
+    more.textContent = feedAll ? 'Show fewer' : `Show ${feed.length - FEED_RECENT} older`;
+    $('feed').replaceChildren(...(feedAll ? feed : feed.slice(0, FEED_RECENT)).map((e) => el('li', { 'data-l': e.level },
       el('time', { datetime: new Date(e.ts).toISOString() }, time(e.ts)),
-      el('span', {}, e.task_id ? el('a', { href: '#', onclick: (ev) => { ev.preventDefault(); showTask(e.task_id); } }, e.message) : e.message),
+      el('span', {}, e.task_id ? el('a', { href: '#', onclick: (ev) => { ev.preventDefault(); showTask(e.task_id); } }, shortQuoted(e.message)) : shortQuoted(e.message)),
     )));
   }
 
@@ -785,6 +1029,9 @@
   function saveDraft() {
     const note = $('d-note');
     if (note) drafts.set(note.dataset.task, { value: note.value, start: note.selectionStart, end: note.selectionEnd, direction: note.selectionDirection });
+    const scope = $('d-scope');
+    if (scope && scope.value !== scope.getAttribute('value')) scopeDrafts.set(scope.dataset.task, scope.value);
+    else if (scope) scopeDrafts.delete(scope.dataset.task);
   }
   async function showTask(id, quiet) {
     saveDraft();
@@ -798,18 +1045,23 @@
     const savedFocus = captureFocus(drawer);
     const t = d.task;
     const run = [...d.runs].reverse().find((r) => r.role !== 'review') || d.runs[d.runs.length - 1];
-    $('d-title').textContent = t.title;
+    const sub = phaseOf({ ...t, phase: run && run.phase });
+    $('d-title').textContent = shortTitle(t.title);
+    $('d-status').setAttribute('data-s', t.status);
+    $('d-status').replaceChildren(...[el('span', { class: 'lamp', 'aria-hidden': 'true' }), el('span', {}, d.label), sub ? el('span', { class: 'row-sub' }, sub) : null].filter(Boolean));
+    const at = stageIndex(t.status);
+    $('d-track').hidden = at < 0;
+    $('d-track').setAttribute('data-s', t.status);
+    $('d-track').replaceChildren(...STAGES.map((st, i) => el('li', { class: i < at ? 'past' : i === at ? 'now' : '', 'aria-current': i === at ? 'step' : null }, st.name)));
+    const clock = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     const facts = [
-      ['Task', t.id],
-      ['Status', d.label],
-      t.head_sha ? ['Artifact SHA', t.head_sha] : null,
       d.waiting ? ['Waiting on', d.waiting] : null,
-      ['Agent', run ? `${run.agent}${run.model ? ' · ' + run.model : ''}` : t.agent || 'picked automatically'],
+      ['Agent', run ? [run.agent, run.model, run.effort ? run.effort + ' effort' : ''].filter(Boolean).join(' · ') : t.agent || 'Picked when it starts'],
+      t.started_at ? ['Time', `Started ${clock(t.started_at)}` + (t.finished_at ? `, finished ${clock(t.finished_at)}` : t.status === 'ready' && t.ready_at ? `, ready ${age(t.ready_at)}` : t.status === 'running' || t.status === 'verifying' ? ` · ${elapsed(t.started_at)} so far` : '')] : null,
+      ['Cost', (costOf(t.cost_usd, t.budget_usd) || '$0' + (t.budget_usd ? ' of $' + t.budget_usd : '')) + (run && run.usage_provenance === 'unknown' ? ' (usage unknown)' : run && run.cost_estimated ? ' (estimated)' : '')],
       ['Attempt', `${t.attempts} of ${t.max_attempts}`],
-      ['Cost', usd(t.cost_usd) + (run && run.usage_provenance === 'unknown' ? ' (usage unknown)' : run && run.cost_estimated ? ' (estimated)' : '')],
       t.scope.length ? ['Files', t.scope.join(', ') + (t.scope_inferred ? ' (guessed from the request)' : '')] : null,
-      d.deps.length ? ['After', d.deps.map((x) => `${x.title} (${LABEL[x.status]})`).join(', ')] : null,
-      t.branch ? ['Branch', t.branch] : null,
+      d.deps.length ? ['After', d.deps.map((x) => `${shortTitle(x.title, 60)} (${LABEL[x.status]})`).join(', ')] : null,
       t.policies && t.policies.length ? ['Rules', t.policies.join(', ')] : null,
       t.race_group ? ['Race', 'Several agents are trying this; the first verified result wins'] : null,
       (() => {
@@ -817,14 +1069,29 @@
         return reviews.length ? ['Reviews', reviews.join(' · ')] : null;
       })(),
       run && run.lessons && run.lessons.length ? ['Briefed with', `${run.lessons.length} lesson(s) from earlier work`] : null,
+      ['Task', t.id],
     ].filter(Boolean);
     renderFacts(facts);
     $('d-acts').replaceChildren(...actionButtons(t, false));
+    // Disclosures and the log are rebuilt on every snapshot; keep what the owner opened and where they scrolled.
+    const fold = (key, title, openByDefault, ...kids) => {
+      const state = id + ':' + key;
+      // The key lets focus return to this summary after a snapshot rebuilds the detail under the keyboard.
+      const node = el('details', { open: sectionOpen.has(state) ? sectionOpen.get(state) : openByDefault }, el('summary', { 'data-focus': 'fold:' + state }, title), ...kids);
+      node.addEventListener('toggle', () => sectionOpen.set(state, node.open));
+      return node;
+    };
+    const oldLog = $('d-log');
+    const keptLog = oldLog && oldLog.dataset.task === id ? { text: oldLog.textContent, top: oldLog.scrollTop, atBottom: oldLog.scrollHeight - oldLog.scrollTop - oldLog.clientHeight < 30 } : null;
     const body = [];
     if (t.attention) body.push(el('div', { class: 'callout amber' }, t.attention));
     else if (t.last_error && t.status !== 'done') body.push(el('div', { class: 'callout red' }, clip(t.last_error, 1500)));
     if (t.summary) body.push(el('div', {}, el('h4', {}, 'What the agent says it did'), el('div', { class: 'callout plain' }, t.summary)));
-    if (t.prompt && t.prompt !== t.title) body.push(el('div', {}, el('h4', {}, 'Request'), el('div', { class: 'callout plain' }, clip(t.prompt, 1200))));
+    if (['queued', 'running', 'verifying', 'needs_human', 'failed'].includes(t.status)) body.push(scopeEditor(t, fold));
+    const touched = run && run.touched ? run.touched : [];
+    if (touched.length) body.push(fold('files', `Files changed${['done', 'ready', 'merging'].includes(t.status) ? '' : ' so far'} · ${touched.length}`, true,
+      el('ul', { class: 'files' }, touched.slice(0, 40).map((file) => el('li', {}, file)), touched.length > 40 ? el('li', {}, `and ${touched.length - 40} more`) : null)));
+    if (t.prompt && t.prompt !== shortTitle(t.title)) body.push(fold('request', 'Full request', !t.summary, el('div', { class: 'callout plain' }, clip(t.prompt, 4000))));
     if (!['done', 'canceled', 'failed'].includes(t.status)) {
       const ta = el('textarea', { id: 'd-note', 'data-task': id, maxlength: '4000', placeholder: 'For example: use the existing date helper instead of adding a library' });
       const send = el('button', { class: 'btn', type: 'button', 'data-focus': 'guidance:' + id, text: t.status === 'running' ? 'Redirect now' : 'Add guidance', onclick: async () => {
@@ -834,9 +1101,22 @@
       } });
       body.push(el('div', { class: 'redirect' }, el('label', { for: 'd-note' }, 'Guidance for this task'), ta, el('div', {}, send)));
     }
-    const pre = el('pre', { class: 'log', id: 'd-log', 'aria-label': 'Activity log' }, 'Loading activity…');
+    const pre = el('pre', { class: 'log', id: 'd-log', 'data-task': id, tabindex: '0', 'aria-label': 'Activity log' }, keptLog ? keptLog.text : 'Loading activity…');
     body.push(el('div', {}, el('h4', {}, 'Activity'), pre));
+    const history = (d.events || []).slice(-12).reverse();
+    if (history.length) body.push(fold('history', 'History', false, el('ol', { class: 'history' }, history.map((e) => el('li', {}, el('time', { datetime: new Date(e.ts).toISOString() }, clock(e.ts)), el('span', {}, shortQuoted(e.message)))))));
+    const technical = [
+      t.branch ? ['Branch', t.branch] : null,
+      t.head_sha ? ['Artifact SHA', t.head_sha] : null,
+      t.base_sha ? ['Started from', t.base_sha] : null,
+      t.worktree ? ['Working copy', t.worktree] : null,
+    ].filter(Boolean);
+    if (technical.length) body.push(fold('technical', 'Technical details', false,
+      el('dl', { class: 'facts' }, technical.flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])),
+      t.branch && t.base_sha ? el('p', { class: 'muted' }, 'To read the exact change, run this in your repository:') : null,
+      t.branch && t.base_sha ? el('code', { class: 'cmd' }, `git diff ${t.base_sha.slice(0, 12)}...${t.branch}`) : null));
     $('d-body').replaceChildren(...body);
+    if (keptLog) pre.scrollTop = keptLog.atBottom ? pre.scrollHeight : keptLog.top;
     const next = $('d-note');
     const draft = drafts.get(id);
     if (next && draft) { next.value = draft.value; next.setSelectionRange(draft.start, draft.end, draft.direction || 'none'); }
@@ -850,7 +1130,7 @@
         const text = await rpc('task.logs', { id, lines: 300 });
         const node = $('d-log'); if (!node || target !== node || openTask !== id) return;
         const atBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 30;
-        node.textContent = text || 'No activity yet.';
+        node.textContent = tidyPaths(text, t.worktree) || 'No activity yet.';
         if (atBottom) node.scrollTop = node.scrollHeight;
       } catch { if (target?.isConnected) target.textContent = 'Activity unavailable. Close and reopen details to retry.'; }
       finally { logInFlight = false; }
@@ -858,6 +1138,61 @@
     loadLog();
     clearInterval(logTimer);
     logTimer = setInterval(loadLog, 2000);
+  }
+  // Allowed files: the owner's answer when work was stopped for touching files outside its list.
+  // Same matching as globToRegExp in src/scope.ts, so the page agrees with the hub about what a list allows.
+  const escapeRe = (text) => text.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+  const globToRegExp = (glob) => {
+    let re = '';
+    for (let i = 0; i < glob.length; i++) {
+      const c = glob[i];
+      if (c === '*' && glob[i + 1] === '*') { const slash = glob[i + 2] === '/'; re += slash ? '(?:.*/)?' : '.*'; i += slash ? 2 : 1; }
+      else if (c === '*') re += '[^/]*';
+      else if (c === '?') re += '[^/]';
+      else if (c === '{' && glob.indexOf('}', i) !== -1) { const end = glob.indexOf('}', i); re += '(?:' + glob.slice(i + 1, end).split(',').map(escapeRe).join('|') + ')'; i = end; }
+      else re += escapeRe(c);
+    }
+    return new RegExp('^' + re + '(?:/.*)?$');
+  };
+  // Commas separate patterns except inside braces: src/{client,server}/** is one pattern.
+  const splitPatterns = (text) => {
+    const parts = []; let depth = 0, start = 0;
+    for (let i = 0; i < text.length; i++) {
+      if (text[i] === '{') depth++;
+      else if (text[i] === '}') depth = Math.max(0, depth - 1);
+      else if (text[i] === ',' && depth === 0) { parts.push(text.slice(start, i)); start = i + 1; }
+    }
+    return [...parts, text.slice(start)];
+  };
+  function scopeEditor(t, fold) {
+    const id = t.id;
+    const listed = (text) => [...new Set(splitPatterns(String(text)).map((part) => part.trim()).filter(Boolean))];
+    const rejected = /Changed files outside its declared scope: (.+?)\. Only change /.exec(t.last_error || '');
+    const allowed = t.scope.map(globToRegExp);
+    const outside = rejected ? listed(rejected[1].replace(/…$/, '')).filter((file) => !allowed.some((pattern) => pattern.test(file))) : [];
+    const input = el('input', { id: 'd-scope', type: 'text', 'data-task': id, autocomplete: 'off', spellcheck: 'false', 'aria-describedby': 'd-scope-help', value: t.scope.join(', ') });
+    if (scopeDrafts.has(id)) input.value = scopeDrafts.get(id);
+    const save = el('button', { class: 'btn', type: 'button', 'data-focus': 'scope-save:' + id, text: 'Save allowed files', onclick: async () => {
+      try {
+        await rpc('task.setScope', { id, scope: listed(input.value), by: 'dashboard' });
+        // The saved list is now the baseline, so the rebuild below does not treat it as an unsaved draft.
+        scopeDrafts.delete(id); input.setAttribute('value', input.value);
+        toast(t.status === 'queued' ? 'Saved for when it starts.' : t.status === 'running' || t.status === 'verifying' ? 'Saved. The current attempt keeps its old list; this applies from the next attempt.' : 'Saved. Choose “Try again” to rerun with this list.');
+        showTask(id, true);
+      } catch (e) { toast(e.message); }
+    } });
+    const add = outside.length ? el('button', { class: 'btn', type: 'button', 'data-focus': 'scope-add:' + id, text: outside.length === 1 ? 'Add it to the list' : 'Add them to the list', onclick: () => {
+      input.value = listed([input.value, ...outside].join(', ')).join(', ');
+      scopeDrafts.set(id, input.value);
+      input.focus();
+    } }) : null;
+    return fold('scope', 'Files it may change', outside.length > 0,
+      outside.length ? el('div', { class: 'callout amber' }, `It was stopped for changing ${outside.length === 1 ? 'a file' : outside.length + ' files'} outside this list${rejected && /…$/.test(rejected[1]) ? ' (more were not listed)' : ''}: ${outside.join(', ')}`) : null,
+      el('div', { class: 'scope-edit' },
+        el('label', { for: 'd-scope' }, 'Files this task may change'),
+        input,
+        el('small', { id: 'd-scope-help', class: 'muted' }, 'Separate with commas, for example src/settings/**, README.md. Leave empty for no declared list.'),
+        el('div', { class: 'registry-actions' }, add, save)));
   }
   function closeDrawer() {
     if ($('drawer').open) $('drawer').close();
@@ -872,31 +1207,36 @@
   $('d-close').addEventListener('click', closeDrawer);
   $('refresh-btn').addEventListener('click', () => refresh());
   $('registry-view').addEventListener('change', renderRegistry);
+  $('feed-more').addEventListener('click', () => { feedAll = !feedAll; renderFeed(); });
 
-  // Keep keyboard focus on visible controls even when a browser's native dialog
-  // traversal briefly sends the last Tab to the document body.
-  for (const dialog of [$('drawer'), $('add-dialog')]) dialog.addEventListener('keydown', event => {
+  // Keep keyboard focus on visible controls in the open dialog. Native traversal can send the last Tab to
+  // the document body, and a snapshot can remove the focused node; both would let Tab leave the dialog.
+  document.addEventListener('keydown', event => {
     if (event.key !== 'Tab') return;
-    const controls = [...dialog.querySelectorAll('button, input, select, textarea, a[href], [tabindex]')]
+    const dialog = [$('drawer'), $('add-dialog')].find(node => node && node.open);
+    if (!dialog) return;
+    const controls = [...dialog.querySelectorAll('button, input, select, textarea, summary, a[href], [tabindex]')]
       .filter(node => !node.disabled && node.tabIndex >= 0 && node.getClientRects().length);
     if (!controls.length) { event.preventDefault(); dialog.focus(); return; }
     const first = controls[0], last = controls[controls.length - 1];
-    if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) {
+    const lost = !dialog.contains(document.activeElement) || document.activeElement === dialog;
+    if (event.shiftKey && (document.activeElement === first || lost)) {
       event.preventDefault(); last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
+    } else if (!event.shiftKey && (document.activeElement === last || lost)) {
       event.preventDefault(); first.focus();
     }
   });
 
   // ---------- add work ----------
   const dlg = $('add-dialog');
-  $('open-add').addEventListener('click', () => {
+  function openAdd() {
     if (!board || !board.projects.length) return toast('Run “ym init” in a repository first.');
     const after = dlg.querySelector('select[name=after]');
-    after.replaceChildren(el('option', { value: '', text: 'Start as soon as possible' }), ...board.active.map((t) => el('option', { value: t.id, text: clip(t.title, 70) })));
+    after.replaceChildren(el('option', { value: '', text: 'Start as soon as possible' }), ...board.active.map((t) => el('option', { value: t.id, text: shortTitle(t.title, 70) })));
     $('add-msg').textContent = '';
     dlg.showModal();
-  });
+  }
+  $('open-add').addEventListener('click', openAdd);
   $('add-cancel').addEventListener('click', () => dlg.close());
   $('add-form').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -906,15 +1246,15 @@
     const pid = projectId || (board.projects.length === 1 ? board.projects[0].id : '');
     if (!pid) { $('add-msg').textContent = 'Pick a project at the top first.'; return; }
     const files = String(f.get('files') || '').split(',').map((s) => s.trim()).filter(Boolean);
-    const task = { title: clip(text.split('\n')[0], 180), prompt: text };
+    const task = { title: shortTitle(text.split('\n').find((line) => line.trim()) || text), prompt: text };
     if (files.length) task.files = files;
     if (f.get('tier')) task.tier = f.get('tier');
     if (f.get('after')) task.after = [f.get('after')];
     $('add-submit').disabled = true;
     try {
       const r = await rpc('task.add', { projectId: pid, tasks: [task], createdBy: 'dashboard' });
-      if (r.created.length) { toast('Queued: ' + clip(r.created[0].title, 60)); dlg.close(); e.target.reset(); refresh(); }
-      else if (r.duplicates.length) $('add-msg').textContent = `This looks the same as “${r.duplicates[0].existingTitle}”, which is already queued.`;
+      if (r.created.length) { toast('Queued: ' + shortTitle(r.created[0].title, 60)); dlg.close(); e.target.reset(); refresh(); }
+      else if (r.duplicates.length) $('add-msg').textContent = `This looks the same as “${shortTitle(r.duplicates[0].existingTitle)}”, which is already queued.`;
     } catch (err) { if (!authFailed) $('add-msg').textContent = err.message; }
     finally { if (!authFailed) $('add-submit').disabled = false; }
   });
@@ -957,8 +1297,8 @@
 
   $('project').addEventListener('change', (e) => {
     closeDrawer(); projectId = e.target.value; localStorage.setItem('ym-project', projectId);
-    registry = null; registryError = ''; board = null; feed.length = 0;
-    $('registry').replaceChildren(); $('board').replaceChildren(); $('att-list').replaceChildren(); $('attention').hidden = true; $('machines').replaceChildren(); $('sessions').textContent = ''; $('feed').replaceChildren();
+    registry = null; registryError = ''; board = null; feed.length = 0; feedAll = false;
+    $('registry').replaceChildren(); $('board').replaceChildren(); $('att-list').replaceChildren(); $('attention').hidden = true; $('machines').replaceChildren(); $('sessions').textContent = ''; renderFeed();
     const scope = projectId;
     refresh(); rpc('events.since', { after: 0, limit: 60, projectId: scope || null }).then(events => { if (scope === projectId) pushEvents(events); }).catch(() => {});
   });

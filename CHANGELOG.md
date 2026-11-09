@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.2
+- Dashboard redesigned around one row per task after the first real trial: a plain status sentence, "Needs you", then a list where each row shows status and phase, a short name, the agent, a five-stop stage track, elapsed time and cost against budget. Connection records fold away and open themselves when one is stale. Authored light and dark schemes. See [docs/DASHBOARD.md](docs/DASHBOARD.md).
+- "Approve and merge" now appears in the "Needs you" banner; it was only reachable from the task detail.
+- When work is stopped for changing files outside its list, the task detail names the files and lets the owner allow them (`task.setScope`, owner-only), then retry.
+- Task names are the first sentence of the request instead of its first 200 characters, from `ym add` and the dashboard. Activity lines drop the worktree path and the "cd there first" prefix before clipping.
+- Fixed: the first changed file reported by a running task lost its first character when it was an unstaged edit (`rc/app.ts` for `src/app.ts`), so edit-time overlap checks could miss it.
+- `board.status` rows add `budget`, `attempt`, `maxAttempts`, `phase`, `createdAt`, `startedAt`, `readyAt` and `needsApproval`.
+
+No database migration. Upgrade the hub to get the new dashboard; workers are unaffected.
+
 ## 0.9.1
 - Malformed unauthenticated request targets return400; rejected asynchronous handlers no longer terminate the hub.
 - Native hooks exempt only the exact canonical session. Session identities are scoped by project and machine, including MCP connections addressing multiple repositories; matching legacy claims remain intact. Native submissions retain the checkout captured at claim time across later nested-directory or linked-checkout status calls.

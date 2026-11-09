@@ -99,7 +99,8 @@ export async function isClean(cwd: string): Promise<boolean> {
 
 export async function changedFiles(cwd: string, base: string): Promise<string[]> {
   const committed = await gitOut(cwd, ['diff', '--name-only', `${base}...HEAD`]);
-  const working = await gitOut(cwd, ['status', '--porcelain', '--untracked-files=all']);
+  // Not gitOut: trimming the output strips the leading space of a first " M path" line and corrupts that path.
+  const working = (await git(cwd, ['status', '--porcelain', '--untracked-files=all'])).stdout;
   const files = new Set(committed.split('\n').filter(Boolean));
   for (const line of working.split('\n').filter(Boolean)) {
     const p = line.slice(3).split(' -> ').pop();

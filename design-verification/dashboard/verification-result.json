@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "gate": "render-verification-gate",
+  "gateVersion": 1,
+  "result": "pass",
+  "defects": [],
+  "artifacts": [
+    {
+      "path": "desktop.png",
+      "kind": "desktop-screenshot",
+      "sha256": "525d5ae73c3f31524d6ee1b38acfabde8acfff7824e7aa95755113db6ba7de28",
+      "bytes": 457770,
+      "width": 1425,
+      "height": 2136
+    },
+    {
+      "path": "mobile-390.png",
+      "kind": "mobile-screenshot",
+      "sha256": "b57935572fe386412c5cac053590337a075dc515e01ac8802654cdec175ed5bc",
+      "bytes": 85334,
+      "width": 390,
+      "height": 844
+    },
+    {
+      "path": "console.json",
+      "kind": "console",
+      "sha256": "6cca79da91d08cf49f83e8883d3d6c64daaa48cf320f8e36afb91ffe6f294631",
+      "bytes": 41
+    },
+    {
+      "path": "geometry.json",
+      "kind": "geometry",
+      "sha256": "dd553b9638625e824852b274375260ee93e0de3ccf43b1aae4b954836c7a81cc",
+      "bytes": 209299
+    }
+  ],
+  "sourceState": {
+    "head": "dc43cdbb571e1d380df7f3cc63f548f957c8fb4f",
+    "dirtyDigest": "a5feadbe823a9cd39de56c2c48c8fb2277026a4287fb0b5f154e9ade99ffbcd5"
+  }
+}
