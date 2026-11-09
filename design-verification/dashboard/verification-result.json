@@ -1,0 +1,142 @@
+{
+  "schemaVersion": 1,
+  "gate": "render-verification-gate",
+  "gateVersion": 1,
+  "result": "fail",
+  "defects": [
+    {
+      "type": "overlap",
+      "viewport": "desktop",
+      "detail": "<time> index 306 overlaps <h2> index 315 (ratio 0.63)"
+    },
+    {
+      "type": "overlap",
+      "viewport": "desktop",
+      "detail": "<span> index 307 overlaps <h2> index 315 (ratio 0.74)"
+    },
+    {
+      "type": "overlap",
+      "viewport": "desktop",
+      "detail": "<time> index 309 overlaps <span> index 319 (ratio 0.22)"
+    },
+    {
+      "type": "overlap",
+      "viewport": "desktop",
+      "detail": "<time> index 309 overlaps <span> index 323 (ratio 0.32)"
+    },
+    {
+      "type": "overlap",
+      "viewport": "desktop",
+      "detail": "<span> index 310 overlaps <span> index 319 (ratio 0.50)"
+    },
+    {
+      "type": "overlap",
+      "viewport": "desktop",
+      "detail": "<span> index 310 overlaps <span> index 323 (ratio 0.79)"
+    },
+    {
+      "type": "overlap",
+      "viewport": "desktop",
+      "detail": "<time> index 312 overlaps <span> index 325 (ratio 0.11)"
+    },
+    {
+      "type": "overlap",
+      "viewport": "desktop",
+      "detail": "<span> index 313 overlaps <span> index 325 (ratio 0.29)"
+    },
+    {
+      "type": "overlap",
+      "viewport": "mobile",
+      "detail": "<time> index 300 overlaps <h2> index 309 (ratio 0.63)"
+    },
+    {
+      "type": "overlap",
+      "viewport": "mobile",
+      "detail": "<span> index 301 overlaps <h2> index 309 (ratio 0.74)"
+    },
+    {
+      "type": "overlap",
+      "viewport": "mobile",
+      "detail": "<time> index 303 overlaps <span> index 313 (ratio 0.24)"
+    },
+    {
+      "type": "overlap",
+      "viewport": "mobile",
+      "detail": "<time> index 303 overlaps <span> index 317 (ratio 0.32)"
+    },
+    {
+      "type": "overlap",
+      "viewport": "mobile",
+      "detail": "<span> index 304 overlaps <span> index 313 (ratio 0.54)"
+    },
+    {
+      "type": "overlap",
+      "viewport": "mobile",
+      "detail": "<span> index 304 overlaps <span> index 317 (ratio 0.79)"
+    },
+    {
+      "type": "overlap",
+      "viewport": "mobile",
+      "detail": "<time> index 306 overlaps <span> index 319 (ratio 0.11)"
+    },
+    {
+      "type": "overlap",
+      "viewport": "mobile",
+      "detail": "<span> index 307 overlaps <span> index 319 (ratio 0.29)"
+    },
+    {
+      "type": "overlap",
+      "viewport": "desktop",
+      "detail": "<time> and <span> overlap (+1 similar)"
+    },
+    {
+      "type": "overlap",
+      "viewport": "desktop",
+      "detail": "<span> and <span> overlap (+1 similar)"
+    },
+    {
+      "type": "overlap",
+      "viewport": "mobile",
+      "detail": "<time> and <span> overlap (+1 similar)"
+    },
+    {
+      "type": "overlap",
+      "viewport": "mobile",
+      "detail": "<span> and <span> overlap (+1 similar)"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "desktop.png",
+      "kind": "desktop-screenshot",
+      "sha256": "44827da1a7635b6588826785100c4e88dc3f90e0765db19fab998dca80ac6a7a",
+      "bytes": 441706,
+      "width": 1425,
+      "height": 2136
+    },
+    {
+      "path": "mobile-390.png",
+      "kind": "mobile-screenshot",
+      "sha256": "28cd95dfa0f8ce54c1d35645fe3c78080e187f542098a270adc803d5e3ddf485",
+      "bytes": 85266,
+      "width": 390,
+      "height": 844
+    },
+    {
+      "path": "console.json",
+      "kind": "console",
+      "sha256": "6cca79da91d08cf49f83e8883d3d6c64daaa48cf320f8e36afb91ffe6f294631",
+      "bytes": 41
+    },
+    {
+      "path": "geometry.json",
+      "kind": "geometry",
+      "sha256": "0cbf0489dcc4a652d2b2c35236686a2c6559bfcd49e5cf950eb001fc2eca308a",
+      "bytes": 210468
+    }
+  ],
+  "sourceState": {
+    "head": "5f607a87da8171ee26e0023a8daae259ef284ec3",
+    "dirtyDigest": "20af1a83e97f48cb36ab1f43fdd16f377fd0531e4f5954e4cfce6410e2c7d3a2"
+  }
+}

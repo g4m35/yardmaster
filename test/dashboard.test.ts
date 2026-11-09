@@ -293,6 +293,24 @@ test('a task stopped for touching other files can have its allowed files widened
   assert.equal(h.$('d-scope'), null);
 });
 
+test('the feed shows the latest events and opens older ones in place', async () => {
+  const h = harness(); await h.api.refresh();
+  const event = (id: number) => ({ id, level: 'info', message: 'Event ' + id, ts: now - (100 - id) * 1000 });
+  h.api.pushEvents([1, 2, 3].map(event));
+  assert.equal(h.$('feed').children.length, 3); assert.equal(h.$('feed-more').hidden, true);
+  h.api.pushEvents([4, 5, 6, 7, 8, 9, 10, 11].map(event));
+  // Newest first; the three oldest wait behind the button.
+  assert.equal(h.$('feed').children.length, 8);
+  assert.match(h.$('feed').children[0]!.textContent, /Event 11$/);
+  assert.equal(h.$('feed-more').hidden, false); assert.equal(h.$('feed-more').textContent, 'Show 3 older');
+  await h.$('feed-more').dispatch('click');
+  assert.equal(h.$('feed').children.length, 11); assert.equal(h.$('feed-more').textContent, 'Show fewer');
+  h.api.pushEvents([event(12)]);
+  assert.equal(h.$('feed').children.length, 12);
+  await h.$('feed-more').dispatch('click');
+  assert.equal(h.$('feed').children.length, 8);
+});
+
 test('dashboard projects real registry states, unknown signals, exact task link and supported stop only', async () => {
   const h = harness();
   const entries = [entry(), entry({ id: 'session:s-one', source: 'session', state: 'observed', pid: null, taskId: null, capabilities: { inspect: true, requestStop: false } }),

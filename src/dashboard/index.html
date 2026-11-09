@@ -221,7 +221,8 @@
   @media (prefers-reduced-motion: reduce) { .lamp { animation: none !important; } .meter .fill { transition: none; } }
 
   /* ---- rail panels ---- */
-  .feed { list-style: none; margin: 0; padding: 0; max-height: 380px; overflow: auto; }
+  .feed { list-style: none; margin: 0; padding: 0; }
+  #feed-more { margin-top: 10px; font-size: 14px; }
   .feed li { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; padding: 6px 0; border-top: 1px solid var(--rule); font-size: 13.5px; }
   .feed li:first-child { border-top: 0; }
   .feed time { color: var(--ink-3); font-size: 12.5px; font-variant-numeric: tabular-nums; white-space: nowrap; padding-top: 1px; min-width: 44px; }
@@ -451,6 +452,7 @@
         <section class="panel" aria-labelledby="feed-h">
           <h2 id="feed-h">What just happened</h2>
           <ol class="feed" id="feed" aria-live="polite"></ol>
+          <button class="btn" id="feed-more" type="button" hidden></button>
         </section>
         <section class="panel" aria-labelledby="mach-h">
           <h2 id="mach-h">Machines</h2>
@@ -961,7 +963,16 @@
     if (authFailed) return;
     for (const e of evs) if (!projectId || !e.project_id || e.project_id === projectId) feed.unshift(e);
     feed.splice(150);
-    $('feed').replaceChildren(...feed.map((e) => el('li', { 'data-l': e.level },
+    renderFeed();
+  }
+  // The latest few events; older ones open in place rather than in a scroll box inside the page.
+  const FEED_RECENT = 8;
+  let feedAll = false;
+  function renderFeed() {
+    const more = $('feed-more');
+    more.hidden = feed.length <= FEED_RECENT;
+    more.textContent = feedAll ? 'Show fewer' : `Show ${feed.length - FEED_RECENT} older`;
+    $('feed').replaceChildren(...(feedAll ? feed : feed.slice(0, FEED_RECENT)).map((e) => el('li', { 'data-l': e.level },
       el('time', { datetime: new Date(e.ts).toISOString() }, time(e.ts)),
       el('span', {}, e.task_id ? el('a', { href: '#', onclick: (ev) => { ev.preventDefault(); showTask(e.task_id); } }, shortQuoted(e.message)) : shortQuoted(e.message)),
     )));
@@ -1173,6 +1184,7 @@
   $('d-close').addEventListener('click', closeDrawer);
   $('refresh-btn').addEventListener('click', () => refresh());
   $('registry-view').addEventListener('change', renderRegistry);
+  $('feed-more').addEventListener('click', () => { feedAll = !feedAll; renderFeed(); });
 
   // Keep keyboard focus on visible controls in the open dialog. Native traversal can send the last Tab to
   // the document body, and a snapshot can remove the focused node; both would let Tab leave the dialog.
@@ -1263,7 +1275,7 @@
   $('project').addEventListener('change', (e) => {
     closeDrawer(); projectId = e.target.value; localStorage.setItem('ym-project', projectId);
     registry = null; registryError = ''; board = null; feed.length = 0;
-    $('registry').replaceChildren(); $('board').replaceChildren(); $('att-list').replaceChildren(); $('attention').hidden = true; $('machines').replaceChildren(); $('sessions').textContent = ''; $('feed').replaceChildren();
+    $('registry').replaceChildren(); $('board').replaceChildren(); $('att-list').replaceChildren(); $('attention').hidden = true; $('machines').replaceChildren(); $('sessions').textContent = ''; renderFeed();
     const scope = projectId;
     refresh(); rpc('events.since', { after: 0, limit: 60, projectId: scope || null }).then(events => { if (scope === projectId) pushEvents(events); }).catch(() => {});
   });

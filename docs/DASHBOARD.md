@@ -32,6 +32,7 @@ The owner's earlier override stands: one framework-free HTML file, no external a
 - **Task detail.** Status and phase, the five stages, then agent, time, cost against budget, attempt and files. Below: files changed so far, the full request, guidance, the activity log, history and technical details (branch, artifact SHA, working copy, and a `git diff` command for the exact change). Opened sections, the log's scroll position and unsent text survive the snapshot refreshes that rebuild the detail.
 - **Allowed files.** When work is stopped for changing files outside its list, the detail names those files, adds them to the list in one click, and saves through `task.setScope`. The owner then chooses "Try again". A running attempt keeps the list it started with, so while one is in flight files can be added to the list but not removed.
 - **Approval.** "Approve and merge" appears in the "Needs you" banner as well as in the detail.
+- **Activity feed.** The latest eight events, with older ones opened in place by a button instead of a scroll box inside the page.
 
 ### Contracts added
 
@@ -41,7 +42,7 @@ Kept from iteration 1: every owner action (add, retry, approve, cancel, redirect
 
 ### Verification
 
-`node --test test/dashboard.test.ts` runs the page's real script against a small DOM fixture: 19 tests, including row content and order, the status sentence, approval from the banner, folded connections, detail sections surviving refresh, and the allowed-files flow. Unit tests cover `taskTitle`, `activityText`, the new board fields and `task.setScope`.
+`node --test test/dashboard.test.ts` runs the page's real script against a small DOM fixture: 20 tests, including row content and order, the status sentence, approval from the banner, folded connections, detail sections surviving refresh, and the allowed-files flow. Unit tests cover `taskTitle`, `activityText`, the new board fields and `task.setScope`.
 
 Rendered evidence is in `design-verification/dashboard/`: `desktop.png`, `mobile-390.png`, `console.json`, `geometry.json` and `rendered-checks.json`, plus dialog, dark-scheme and 390px captures. It was captured in a hosted Chromium against a disposable fixture hub with invented data through an ephemeral tunnel; no personal hub, key or repository was exposed. The checks cover no horizontal overflow at 1440px and exactly 390px in every state, keyboard open, focus containment and return, contrast in both schemes, reduced motion and console output. Two limits: the capture browser cannot emulate operating-system settings, so the dark and reduced-motion captures force those media rules on rather than toggling the setting; and no screen reader was run.
 
