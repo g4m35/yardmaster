@@ -309,7 +309,7 @@ export interface OwnedRunResult {
   pipeHeld: boolean;
   /** Cleanup of the whole group after the run, including normal exits. */
   reap: TerminateResult;
-  /** Original group and inherited-marker descendants are confirmed stopped. Deliberate environment clearing is not contained. */
+  /** Original group and OS-visible inherited-marker descendants are confirmed stopped. Deliberate environment clearing is not contained. */
   reaped: boolean;
   /** Spawn, hook or stop detail. */
   error: string;

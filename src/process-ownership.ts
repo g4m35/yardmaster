@@ -16,7 +16,7 @@ const MARKER = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const launchTimes = new Map<string, number>();
 
 /** A random inherited tag identifies cooperative descendants even after setsid/reparenting.
- * This is ownership evidence, not hostile-child containment: a child can deliberately clear its environment.
+ * This is ownership evidence, not hostile-child containment: a child can clear its environment or hide it from OS inspection.
  * The private receipt binds the tag to the recorded leader identity across supervisor restarts.
  */
 export interface ProcessOwnership extends ProcessIdentity { marker: string; uid: number; launchedAt?: number }
@@ -169,7 +169,7 @@ async function markedProcesses(receipt: ProcessOwnership, target?: MarkedProcess
     if (!selected.size) return [];
     // Fixed shell program; only validated numeric PID data enters argv. The shell execs ps with
     // its own PID explicitly selected, so its random environment probe is always inspected.
-    const args = ['-c', 'exec ps eww -p "$$${1:+,$1}" -o pid=,uid=,lstart=,command=', 'ym-owned-lookup', [...selected].join(',')];
+    const args = ['-c', 'exec ps eww -p "$$${1:+,$1}" -o pid=,ruid=,stat=,lstart=,command=', 'ym-owned-lookup', [...selected].join(',')];
     ({ stdout } = await execFileP('/bin/sh', args, { env, encoding: 'utf8', timeout: LOOKUP_TIMEOUT_MS, maxBuffer: MAX_LOOKUP_BYTES }));
   }
   catch {
@@ -180,9 +180,15 @@ async function markedProcesses(receipt: ProcessOwnership, target?: MarkedProcess
   const result: MarkedProcess[] = [];
   const tag = new RegExp(`(?:^|\\s)${PROCESS_OWNER_ENV}=([0-9a-f:-]+)(?=\\s|$)`, 'g');
   for (const line of stdout.split('\n')) {
-    const m = /^\s*(\d+)\s+(\d+)\s+(\w{3}\s+\w{3}\s+\d+\s+\d\d:\d\d:\d\d\s+\d{4})\s+(.+)$/.exec(line);
-    if (!m || !selected.has(Number(m[1])) || Number(m[2]) !== receipt.uid || ![...m[4]!.matchAll(tag)].some(match => match[1]?.split(':').includes(receipt.marker))) continue;
-    const pid = Number(m[1]), startedAt = Date.parse(m[3]!);
+    const m = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\w{3}\s+\w{3}\s+\d+\s+\d\d:\d\d:\d\d\s+\d{4})\s+(.+)$/.exec(line);
+    if (!m || !selected.has(Number(m[1]))) continue;
+    const pid = Number(m[1]);
+    if (m[3]!.includes('Z')) continue;
+    // Unrelated same-user services can have intentionally hidden/empty environments (e.g. macOS
+    // Spotlight). Only positive, OS-visible marker evidence establishes descendant ownership.
+    if (Number(m[2]) !== receipt.uid) continue;
+    if (![...m[5]!.matchAll(tag)].some(match => match[1]?.split(':').includes(receipt.marker))) continue;
+    const startedAt = Date.parse(m[4]!);
     if (pid <= 1 || pid === process.pid || !Number.isFinite(startedAt)) throw new Error('Invalid inherited process ownership evidence.');
     if (target && (pid !== target.pid || startedAt !== target.startedAt)) continue;
     result.push({ pid, startedAt });
