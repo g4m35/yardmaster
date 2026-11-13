@@ -14,6 +14,7 @@ import { Semaphore } from './runner.ts';
 import { recover, planCleanup, runCleanup } from './janitor.ts';
 import { Supervisor } from './supervisor.ts';
 import { inSea, readAsset } from './assets.ts';
+import { planService } from './providers.ts';
 import { importGraph } from './imports.ts';
 import { loadConfig, newConfigWarnings, verifySlotsFor, worktreeRootOf } from './config.ts';
 import { purgeTrash } from './fastfs.ts';
@@ -59,7 +60,7 @@ export class Hub {
   private server: Server | null = null;
   private timers: NodeJS.Timeout[] = [];
   private lastNotified = 0;
-  private plugins: LoadedPlugins = { adapters: [], notifiers: [], errors: [] };
+  private plugins: LoadedPlugins = { adapters: [], notifiers: [], providers: [], errors: [] };
   readonly supervisor: Supervisor;
   private looping = false;
   private again = false;
@@ -147,7 +148,7 @@ export class Hub {
     this.lastNotified = this.coord.lastEventId();
     this.coord.writeManagedRoots();
     const cfg = loadConfig();
-    this.reportConfig();
+    await this.reportConfig();
     const host = this.opts.host ?? cfg.hub.host;
     const port = this.opts.port ?? cfg.hub.port;
     this.server = createServer((req, res) => {
@@ -223,11 +224,22 @@ export class Hub {
   }
 
   /** Config problems (a broken file, unknown settings) as warnings; never a reason not to run. */
-  private reportConfig(): void {
+  private async reportConfig(): Promise<void> {
+    // Provider installation does not require a hub restart. Keep the reported catalog current.
+    this.plugins.providers = (await loadPlugins()).providers;
     for (const p of this.coord.listProjects()) {
       if (!existsSync(p.root)) continue;
       try {
-        loadConfig(p.root);
+        const config = loadConfig(p.root);
+        const capabilities = [...new Set([...Object.keys(config.services.routes), ...Object.keys(config.services.local), ...config.services.verify.map(check => check.capability)])];
+        const plans = capabilities.map(capability => planService(capability, config.services, this.plugins.providers, p.root, process.env,
+          config.services.verify.find(check => check.capability === capability)?.input ?? {}));
+        const fingerprint = JSON.stringify(plans);
+        if (this.providerPlans.get(p.id) !== fingerprint) {
+          this.providerPlans.set(p.id, fingerprint);
+          if (plans.length) this.coord.event(p.id, null, plans.every(plan => plan.selected) ? 'info' : 'warn', 'service.availability',
+            `Providers on the hub: ${plans.map(plan => `${plan.capability}: ${plan.selected ?? 'unavailable (run ym providers plan)'}`).join('; ')}. Executables and environment checked; account access and quota unverified. Worker availability can differ.`, { machineId: this.machineId, plans });
+        }
       } catch (err) {
         const line = `${p.name}: ${(err as Error).message}`;
         if (this.invalidConfigs.has(line)) continue;
@@ -239,6 +251,7 @@ export class Hub {
   }
 
   private readonly invalidConfigs = new Set<string>();
+  private readonly providerPlans = new Map<string, string>();
 
   private async loop(n: number): Promise<void> {
     if (this.captureAbort.signal.aborted) return;
@@ -256,7 +269,7 @@ export class Hub {
         return;
       }
       if (n % 3 === 0) await this.heartbeat();
-      if (n % 20 === 0) this.reportConfig();
+      if (n % 20 === 0) await this.reportConfig();
       await this.worker.tick();
       if (this.captureAbort.signal.aborted) return;
       // Merges (and their re-verification) run in the background so a long test run never stalls scheduling.

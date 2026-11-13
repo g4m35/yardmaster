@@ -68,6 +68,7 @@ Want to see it first without spending tokens? `ym demo` starts an isolated sandb
 | `ym service install` | Keep the hub running across crashes and reboots (launchd on macOS, systemd on Linux) |
 | `ym clean` | Show what can be cleaned up; `--yes` to do it |
 | `ym doctor` | Check your setup |
+| `ym verify` | Run committed-artifact checks and optional provider checks; save service receipts |
 | `ym presets` | `frugal`, `balanced`, `fast`, `careful` |
 
 `ym add` options: `--files a,b` (what it will change), `--after t-123`, `--agent codex`, `--tier cheap|standard|strong`, `--verify "npm run e2e"` (extra checks, on top of the project's), `--budget 1.5`, `--best-of 2`, `--review always|never`, `--no-changes-ok` (for reviews and research).
@@ -222,6 +223,16 @@ ym hub restart
 ```
 
 Notifier plugins can send updates to Slack, ntfy, or a webhook. See `~/.yardmaster/plugins/<name>/PLUGIN_GUIDE.md`.
+
+Optional service providers use the tools/accounts you already have, with configured local commands
+for account-free use. `ym providers list` shows configured providers; `ym providers plan <capability>`
+explains routing without dispatching work; `ym providers run <capability>` executes explicitly.
+Create a connector with `ym plugin new my-service --kind provider`. Service categories cover research,
+builds, CI, browsers, devices, deployment, data, observability and notifications. Browserbase is a
+built-in optional connector for your existing test command; other vendors use plugins. Opt capabilities
+into `services.verify` to include them in task acceptance and integration checks. Availability and
+results appear in dashboard activity/task details; unknown results stop for inspection. See
+[provider setup and protocol](docs/PROVIDERS.md).
 
 ## Speed
 

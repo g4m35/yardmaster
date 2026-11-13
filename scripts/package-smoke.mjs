@@ -24,10 +24,13 @@ try {
   assert.equal(command(node, [cli, '--version'], install, env).trim(), version);
   assert.match(command(node, [cli, '--help'], install, env), /Yardmaster|yardmaster/);
   assert.ok(existsSync(join(packageRoot, 'dist/dashboard/index.html')), 'dashboard asset packaged');
+  command(node, ['--input-type=module', '-e', "import assert from 'node:assert/strict';import {runService} from 'yardmaster/providers';import {ServicesConfigSchema} from 'yardmaster/provider-contract';import {verifyArtifact} from 'yardmaster/verification';assert.equal(typeof runService,'function');assert.equal(typeof verifyArtifact,'function');assert.deepEqual(ServicesConfigSchema.parse({}).verify,[]);"], install, env);
+  const providers = JSON.parse(command(node, [cli, 'providers', 'list', '--json'], install, env));
+  assert(providers.providers.some(provider => provider.name === 'browserbase' && provider.installed && !provider.enabled));
   const doctor = command(node, [cli, 'doctor'], install, env);
   assert.match(doctor, /Node.js 22.16\+/);
   assert.match(doctor, /Cost coverage:/);
   assert.deepEqual(JSON.parse(command(node, [cli, 'recover', '--json'], install, env)), { replayed: [], pending: [], skippedLive: [] });
   console.log(JSON.stringify({ kind: 'package-smoke', version, node: command(node, ['--version'], install).trim(),
-    checks: ['tarball install', 'version', 'help', 'dashboard asset', 'doctor without personal hub', 'local recovery'], result: 'pass' }));
+    checks: ['tarball install', 'version', 'help', 'dashboard asset', 'public provider API', 'disabled built-in Browserbase', 'doctor without personal hub', 'local recovery'], result: 'pass' }));
 } finally { rmSync(root, { recursive: true, force: true }); }

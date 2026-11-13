@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, statfsSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, statSync, statfsSync, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { createInterface as createLineReader } from 'node:readline';
 import { homedir as homedirPath, hostname, networkInterfaces, tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { buildMethods, localClient, remoteClient, type Client } from './api.ts';
 import { Coordinator } from './coordinator.ts';
 import { openDb } from './db.ts';
@@ -13,7 +13,7 @@ import { configWarnings, loadConfig, PRESETS, PROJECT_CONFIG_FILE, writeProjectC
 import { detectAgents, getAdapter } from './adapters/index.ts';
 import { clearHubInfo, Hub, readHubInfo, writeHubInfo } from './hub.ts';
 import { planCleanup, runCleanup, type CleanPlan } from './janitor.ts';
-import { currentBranch, mainRepoRoot, projectIdFor, git, revParse } from './git.ts';
+import { currentBranch, mainRepoRoot, repoRoot, projectIdFor, git, revParse } from './git.ts';
 import { isAlive, run, which } from './proc.ts';
 import { ago, clip, formatUsd } from './text.ts';
 import { STATUS_LABEL, type Task } from './types.ts';
@@ -161,6 +161,7 @@ const HELP = `${bold('Yardmaster')} ${VERSION}: run many coding agents at once w
 ${bold('Get started')}
   ym setup [--agent codex]     guided repo setup; --dry-run previews without changing configs
   ym init                      set up this repo (detects your agents and test command)
+  ym verify [--json]            run committed-artifact checks and configured service verification; save receipts
   ym connect [agent|all]       add Yardmaster tools + skill to Claude Code, Codex, Cursor, OpenCode, Gemini
                                (also installs zero-token hooks for Claude Code and Codex; --no-hooks to skip)
   ym add "what you want"       queue work (--files, --after, --agent, --tier cheap|standard|strong)
@@ -202,8 +203,11 @@ ${bold('Machines')}
                                HTTPS or loopback is the default; no network setup is performed.
 
 ${bold('Extend')}
-  ym plugin new <name> [--kind adapter|notifier] [--describe "..."] [--with claude]
+  ym plugin new <name> [--kind adapter|notifier|provider] [--describe "..."] [--with claude]
   ym plugin test <name>   ym plugin list   ym presets   ym doctor   ym demo
+  ym providers list [--json]              configured service providers and routing
+  ym providers plan <capability> [--input file.json] [--json]  explain selection without dispatch
+  ym providers run <capability> [--input file.json] [--json]  explicitly execute once
 `;
 
 async function cmdInit(a: Args) {
@@ -848,8 +852,9 @@ async function cmdPlugin(a: Args) {
     console.log(`Plugins in ${paths.plugins()}:`);
     for (const n of loaded.adapters) console.log(`  ${green('adapter')}  ${n}`);
     for (const n of loaded.notifiers) console.log(`  ${green('notifier')} ${n.name}`);
+    for (const p of loaded.providers) console.log(`  ${green('provider')} ${p.name}: ${Object.keys(p.capabilities).join(', ')}`);
     for (const e of loaded.errors) console.log(`  ${red('broken')}   ${e.dir}: ${clip(e.error, 120)}`);
-    if (!loaded.adapters.length && !loaded.notifiers.length && !loaded.errors.length) console.log(dim('  none yet. Try: ym plugin new my-agent --describe "drive the aider CLI" --with claude'));
+    if (!loaded.adapters.length && !loaded.notifiers.length && !loaded.providers.length && !loaded.errors.length) console.log(dim('  none yet. Try: ym plugin new my-agent --describe "drive the aider CLI" --with claude'));
     return;
   }
   const name = a._[2] ?? die(`ym plugin ${sub ?? 'new'} <name>`);
@@ -859,8 +864,8 @@ async function cmdPlugin(a: Args) {
     process.exit(r.ok ? 0 : 1);
   }
   if (sub === 'new') {
-    const kind = (flag(a, 'kind') ?? 'adapter') as 'adapter' | 'notifier';
-    if (kind !== 'adapter' && kind !== 'notifier') die('--kind must be adapter or notifier');
+    const kind = (flag(a, 'kind') ?? 'adapter') as 'adapter' | 'notifier' | 'provider';
+    if (kind !== 'adapter' && kind !== 'notifier' && kind !== 'provider') die('--kind must be adapter, notifier or provider');
     const describe = flag(a, 'describe');
     const dir = scaffoldPlugin(name, kind, describe);
     console.log(green(`✔ Created ${dir}`));
@@ -880,10 +885,91 @@ async function cmdPlugin(a: Args) {
     await new Promise((r) => child.on('close', r));
     const r = await testPlugin(dir);
     for (const ch of r.checks) console.log(`${ch.ok ? green('✔') : red('✖')} ${ch.name}`);
-    console.log(r.ok ? green(`\n✔ Plugin ${name} works. Run "ym hub restart" to load it.`) : yellow(`\nThe plugin needs more work: edit ${dir} or run the command again.`));
+    console.log(r.ok ? green(kind === 'provider' ? `\n✔ Provider ${name} manifest valid; commands not executed. Implement provider.mjs, enable a route and verify the real service.` : `\n✔ Plugin ${name} works. Run "ym hub restart" to load it.`) : yellow(`\nThe plugin needs more work: edit ${dir} or run the command again.`));
     return;
   }
   die('ym plugin new|test|list');
+}
+
+async function cmdProviders(a: Args) {
+  const { planService, providerInventory, runService } = await import('./providers.ts');
+  const sub = a._[1] ?? 'list';
+  if (sub === 'pending' || sub === 'resolve') {
+    for (const name of Object.keys(a.flags)) if (!['json', 'repo', 'note', 'hub', 'token'].includes(name)) die(`Unknown provider option --${name}`);
+    const client = await getClient(a);
+    if (sub === 'pending') {
+      if (a._.length !== 2) die('ym providers pending');
+      return console.log(JSON.stringify(await client['providers.pending']({}), null, 2));
+    }
+    const requestId = a._[2], note = flag(a, 'note');
+    if (!requestId || !note || a._.length !== 3) die('ym providers resolve <request-id> --note "inspected remote state"');
+    return console.log(JSON.stringify(await client['providers.resolve']({ requestId, note }), null, 2));
+  }
+  if (!['list', 'plan', 'run'].includes(sub)) die('ym providers list|plan|run [capability]');
+  for (const name of Object.keys(a.flags)) if (!['json', 'input', 'dry-run', 'repo'].includes(name)) die(`Unknown provider option --${name}`);
+  if (a._.length > (sub === 'list' ? 2 : 3)) die('Too many provider arguments. Use --input file.json for request data.');
+  if (a.flags.input === true) die('--input needs a JSON file path');
+  let cwd = process.cwd();
+  const root = await repoRoot(cwd).catch(() => null);
+  while (root && cwd !== root && !existsSync(join(cwd, PROJECT_CONFIG_FILE))) cwd = dirname(cwd);
+  const config = loadConfig(cwd);
+  const loaded = await loadPlugins();
+  const report = providerInventory(config.services, loaded.providers, cwd);
+  if (sub === 'list') {
+    if (a.flags.json) return console.log(JSON.stringify({ ...report, errors: loaded.errors }, null, 2));
+    console.log(`Services: ${report.categories.join(', ')}`);
+    console.log('Discovery checks executable and environment presence only; sign-in and quota are not checked.');
+    for (const p of report.providers) console.log(`${p.name}: ${p.installed ? (p.enabled ? 'enabled' : 'disabled') : 'not installed'} (${p.capabilities.join(', ')})`);
+    for (const r of report.routes) console.log(`${r.capability}: ${r.selected ?? 'no eligible provider'}`);
+    for (const error of loaded.errors) console.log(`Plugin failed to load: ${error.dir}`);
+    if (!report.routes.length) console.log('No service routes configured. Add services.local commands or enable a provider; see docs/PROVIDERS.md.');
+    return;
+  }
+  const capability = a._[2] ?? die(`ym providers ${sub} <capability>`);
+  if (a.flags['dry-run']) {
+    console.log(JSON.stringify(planService(capability, config.services, loaded.providers, cwd), null, 2));
+    return;
+  }
+  const inputFile = flag(a, 'input');
+  if (inputFile && statSync(resolve(inputFile)).size > 1024 * 1024) die('Provider input exceeds 1 MiB');
+  const input = inputFile ? JSON.parse(readFileSync(resolve(inputFile), 'utf8')) as unknown : {};
+  if (sub === 'plan') {
+    console.log(JSON.stringify(planService(capability, config.services, loaded.providers, cwd, process.env, input), null, 2));
+    return;
+  }
+  const stop = new AbortController();
+  const abort = () => stop.abort('provider command interrupted');
+  process.once('SIGINT', abort); process.once('SIGTERM', abort);
+  try {
+    const result = await runService(capability, input, config.services, loaded.providers, { cwd, signal: stop.signal, context: { sha: await revParse(cwd, 'HEAD') } });
+    console.log(JSON.stringify(result, null, 2));
+    if (result.result.status !== 'passed') process.exitCode = 1;
+  } finally { process.off('SIGINT', abort); process.off('SIGTERM', abort); }
+}
+
+async function cmdVerify(a: Args) {
+  for (const name of Object.keys(a.flags)) if (!['json', 'dry-run', 'repo'].includes(name)) die(`Unknown verification option --${name}`);
+  if (a._.length !== 1) die('ym verify [--json] [--dry-run]');
+  let cwd = process.cwd();
+  const root = await repoRoot(cwd).catch(() => null);
+  while (root && cwd !== root && !existsSync(join(cwd, PROJECT_CONFIG_FILE))) cwd = dirname(cwd);
+  const config = loadConfig(cwd);
+  const { verifyArtifact } = await import('./verification.ts');
+  if (a.flags['dry-run']) {
+    const { planService } = await import('./providers.ts'), loaded = await loadPlugins();
+    return console.log(JSON.stringify({ commands: config.verify, services: config.services.verify.map(check => planService(check.capability, config.services, loaded.providers, cwd, process.env, check.input)) }, null, 2));
+  }
+  const stop = new AbortController();
+  const abort = () => stop.abort('verification interrupted');
+  process.once('SIGINT', abort); process.once('SIGTERM', abort);
+  try {
+    const receipts: string[] = [];
+    const result = await verifyArtifact(cwd, config.verify, config.verifyTimeoutMinutes, stop.signal, undefined, {
+      services: config.services, onServiceResult: run => { receipts.push(run.receiptPath); },
+    });
+    console.log(JSON.stringify({ ...result, receipts }, null, 2));
+    if (!result.ok) process.exitCode = 1;
+  } finally { process.off('SIGINT', abort); process.off('SIGTERM', abort); }
 }
 
 async function cmdDoctor(a: Args) {
@@ -895,6 +981,10 @@ async function cmdDoctor(a: Args) {
   const root = await mainRepoRoot(process.cwd()).catch(() => null);
   checks.push(['inside a git repository', !!root, root ?? 'run from your project folder']);
   const config = loadConfig(root ?? undefined);
+  const { providerInventory } = await import('./providers.ts');
+  const servicePlugins = await loadPlugins();
+  const services = providerInventory(config.services, servicePlugins.providers, root ?? process.cwd());
+  console.log(`Service providers: ${services.providers.filter(p => p.enabled && p.installed).length} enabled/installed, ${services.routes.filter(r => r.selected).length} eligible routes; sign-in, entitlement and quota unverified. Run "ym providers list" for details.`);
   const agents = detectAgents(config);
   checks.push(['at least one coding agent', agents.length > 0, agents.join(', ') || 'install Claude Code, Codex, OpenCode, Cursor CLI or Gemini CLI']);
   const remote = flag(a, 'hub') ?? process.env.YARDMASTER_HUB;
@@ -1045,6 +1135,8 @@ async function main() {
     case 'mcp': return cmdMcp(a);
     case 'hook': return cmdHook(a);
     case 'plugin': return cmdPlugin(a);
+    case 'providers': return cmdProviders(a);
+    case 'verify': return cmdVerify(a);
     case 'doctor': return cmdDoctor(a);
     case 'presets': return cmdPresets();
     case 'dashboard': return cmdDashboard(a);

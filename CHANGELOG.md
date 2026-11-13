@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+- Optional service-provider plugins and project-local commands share capability routing across research, builds, CI, browsers, devices, deployment, data, observability and notifications. Existing coding-agent adapters and notifier plugins remain compatible.
+- `ym providers list|plan|run` exposes provider prerequisites, ordered preferences, locality and cost policies. Fallback is pre-dispatch only; failed, interrupted or malformed service results never trigger automatic replay through another provider.
+- `services.verify` and `ym verify` run providers through committed-artifact acceptance and integration checks. Private pending/completed receipts survive restarts; dashboard activity/task details report real plans and results. Unknown results stop automatic repair/replay, including merge trains.
+- Optional built-in Browserbase support connects an existing test command to one bounded cloud session and confirms release. Local commands remain account-free; discovery checks prerequisites without claiming account/quota access. Public JavaScript provider APIs and checksum-validated hosted receipt collection are included.
+
 ## 0.9.1
 - Malformed unauthenticated request targets return400; rejected asynchronous handlers no longer terminate the hub.
 - Native hooks exempt only the exact canonical session. Session identities are scoped by project and machine, including MCP connections addressing multiple repositories; matching legacy claims remain intact. Native submissions retain the checkout captured at claim time across later nested-directory or linked-checkout status calls.

@@ -19,6 +19,9 @@ import { tx } from './transaction.ts';
 import { WORKER_ACTIVE_STATUSES, WORKER_FINALIZE_STATUSES } from './worker-policy.ts';
 import { recordUtility, runUtilityKey, utilitiesStopped, utilities, taskHasPendingUtilities } from './utility-records.ts';
 import { noteControllerActivity } from './controller-activity.ts';
+import { loadPlugins } from './plugins.ts';
+import { planService, providerInventory } from './providers.ts';
+import { beginService, finishService, resolveService, serviceHolds } from './service-holds.ts';
 
 /**
  * The single API surface. The hub serves it over HTTP, the CLI and MCP server call it locally or
@@ -147,6 +150,31 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
   };
 
   return {
+    'run.service': method(z.object({ runId: RunId, taskId: TaskId, owner: Owner,
+      action: z.discriminatedUnion('kind', [
+        z.object({ kind: z.literal('begin'), requestId: z.uuid(), capability: Id.max(300), provider: Id.max(100), receiptPath: Id.max(4096) }),
+        z.object({ kind: z.literal('finish'), requestId: z.uuid(), status: z.enum(['passed', 'failed', 'unknown']), reaped: z.boolean() }),
+      ]) }), p => coord.withRunOwner(p.runId, { ...p.owner, statuses: p.action.kind === 'begin' ? WORKER_ACTIVE_STATUSES : WORKER_FINALIZE_STATUSES }, () => {
+      const task = coord.getTask(p.taskId)!, run = coord.getRun(p.runId)!;
+      if (p.action.kind === 'begin') {
+        if (task.control) throw new Error('Task control pending; service dispatch denied');
+        beginService(coord.db, `task:${task.id}`, p.action, { projectId: task.project_id, taskIds: [task.id], runId: run.id, machineId: run.machine_id });
+        coord.event(task.project_id, task.id, 'info', 'service.started', `Starting ${p.action.capability} via ${p.action.provider}; request ${p.action.requestId}`, p.action);
+      } else finishService(coord.db, `task:${task.id}`, p.action.requestId, p.action.status, p.action.reaped);
+      if (hooks.externalWorker) noteControllerActivity(coord.db, task.id, run.machine_id, p.owner.generation!);
+    }, p.taskId)),
+    'providers.pending': method(z.object({}), () => serviceHolds(coord.db)),
+    'providers.resolve': method(z.object({ requestId: z.uuid(), note: z.string().min(12).max(4000) }), p => tx(coord.db, () => {
+      const held = serviceHolds(coord.db).find(hold => hold.requestId === p.requestId);
+      if (!held) throw new Error('No unresolved service request with that ID');
+      for (const id of held.taskIds) {
+        const task = coord.getTask(id);
+        if (task && ['queued', 'ready', 'merging'].includes(task.status)) coord.updateTask(id, { status: 'needs_human', attention: 'Service inspection recorded. Retry explicitly when ready.' });
+      }
+      const resolved = resolveService(coord.db, p.requestId, p.note);
+      coord.event(resolved.projectId, null, 'warn', 'service.resolved', `Owner recorded inspection for provider request ${p.requestId}: ${p.note}`, resolved);
+      return resolved;
+    })),
     'run.utility': method(z.object({ runId: RunId, taskId: TaskId, owner: Owner,
       operation: z.discriminatedUnion('action', [
         z.object({ action: z.literal('intent'), token: Id, command: z.string().min(1).max(2000), preserving: z.boolean().optional(), preservationId: Id.optional() }),
@@ -191,6 +219,14 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
     'project.register': method(z.object({ cwd: z.string() }), (p) => coord.registerProject(p.cwd)),
     'project.resolve': method(z.object({ cwd: z.string().optional(), projectId: z.string().optional() }), (p) => resolveProject(p.cwd, p.projectId)),
     'project.list': method(z.object({}), () => coord.listProjects()),
+    'providers.list': method(z.object({ projectId: Id }), async (p) => {
+      const project = coord.getProject(p.projectId);
+      if (!project) throw new Error('Unknown project');
+      const config = coord.configFor(project.id), loaded = await loadPlugins();
+      return { machineId: hooks.machineId, ...providerInventory(config.services, loaded.providers, project.root),
+        verification: config.services.verify.map(check => planService(check.capability, config.services, loaded.providers, project.root, process.env, check.input)),
+        errors: loaded.errors.map(error => ({ dir: error.dir, error: 'Plugin could not be loaded; inspect it on the hub.' })) };
+    }),
 
     'task.add': method(
       z.object({ projectId: Id, tasks: z.array(NewTaskSchema).min(1).max(50), createdBy: z.string().default('cli'), force: z.boolean().optional() }),
