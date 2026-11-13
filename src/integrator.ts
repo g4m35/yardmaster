@@ -15,6 +15,7 @@ import { clip, errorFingerprint, tail } from './text.ts';
 import { randomUUID } from 'node:crypto';
 import type { Config } from './config.ts';
 import type { Project, Task } from './types.ts';
+import { beginService, finishService, serviceHold } from './service-holds.ts';
 
 /** Serializes async work per key. */
 class KeyedMutex {
@@ -93,6 +94,17 @@ export class Integrator {
     this.coord.event(project.id, null, 'warn', `integration.${key}`, message);
   }
 
+  private serviceHooks(project: Project, config: Config, tasks: Task[] = []) {
+    return serviceVerificationHooks(config.services, { projectId: project.id, ...(tasks.length === 1 ? { taskId: tasks[0]!.id } : {}) },
+      (level, kind, message, data) => {
+        if (tasks.length) for (const task of tasks) this.coord.event(project.id, task.id, level, kind, message, data);
+        else this.coord.event(project.id, null, level, kind, message, data);
+      }, {
+        begin: intent => { beginService(this.coord.db, `integration:${project.id}`, intent, { projectId: project.id, taskIds: tasks.map(task => task.id) }); },
+        finish: run => { finishService(this.coord.db, `integration:${project.id}`, run.requestId, run.result.status, run.execution.reaped); },
+      });
+  }
+
   private async owned<T>(projectId: string, fn: () => Promise<T>): Promise<T> {
     const key = integrationUtilityKey(projectId);
     if (!(await recoverUtilities(this.coord.db, key))) throw new IntegrationHeld('Integration utility recovery is not confirmed.');
@@ -144,6 +156,11 @@ export class Integrator {
       return null;
     }
     if (!processReaped) return null;
+    const pendingService = serviceHold(this.coord.db, `integration:${project.id}`);
+    if (pendingService) {
+      this.warnOnce(project, 'service_hold', `Provider request ${pendingService.requestId} requires remote inspection with ym providers pending/resolve. Integration work is preserved.`);
+      return null;
+    }
     const config = this.coord.configFor(project.id);
     const branch = config.integration.branch;
     const path = this.integrationPath(project, config);
@@ -231,8 +248,9 @@ export class Integrator {
       const path = this.integrationPath(project, this.coord.configFor(projectId));
       if (!isLinkedWorktreeOf(path, project.root) || !(await isClean(path)) || await revParse(path, 'HEAD') !== expectedHead) throw new Error('Commit/resolve the inspected integration state and pass its exact current HEAD. Nothing was changed.');
       const config = this.coord.configFor(projectId);
+      if (serviceHold(this.coord.db, `integration:${projectId}`)) throw new Error('Resolve the pending provider request after inspecting its remote state before adopting integration.');
       const checked = await this.verifySlots.use(() => verifyArtifact(path, config.verify, config.verifyTimeoutMinutes, this.lifetime.signal, this.processGuard(project, 'verify', false), {
-        ...serviceVerificationHooks(config.services, { projectId }, (level, kind, message, data) => this.coord.event(projectId, null, level, kind, message, data)),
+        ...this.serviceHooks(project, config, this.coord.listTasks(projectId, ['merging'])),
         beforeSpawn: () => { this.processGuard(project, 'verify'); }, onExit: reaped => this.processFinished(project, reaped),
       }), this.lifetime.signal);
       this.processFinished(project, checked.reaped);
@@ -401,8 +419,7 @@ export class Integrator {
       this.coord.event(project.id, task.id, 'info', 'integration.reverify', `Re-checking "${task.title}" combined with work merged since it started`);
       await this.prepareDeps(project, path, config, task.worktree ? [task.worktree] : []);
       const result = await this.verifySlots.use(() => verifyArtifact(path, commands, config.verifyTimeoutMinutes, this.lifetime.signal, this.processGuard(project, 'verify', false), {
-        ...serviceVerificationHooks(config.services, { projectId: project.id, taskId: task.id },
-          (level, kind, message, data) => this.coord.event(project.id, task.id, level, kind, message, data)),
+        ...this.serviceHooks(project, config, [task]),
         beforeSpawn: () => { this.processGuard(project, 'verify'); },
         onExit: reaped => this.processFinished(project, reaped),
       }), this.lifetime.signal);
@@ -477,9 +494,7 @@ export class Integrator {
     this.coord.event(project.id, null, 'info', 'integration.train', `Checking ${merged.length} finished tasks together in one run: ${merged.map((t) => `"${clip(t.title, 40)}"`).join(', ')}`);
     await this.prepareDeps(project, path, config, merged.flatMap((t) => (t.worktree ? [t.worktree] : [])));
     const result = await this.verifySlots.use(() => verifyArtifact(path, config.verify, config.verifyTimeoutMinutes, this.lifetime.signal, this.processGuard(project, 'verify', false), {
-      ...serviceVerificationHooks(config.services, { projectId: project.id }, (level, kind, message, data) => {
-        for (const task of merged) this.coord.event(project.id, task.id, level, kind, message, data);
-      }),
+      ...this.serviceHooks(project, config, merged),
       beforeSpawn: () => { this.processGuard(project, 'verify'); },
       onExit: reaped => this.processFinished(project, reaped),
     }), this.lifetime.signal);

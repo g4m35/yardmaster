@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import * as z from 'zod/v4';
@@ -45,7 +46,8 @@ export interface LoadedPlugins {
 }
 
 export async function loadPluginFile(file: string): Promise<Plugin> {
-  const mod = (await import(pathToFileURL(file).href + `?t=${Date.now()}`)) as { default?: unknown };
+  const digest = createHash('sha256').update(readFileSync(file)).digest('hex');
+  const mod = (await import(pathToFileURL(file).href + `?sha=${digest}`)) as { default?: unknown };
   const parsed = PluginSchema.safeParse(mod.default);
   if (!parsed.success) throw new Error(z.prettifyError(parsed.error));
   return parsed.data;

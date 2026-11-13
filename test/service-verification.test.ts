@@ -13,7 +13,9 @@ import { loadConfig } from '../src/config.ts';
 import { Hub } from '../src/hub.ts';
 import { openDb } from '../src/db.ts';
 import { runAttempt, Semaphore } from '../src/runner.ts';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { beginService } from '../src/service-holds.ts';
+import { loadPluginFile } from '../src/plugins.ts';
 import { collectReceiptArchive } from '../scripts/collect-hosted-verification.mjs';
 
 const key = 'fixture-account-credential';
@@ -252,4 +254,44 @@ test('receipt download validation rejects the truncated connector response befor
   assert.throws(() => collectReceiptArchive({ data: bytes.toString('base64') }, '0'.repeat(64), target), /checksum/);
   assert.equal(collectReceiptArchive({ data: bytes.toString('base64'), size: bytes.length }, digest, target).status, 'verified');
   assert.deepEqual(readFileSync(target), bytes);
+});
+
+test('large browser requests use a private input file instead of exceeding the OS environment limit', async () => {
+  const s = browserFixture(`const fs=require('node:fs'),assert=require('node:assert/strict');assert.equal(process.env.YARDMASTER_VERIFY_INPUT,undefined);assert.equal(JSON.parse(fs.readFileSync(process.env.YARDMASTER_VERIFY_INPUT_FILE,'utf8')).payload.length,150000);console.log('large input assertions passed');`);
+  const mock = api();
+  const result = await runBrowserbase(s.options, { ...s.ctx, input: { payload: 'x'.repeat(150000) } }, mock.fetcher);
+  assert.equal(result.result.status, 'passed'); assert.equal(existsSync(join(s.ctx.evidenceDir, 'input.json')), false);
+});
+
+test('unchanged plugin refreshes reuse one module and changed source loads one new version', async () => {
+  const s = sandbox(), file = join(s.root, 'cached-provider.mjs'), counter = randomUUID();
+  writeFileSync(file, `globalThis[${JSON.stringify(counter)}]=(globalThis[${JSON.stringify(counter)}]??0)+1;export default {kind:'provider',apiVersion:1,name:'cached',capabilities:{verify:{service:'ci',command:['node'],locality:'local',cost:'free'}}};`);
+  await loadPluginFile(file); await loadPluginFile(file);
+  assert.equal(Reflect.get(globalThis, counter), 1);
+  writeFileSync(file, readFileSync(file, 'utf8') + '\n// changed source');
+  await loadPluginFile(file); await loadPluginFile(file);
+  assert.equal(Reflect.get(globalThis, counter), 2); Reflect.deleteProperty(globalThis, counter);
+});
+
+test('a durable pending service survives hub restart and blocks another worker until owner inspection and explicit retry', async () => {
+  const s = sandbox(), file = join(s.home, 'restart.sqlite');
+  let db = openDb(file), hub = new Hub({ db, token: 'fixture', machineId: 'm-old', includeMock: true });
+  const project = await hub.coord.registerProject(s.repo);
+  const task = hub.coord.addTasks(project.id, [{ title: 'Recover pending remote browser verification', prompt: 'Implement a small fixture', agent: 'mock' }], 'test').created[0]!;
+  const requestId = randomUUID();
+  beginService(db, `task:${task.id}`, { requestId, capability: 'browser.verify', provider: 'fixture-remote', receiptPath: '/private/old-worker-receipt.json' },
+    { projectId: project.id, taskIds: [task.id], machineId: 'm-old' });
+  db.close();
+  db = openDb(file); hub = new Hub({ db, token: 'fixture', machineId: 'm-new', includeMock: true });
+  try {
+    assert.equal((await hub.client['providers.pending']({}))[0]!.requestId, requestId);
+    assert.equal(hub.coord.claimNext({ machineId: 'm-new', agents: ['mock'], repos: { [project.id]: s.repo }, runningByAgent: {} }), null);
+    assert.equal(hub.coord.getTask(task.id)!.status, 'needs_human');
+    assert.throws(() => hub.coord.control(task.id, 'retry', 'test'), /pending provider/);
+    await hub.client['providers.resolve']({ requestId, note: 'Inspected old worker and confirmed the remote session was terminated.' });
+    assert.equal((await hub.client['providers.pending']({})).length, 0);
+    assert.equal(hub.coord.getTask(task.id)!.status, 'needs_human', 'inspection does not dispatch another job');
+    hub.coord.control(task.id, 'retry', 'test');
+    assert.equal(hub.coord.claimNext({ machineId: 'm-new', agents: ['mock'], repos: { [project.id]: s.repo }, runningByAgent: {} })?.task.id, task.id);
+  } finally { await hub.integrator.stop(); db.close(); }
 });

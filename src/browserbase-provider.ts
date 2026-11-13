@@ -1,5 +1,5 @@
 import * as z from 'zod/v4';
-import { lstatSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { runOwnedProcess, type OwnedRunOptions } from './proc.ts';
@@ -29,6 +29,7 @@ export async function runBrowserbase(options: z.infer<typeof BrowserbaseOptionsS
   let dispatched = false;
   let output = '';
   let terminalStatus: string | null = null;
+  const inputFile = join(ctx.evidenceDir, 'input.json');
   const request = async (url: string, body?: unknown, signal?: AbortSignal) => {
     const response = await fetcher(url, { method: body === undefined ? 'GET' : 'POST',
       headers: { 'X-BB-API-Key': key, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
@@ -38,6 +39,8 @@ export async function runBrowserbase(options: z.infer<typeof BrowserbaseOptionsS
   };
   try {
     ctx.signal?.throwIfAborted();
+    const input = JSON.stringify(ctx.input);
+    writeFileSync(inputFile, input, { mode: 0o600 });
     dispatched = true;
     const created = await request(API, { ...(options.projectId ? { projectId: options.projectId } : {}),
       ...(options.region ? { region: options.region } : {}), timeout: options.timeoutSeconds, keepAlive: false,
@@ -56,7 +59,9 @@ export async function runBrowserbase(options: z.infer<typeof BrowserbaseOptionsS
     mkdirSync(artifacts, { mode: 0o700 });
     // The connection URL is a credential too. Only a trusted test command may receive it.
     const env: NodeJS.ProcessEnv = { ...ctx.env, CI: '1', BROWSERBASE_CDP_URL: session.connectUrl, BROWSERBASE_SESSION_ID: session.id,
-      YARDMASTER_ARTIFACT_DIR: artifacts, YARDMASTER_VERIFY_SHA: ctx.sha ?? '', YARDMASTER_VERIFY_INPUT: JSON.stringify(ctx.input) };
+      YARDMASTER_ARTIFACT_DIR: artifacts, YARDMASTER_VERIFY_SHA: ctx.sha ?? '', YARDMASTER_VERIFY_INPUT_FILE: inputFile };
+    if (Buffer.byteLength(input) <= 32 * 1024) env.YARDMASTER_VERIFY_INPUT = input;
+    else delete env.YARDMASTER_VERIFY_INPUT;
     delete env.BROWSERBASE_API_KEY;
     const decoder = new StringDecoder('utf8');
     const captureLimit = 64 * 1024 + Math.max(...[key, session.connectUrl, ...options.requiredEnv.map(name => ctx.env[name] ?? '')]
@@ -74,6 +79,8 @@ export async function runBrowserbase(options: z.infer<typeof BrowserbaseOptionsS
     // Do not echo HTTP bodies, exception URLs, test stderr, or connection details.
     result.summary = session ? 'Browser verification could not finish. Inspect the recorded session before retrying.' : 'Browserbase session creation did not complete. A session may exist until its timeout; no fallback was attempted.';
   } finally {
+    try { rmSync(inputFile, { force: true }); }
+    catch { result = { ...result, status: 'unknown', summary: 'Browser input cleanup failed; inspect its private receipt directory before retrying.' }; }
     if (session) {
       try {
         const deadline = Date.now() + 10_000;
@@ -104,7 +111,7 @@ export async function runBrowserbase(options: z.infer<typeof BrowserbaseOptionsS
     try { for (const [name, value] of new URL(session.connectUrl).searchParams) if (name !== 'sessionId' && value) secrets.push(value, encodeURIComponent(value)); }
     catch { /* Invalid connection details were already rejected. */ }
   }
-  for (const secret of secrets) output = output.split(secret).join('[redacted]');
+  for (const secret of [...new Set(secrets)].sort((a, b) => b.length - a.length)) output = output.split(secret).join('[redacted]');
   output = output.slice(-64 * 1024).replace(/^[\uDC00-\uDFFF]/u, '');
   writeFileSync(join(ctx.evidenceDir, 'command.log'), output, { mode: 0o600 });
   const artifactFiles: string[] = [];
