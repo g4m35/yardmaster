@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+- Optional service-provider plugins and project-local commands share capability routing across research, builds, CI, browsers, devices, deployment, data, observability and notifications. Existing coding-agent adapters and notifier plugins remain compatible.
+- `ym providers list|plan|run` exposes provider prerequisites, ordered preferences, locality and cost policies. Fallback is pre-dispatch only; failed, interrupted or malformed service results never trigger automatic replay through another provider.
+- Versioned JSON request/result contracts, bounded output, declared credential forwarding/redaction and owned-process cleanup support provider authors. Discovery is not account/entitlement verification; vendor integrations and automatic task scheduling require separate acceptance.
+
 ## 0.9.1
 - Malformed unauthenticated request targets return400; rejected asynchronous handlers no longer terminate the hub.
 - Native hooks exempt only the exact canonical session. Session identities are scoped by project and machine, including MCP connections addressing multiple repositories; matching legacy claims remain intact. Native submissions retain the checkout captured at claim time across later nested-directory or linked-checkout status calls.

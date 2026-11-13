@@ -202,8 +202,11 @@ ${bold('Machines')}
                                HTTPS or loopback is the default; no network setup is performed.
 
 ${bold('Extend')}
-  ym plugin new <name> [--kind adapter|notifier] [--describe "..."] [--with claude]
+  ym plugin new <name> [--kind adapter|notifier|provider] [--describe "..."] [--with claude]
   ym plugin test <name>   ym plugin list   ym presets   ym doctor   ym demo
+  ym providers list [--json]              configured service providers and routing
+  ym providers plan <capability> [--json]  explain selection without dispatching work
+  ym providers run <capability> [--input file.json] [--json]  explicitly execute once
 `;
 
 async function cmdInit(a: Args) {
@@ -848,8 +851,9 @@ async function cmdPlugin(a: Args) {
     console.log(`Plugins in ${paths.plugins()}:`);
     for (const n of loaded.adapters) console.log(`  ${green('adapter')}  ${n}`);
     for (const n of loaded.notifiers) console.log(`  ${green('notifier')} ${n.name}`);
+    for (const p of loaded.providers) console.log(`  ${green('provider')} ${p.name}: ${Object.keys(p.capabilities).join(', ')}`);
     for (const e of loaded.errors) console.log(`  ${red('broken')}   ${e.dir}: ${clip(e.error, 120)}`);
-    if (!loaded.adapters.length && !loaded.notifiers.length && !loaded.errors.length) console.log(dim('  none yet. Try: ym plugin new my-agent --describe "drive the aider CLI" --with claude'));
+    if (!loaded.adapters.length && !loaded.notifiers.length && !loaded.providers.length && !loaded.errors.length) console.log(dim('  none yet. Try: ym plugin new my-agent --describe "drive the aider CLI" --with claude'));
     return;
   }
   const name = a._[2] ?? die(`ym plugin ${sub ?? 'new'} <name>`);
@@ -859,8 +863,8 @@ async function cmdPlugin(a: Args) {
     process.exit(r.ok ? 0 : 1);
   }
   if (sub === 'new') {
-    const kind = (flag(a, 'kind') ?? 'adapter') as 'adapter' | 'notifier';
-    if (kind !== 'adapter' && kind !== 'notifier') die('--kind must be adapter or notifier');
+    const kind = (flag(a, 'kind') ?? 'adapter') as 'adapter' | 'notifier' | 'provider';
+    if (kind !== 'adapter' && kind !== 'notifier' && kind !== 'provider') die('--kind must be adapter, notifier or provider');
     const describe = flag(a, 'describe');
     const dir = scaffoldPlugin(name, kind, describe);
     console.log(green(`✔ Created ${dir}`));
@@ -886,6 +890,45 @@ async function cmdPlugin(a: Args) {
   die('ym plugin new|test|list');
 }
 
+async function cmdProviders(a: Args) {
+  const { planService, providerInventory, runService } = await import('./providers.ts');
+  const sub = a._[1] ?? 'list';
+  if (!['list', 'plan', 'run'].includes(sub)) die('ym providers list|plan|run [capability]');
+  for (const name of Object.keys(a.flags)) if (!['json', 'input', 'dry-run', 'repo'].includes(name)) die(`Unknown provider option --${name}`);
+  if (a._.length > (sub === 'list' ? 2 : 3)) die('Too many provider arguments. Use --input file.json for request data.');
+  if (a.flags.input === true) die('--input needs a JSON file path');
+  const cwd = process.cwd();
+  const config = loadConfig(cwd);
+  const loaded = await loadPlugins();
+  const report = providerInventory(config.services, loaded.providers, cwd);
+  if (sub === 'list') {
+    if (a.flags.json) return console.log(JSON.stringify({ ...report, errors: loaded.errors }, null, 2));
+    console.log(`Services: ${report.categories.join(', ')}`);
+    console.log('Discovery checks executable and environment presence only; sign-in and quota are not checked.');
+    for (const p of report.providers) console.log(`${p.name}: ${p.installed ? (p.enabled ? 'enabled' : 'disabled') : 'not installed'} (${p.capabilities.join(', ')})`);
+    for (const r of report.routes) console.log(`${r.capability}: ${r.selected ?? 'no eligible provider'}`);
+    for (const error of loaded.errors) console.log(`Plugin failed to load: ${error.dir}`);
+    if (!report.routes.length) console.log('No service routes configured. Add services.local commands or enable a provider; see docs/PROVIDERS.md.');
+    return;
+  }
+  const capability = a._[2] ?? die(`ym providers ${sub} <capability>`);
+  if (sub === 'plan' || a.flags['dry-run']) {
+    console.log(JSON.stringify(planService(capability, config.services, loaded.providers, cwd), null, 2));
+    return;
+  }
+  const inputFile = flag(a, 'input');
+  if (inputFile && statSync(resolve(inputFile)).size > 1024 * 1024) die('Provider input exceeds 1 MiB');
+  const input = inputFile ? JSON.parse(readFileSync(resolve(inputFile), 'utf8')) as unknown : {};
+  const stop = new AbortController();
+  const abort = () => stop.abort('provider command interrupted');
+  process.once('SIGINT', abort); process.once('SIGTERM', abort);
+  try {
+    const result = await runService(capability, input, config.services, loaded.providers, { cwd, signal: stop.signal });
+    console.log(JSON.stringify(result, null, 2));
+    if (result.result.status !== 'passed') process.exitCode = 1;
+  } finally { process.off('SIGINT', abort); process.off('SIGTERM', abort); }
+}
+
 async function cmdDoctor(a: Args) {
   const checks: [string, boolean, string][] = [];
   const [major, minor] = process.versions.node.split('.').map(Number) as [number, number];
@@ -895,6 +938,10 @@ async function cmdDoctor(a: Args) {
   const root = await mainRepoRoot(process.cwd()).catch(() => null);
   checks.push(['inside a git repository', !!root, root ?? 'run from your project folder']);
   const config = loadConfig(root ?? undefined);
+  const { providerInventory } = await import('./providers.ts');
+  const servicePlugins = await loadPlugins();
+  const services = providerInventory(config.services, servicePlugins.providers, root ?? process.cwd());
+  console.log(`Service providers: ${services.providers.filter(p => p.enabled && p.installed).length} enabled/installed, ${services.routes.filter(r => r.selected).length} eligible routes; sign-in, entitlement and quota unverified. Run "ym providers list" for details.`);
   const agents = detectAgents(config);
   checks.push(['at least one coding agent', agents.length > 0, agents.join(', ') || 'install Claude Code, Codex, OpenCode, Cursor CLI or Gemini CLI']);
   const remote = flag(a, 'hub') ?? process.env.YARDMASTER_HUB;
@@ -1045,6 +1092,7 @@ async function main() {
     case 'mcp': return cmdMcp(a);
     case 'hook': return cmdHook(a);
     case 'plugin': return cmdPlugin(a);
+    case 'providers': return cmdProviders(a);
     case 'doctor': return cmdDoctor(a);
     case 'presets': return cmdPresets();
     case 'dashboard': return cmdDashboard(a);

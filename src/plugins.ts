@@ -7,10 +7,11 @@ import type { Adapter, AgentEvent } from './adapters/types.ts';
 import { DEFAULT_AGENTS, defaultAgentSettings } from './config.ts';
 import { paths } from './paths.ts';
 import type { YardEvent } from './types.ts';
+import { ProviderPluginSchema, type ProviderPlugin } from './provider-contract.ts';
 
 /**
- * "Everything is a plugin", borrowed from DeepSeek Harness: agents, notifications, and checks are all
- * plugins with the same shape as the built-ins, and `ym plugin new` can have your own agent write one.
+ * Agent adapters, notifiers and service providers share discovery and validation.
+ * Service plugins declare commands; discovery never dispatches those commands.
  */
 
 const fn = z.custom<(...args: never[]) => unknown>((v) => typeof v === 'function', 'must be a function');
@@ -33,12 +34,13 @@ const NotifierPluginSchema = z.object({
   onEvent: fn,
 });
 
-export const PluginSchema = z.discriminatedUnion('kind', [AdapterPluginSchema, NotifierPluginSchema]);
+export const PluginSchema = z.discriminatedUnion('kind', [AdapterPluginSchema, NotifierPluginSchema, ProviderPluginSchema]);
 export type Plugin = z.infer<typeof PluginSchema>;
 
 export interface LoadedPlugins {
   adapters: string[];
   notifiers: { name: string; onEvent: (e: YardEvent) => unknown }[];
+  providers: ProviderPlugin[];
   errors: { dir: string; error: string }[];
 }
 
@@ -55,7 +57,8 @@ function entryOf(dir: string): string | null {
 }
 
 export async function loadPlugins(root = paths.plugins()): Promise<LoadedPlugins> {
-  const out: LoadedPlugins = { adapters: [], notifiers: [], errors: [] };
+  const out: LoadedPlugins = { adapters: [], notifiers: [], providers: [], errors: [] };
+  const duplicateProviders = new Set<string>();
   for (const name of readdirSync(root)) {
     const dir = join(root, name);
     const entry = entryOf(dir);
@@ -66,8 +69,15 @@ export async function loadPlugins(root = paths.plugins()): Promise<LoadedPlugins
         registerAdapter({ ...p, label: p.label ?? p.name } as unknown as Adapter);
         DEFAULT_AGENTS[p.name] ??= defaultAgentSettings();
         out.adapters.push(p.name);
-      } else {
+      } else if (p.kind === 'notifier') {
         out.notifiers.push({ name: p.name, onEvent: p.onEvent as (e: YardEvent) => unknown });
+      } else {
+        if (duplicateProviders.has(p.name) || out.providers.some(existing => existing.name === p.name)) {
+          duplicateProviders.add(p.name);
+          out.providers = out.providers.filter(existing => existing.name !== p.name);
+          throw new Error(`Duplicate service provider ${p.name}; all copies disabled`);
+        }
+        out.providers.push(p);
       }
     } catch (err) {
       out.errors.push({ dir, error: (err as Error).message });
@@ -106,14 +116,14 @@ export async function testPlugin(dir: string): Promise<{ ok: boolean; checks: { 
     } catch (err) {
       checks.push({ name: 'parse() handles odd input without throwing', ok: false, detail: (err as Error).message });
     }
-  } else {
+  } else if (plugin.kind === 'notifier') {
     try {
       await (plugin.onEvent as (e: YardEvent) => unknown)({ id: 0, project_id: null, task_id: null, level: 'info', kind: 'test', message: 'plugin test', data: null, ts: Date.now() });
       checks.push({ name: 'onEvent() accepts an event', ok: true });
     } catch (err) {
       checks.push({ name: 'onEvent() accepts an event', ok: false, detail: (err as Error).message });
     }
-  }
+  } else checks.push({ name: 'provider manifest is valid (commands not executed; authentication not checked)', ok: true });
   return { ok: checks.every((c) => c.ok), checks };
 }
 
@@ -162,7 +172,48 @@ Tool events drive loop detection, usage events drive budgets, result text become
     };
 `;
 
-const TEMPLATES: Record<'adapter' | 'notifier', (name: string) => string> = {
+const PROVIDER_GUIDE = `
+## kind: "provider" (use an optional service)
+
+Declare apiVersion: 1, name, and capabilities. Each capability has service
+(research, build, ci, browser, device, deploy, data, observability, notification),
+command (executable and argv array), locality (local or remote), cost
+(free, included, metered or unknown), requiredEnv (variable names only), and timeoutMs.
+Use absolute helper-script paths derived from import.meta.url: commands run in the project directory.
+
+Enable the provider in services.providers and select it in services.routes in yardmaster.json.
+Installing a plugin does not enable it. Routes list candidates in explicit preference order;
+local fallback must be named in that list. Without a route only services.local commands are considered.
+allowedCosts defaults to ["free"]; included allowances and metered services must be explicitly allowed.
+
+JSON protocol: read one object from stdin:
+{ apiVersion: 1, requestId, capability, input, options }.
+Write exactly one JSON object to stdout after the operation finishes:
+{ status: "passed" | "failed" | "unknown", summary, data?, artifacts?: string[], costUsd?: number | null }.
+Use stderr for private diagnostics, which Yardmaster does not print. Do not put credentials in results.
+An accepted remote job is not a passed test: wait for its terminal result.
+Unknown or interrupted results never trigger automatic fallback/replay. Use requestId as an
+idempotency key where supported. A remote adapter must manage its own remote job/session cleanup.
+Free local commands may use protocol: "command" to report by exit code; they receive no JSON input/options.
+
+ym providers list and plan inspect executable/environment presence, not authentication or account quota.
+ym plugin test validates the manifest without executing provider commands. Real service integration
+needs its own acceptance test. Plugins and configured commands are trusted local code, not sandboxed.
+`;
+
+const TEMPLATES: Record<'adapter' | 'notifier' | 'provider', (name: string) => string> = {
+  provider: (name) => `// Declarative provider: implement provider.mjs using the JSON protocol in docs/PROVIDERS.md.
+import { fileURLToPath } from 'node:url';
+export default {
+  kind: 'provider', apiVersion: 1, name: '${name}', label: '${name}',
+  capabilities: {
+    'verify': {
+      service: 'ci', command: [process.execPath, fileURLToPath(new URL('./provider.mjs', import.meta.url))],
+      locality: 'remote', cost: 'unknown', requiredEnv: [], timeoutMs: 120000,
+    },
+  },
+};
+`,
   adapter: (name) => `// Yardmaster adapter plugin: ${name}. See PLUGIN_GUIDE.md.
 export default {
   kind: 'adapter',
@@ -189,13 +240,20 @@ export default {
 `,
 };
 
-export function scaffoldPlugin(name: string, kind: 'adapter' | 'notifier', describe?: string): string {
+export function scaffoldPlugin(name: string, kind: 'adapter' | 'notifier' | 'provider', describe?: string): string {
   if (!/^[a-z][a-z0-9-]*$/.test(name)) throw new Error('Plugin names are lowercase letters, digits and dashes, starting with a letter.');
+  if (kind === 'provider' && name === 'local') throw new Error('local is reserved for project commands.');
   const dir = join(paths.plugins(), name);
   if (existsSync(dir)) throw new Error(`${dir} already exists.`);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'index.mjs'), TEMPLATES[kind](name));
-  writeFileSync(join(dir, 'PLUGIN_GUIDE.md'), GUIDE);
+  writeFileSync(join(dir, 'PLUGIN_GUIDE.md'), GUIDE + PROVIDER_GUIDE);
+  if (kind === 'provider') writeFileSync(join(dir, 'provider.mjs'), `// Replace this scaffold with the provider's API or CLI integration.
+let input = '';
+for await (const chunk of process.stdin) input += chunk;
+const request = JSON.parse(input);
+console.log(JSON.stringify({ status: 'unknown', summary: 'Provider scaffold: implement the service request before use.', data: { requestId: request.requestId } }));
+`);
   if (describe) writeFileSync(join(dir, 'REQUEST.md'), `# What this plugin should do\n\n${describe}\n`);
   return dir;
 }
