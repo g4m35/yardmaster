@@ -254,6 +254,7 @@ test('receipt download validation rejects the truncated connector response befor
   assert.throws(() => collectReceiptArchive({ data: bytes.toString('base64') }, '0'.repeat(64), target), /checksum/);
   assert.equal(collectReceiptArchive({ data: bytes.toString('base64'), size: bytes.length }, digest, target).status, 'verified');
   assert.deepEqual(readFileSync(target), bytes);
+  assert.equal(collectReceiptArchive(bytes, digest, target).status, 'verified', 'native CLI downloads are raw binary');
 });
 
 test('large browser requests use a private input file instead of exceeding the OS environment limit', async () => {
