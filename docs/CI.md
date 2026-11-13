@@ -1,5 +1,21 @@
 # Spending less on CI
 
+## Temporary hosted verification
+
+If GitHub Actions cannot start, an independently hosted Linux VM can run
+`bash scripts/hosted-verification.sh <expected-head-SHA> <baseline-SHA>` from
+a clean checkout with both commits available and Node 24 installed. This runs
+typecheck, build, the Node 24 and Node 22 suites, package/binary smoke checks
+and the interleaved benchmark. Receipts go to `/tmp/yardmaster-verification`;
+copy them out before stopping the VM. The script refuses macOS and checks the
+source identity before and after the run. It does not provision a VM itself.
+
+Use a task-owned disposable environment with a hard lifetime limit. No personal
+environment files or credentials are needed for the public source checkout.
+Pay-as-you-go usage requires an authorized budget. A Linux pass does not claim
+macOS matrix coverage and must not be relabeled as a GitHub Actions pass or used
+to bypass required checks. Existing workflow/protection settings remain intact.
+
 More agents means more pushes, and every push to a pull request runs your whole GitHub Actions suite. On private
 repositories that drains the monthly allowance fast: GitHub Free includes $12 of Actions usage (2,000 Linux
 minutes), Pro and Team $18 (3,000). One Claude Code session used up a 2,000-minute allowance in under three hours

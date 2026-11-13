@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { accessSync, constants, statSync } from 'node:fs';
-import { delimiter, isAbsolute, resolve } from 'node:path';
+import { delimiter, extname, isAbsolute, resolve } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { runOwnedProcess } from './proc.ts';
 import { ProviderResultSchema, SERVICE_KINDS, type ProviderOperation, type ProviderPlugin, type ServicesConfig } from './provider-contract.ts';
@@ -23,11 +23,16 @@ export interface ServicePlan {
   unavailable: { provider: string; reason: string }[];
 }
 
-function executable(command: string, cwd: string, env: NodeJS.ProcessEnv): string | null {
-  const locations = isAbsolute(command) || command.includes('/') || command.includes('\\')
-    ? [resolve(cwd, command)] : (env.PATH ?? '').split(delimiter).map(dir => resolve(cwd, dir, command));
+export function resolveProviderExecutable(command: string, cwd: string, env: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform): string | null {
+  // cmd/bat wrappers require a shell. Use the actual runtime and script path instead.
+  if (platform === 'win32' && /\.(cmd|bat)$/i.test(command)) return null;
+  const suffixes = platform === 'win32' && !extname(command)
+    ? ['', ...new Set((env.PATHEXT ?? '.EXE;.COM').split(';').filter(ext => /^\.(exe|com)$/i.test(ext)).flatMap(ext => [ext.toLowerCase(), ext.toUpperCase()]))] : [''];
+  const bases = isAbsolute(command) || command.includes('/') || command.includes('\\')
+    ? [resolve(cwd, command)] : (env.PATH ?? '').split(platform === 'win32' ? ';' : delimiter).map(dir => resolve(cwd, dir, command));
+  const locations = bases.flatMap(base => suffixes.map(suffix => base + suffix));
   for (const file of locations) {
-    try { if (statSync(file).isFile()) { accessSync(file, constants.X_OK); return file; } } catch { /* next PATH entry */ }
+    try { if (statSync(file).isFile()) { accessSync(file, platform === 'win32' ? constants.F_OK : constants.X_OK); return file; } } catch { /* next PATH entry */ }
   }
   return null;
 }
@@ -37,7 +42,7 @@ function operationFor(provider: string, capability: string, services: ServicesCo
   return capabilities && Object.hasOwn(capabilities, capability) ? capabilities[capability] : undefined;
 }
 
-export function planService(capability: string, services: ServicesConfig, plugins: ProviderPlugin[], cwd: string, env: NodeJS.ProcessEnv = process.env): ServicePlan {
+export function planService(capability: string, services: ServicesConfig, plugins: ProviderPlugin[], cwd: string, env: NodeJS.ProcessEnv = process.env, input: unknown = {}): ServicePlan {
   const route = Object.hasOwn(services.routes, capability) ? services.routes[capability] : undefined;
   // Without a route only an explicitly configured local command is eligible.
   const prefer = [...new Set(route?.prefer ?? ['local'])];
@@ -51,7 +56,8 @@ export function planService(capability: string, services: ServicesConfig, plugin
     if (provider === 'local' && (op.locality !== 'local' || op.cost !== 'free')) reasons.push('local commands must declare local execution and free service usage');
     if (route && route.locality !== 'any' && route.locality !== op.locality) reasons.push(`requires ${route.locality} execution`);
     if (!(route?.allowedCosts ?? ['free']).includes(op.cost)) reasons.push(`cost policy excludes ${op.cost} usage`);
-    if (!executable(op.command[0]!, cwd, env)) reasons.push('executable is missing or not executable');
+    if (op.protocol === 'command' && (JSON.stringify(input) !== '{}' || Object.keys(services.providers[provider]?.options ?? {}).length)) reasons.push('exit-code commands cannot consume JSON input or provider options');
+    if (!resolveProviderExecutable(op.command[0]!, cwd, env)) reasons.push('executable is missing or not executable');
     for (const name of op.requiredEnv) {
       if (BLOCKED_ENV.has(name)) reasons.push(`environment variable ${name} cannot be forwarded to providers`);
       else if (!env[name]) reasons.push(`missing environment variable ${name}`);
@@ -89,7 +95,7 @@ export async function runService(capability: string, input: unknown, services: S
   cwd: string; env?: NodeJS.ProcessEnv; signal?: AbortSignal;
 }) {
   const env = options.env ?? process.env;
-  const plan = planService(capability, services, plugins, options.cwd, env);
+  const plan = planService(capability, services, plugins, options.cwd, env, input);
   if (!plan.selected) throw new Error(`No eligible provider for ${capability}. Run "ym providers plan ${capability}" and configure a compatible provider or local command.`);
   const provider = plan.selected;
   const op = operationFor(provider, capability, services, plugins)!;
@@ -97,7 +103,7 @@ export async function runService(capability: string, input: unknown, services: S
     throw new Error('Exit-code commands do not consume JSON input or provider options. Use the JSON protocol. No command was dispatched.');
   }
   // Resolve again immediately before dispatch, and never execute via a shell.
-  const command = executable(op.command[0]!, options.cwd, env);
+  const command = resolveProviderExecutable(op.command[0]!, options.cwd, env);
   if (!command) throw new Error('Selected provider executable is no longer available. No command was dispatched.');
   const childEnv: NodeJS.ProcessEnv = {};
   for (const name of [...BASE_ENV, ...op.requiredEnv]) if (!BLOCKED_ENV.has(name) && env[name] !== undefined) childEnv[name] = env[name];
@@ -107,13 +113,15 @@ export async function runService(capability: string, input: unknown, services: S
   if (Buffer.byteLength(envelope) > 1024 * 1024) throw new Error('Provider input exceeds 1 MiB. No command was dispatched.');
   let stdout = '';
   let outputBytes = 0;
+  let outputTruncated = false;
   const decoder = new StringDecoder('utf8');
   const execution = await runOwnedProcess(command, op.command.slice(1), {
     cwd: options.cwd, env: childEnv, stdin: op.protocol === 'json' ? envelope : undefined, timeoutMs: op.timeoutMs, signal: options.signal,
     onStdout: chunk => {
       outputBytes += chunk.length;
-      if (outputBytes > 1024 * 1024) throw new Error('Provider output exceeds 1 MiB');
+      if (op.protocol === 'json' && outputBytes > 1024 * 1024) throw new Error('Provider output exceeds 1 MiB');
       stdout += decoder.write(chunk);
+      if (op.protocol === 'command' && stdout.length > 64 * 1024) { stdout = stdout.slice(-64 * 1024).replace(/^[\uDC00-\uDFFF]/u, ''); outputTruncated = true; }
     },
     // Never echo provider stderr: third-party CLIs can include credentials or private request bodies.
   });
@@ -123,15 +131,16 @@ export async function runService(capability: string, input: unknown, services: S
   if (op.protocol === 'command' && execution.end === 'exit' && execution.reaped && execution.code !== null) {
     return { ...base, result: { status: execution.code === 0 ? 'passed' as const : 'failed' as const,
       summary: execution.code === 0 ? 'Configured local command passed.' : `Configured local command failed (exit ${execution.code}).`,
-      data: redactValue({ stdout }, secrets), artifacts: [], costUsd: null } };
+      data: redactValue({ stdout, truncated: outputTruncated }, secrets), artifacts: [], costUsd: null } };
   }
   if (execution.end !== 'exit' || execution.code !== 0 || !execution.reaped) {
     return { ...base, result: { status: 'unknown' as const, summary: 'Provider did not complete cleanly. Inspect the service state before retrying; the action may have reached it.', artifacts: [], costUsd: null } };
   }
   try {
     const parsed = ProviderResultSchema.parse(JSON.parse(stdout));
-    // Redact all returned string fields, including nested data/artifact references.
-    const result = redactValue(parsed, secrets) as typeof parsed;
+    // Preserve the validated envelope/status; only provider-supplied content is redacted.
+    const result = { ...parsed, summary: redactValue(parsed.summary, secrets) as string,
+      data: redactValue(parsed.data, secrets), artifacts: parsed.artifacts.map(item => redactValue(item, secrets) as string) };
     return { ...base, result };
   } catch {
     return { ...base, result: { status: 'unknown' as const, summary: 'Provider returned an invalid result. The action may have reached the service; no fallback was attempted.', artifacts: [], costUsd: null } };

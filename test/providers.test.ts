@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { ProviderPluginSchema, ProviderOperationSchema, ServicesConfigSchema } from '../src/provider-contract.ts';
-import { planService, providerInventory, runService } from '../src/providers.ts';
+import { planService, providerInventory, resolveProviderExecutable, runService } from '../src/providers.ts';
 import { loadPlugins, scaffoldPlugin, testPlugin } from '../src/plugins.ts';
 import { resolveConfig, unknownSettings } from '../src/config.ts';
 
@@ -93,6 +93,26 @@ test('JSON adapters receive structured input/options and only declared environme
   assert.equal(result.result.costUsd, null, 'unreported cost is unknown, even on included allowance');
 });
 
+test('credential collisions do not rewrite validated status or result fields', async () => {
+  const config = ServicesConfigSchema.parse({ providers: { 'existing-ci': {} }, routes: { verify: { prefer: ['existing-ci'], allowedCosts: ['included'] } } });
+  for (const secret of ['us', 'passed', 'true']) {
+    const result = await runService('verify', {}, config, [plugin], { cwd: root, env: { ...env, SERVICE_SECRET: secret } });
+    assert.equal(result.result.status, 'passed');
+    assert.equal(Object.hasOwn(result.result, 'status'), true);
+    assert.match(result.result.summary, /\[redacted\]/);
+  }
+});
+
+test('Windows discovery finds executable extensions without launching shell wrappers', () => {
+  const bin = join(root, 'win-bin'); mkdirSync(bin);
+  writeFileSync(join(bin, 'node.exe'), 'fixture');
+  writeFileSync(join(bin, 'npm.cmd'), 'fixture');
+  const winEnv = { PATH: bin, PATHEXT: '.EXE;.CMD;.BAT;.COM' };
+  assert.equal(resolveProviderExecutable('node', root, winEnv, 'win32'), join(bin, 'node.exe'));
+  assert.equal(resolveProviderExecutable('npm', root, winEnv, 'win32'), null);
+  assert.equal(resolveProviderExecutable('npm.cmd', root, winEnv, 'win32'), null);
+});
+
 test('a dispatched invalid result or failure never triggers another provider', async () => {
   const fallback = ProviderOperationSchema.parse({ ...local, command: [process.execPath, '-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`] });
   const config = ServicesConfigSchema.parse({ providers: { 'existing-ci': {} }, routes: { verify: { prefer: ['existing-ci', 'local'], allowedCosts: ['included', 'free'] } }, local: { verify: fallback } });
@@ -108,7 +128,17 @@ test('local exit-code checks preserve success and failure, and refuse ignored JS
   assert.equal((await runService('verify', {}, config, [], { cwd: root, env })).result.status, 'passed');
   const failed = await runService('broken', {}, config, [], { cwd: root, env });
   assert.equal(failed.result.status, 'failed'); assert.equal(failed.execution.code, 17);
-  await assert.rejects(runService('verify', { ignored: true }, config, [], { cwd: root, env }), /do not consume JSON/);
+  assert.equal(planService('verify', config, [], root, env, { ignored: true }).selected, null);
+  await assert.rejects(runService('verify', { ignored: true }, config, [], { cwd: root, env }), /No eligible provider/);
+});
+
+test('verbose exit-code commands finish while retaining a bounded output tail', async () => {
+  const complete = join(root, 'verbose-completed');
+  const config = ServicesConfigSchema.parse({ local: { verify: { ...local, command: [process.execPath, '-e', `process.stdout.write('x'.repeat(1800000), () => require('node:fs').writeFileSync(${JSON.stringify(complete)}, 'complete'))`] } } });
+  const result = await runService('verify', {}, config, [], { cwd: root, env });
+  assert.equal(result.result.status, 'passed'); assert.equal(existsSync(complete), true);
+  const data = result.result.data as { stdout: string; truncated: boolean };
+  assert.equal(data.truncated, true); assert(data.stdout.length <= 65536);
 });
 
 test('timeout and cancellation return unknown rather than a passing check', async () => {
@@ -124,6 +154,8 @@ test('timeout and cancellation return unknown rather than a passing check', asyn
 test('provider scaffold validates without executing and duplicate identifiers are disabled', async () => {
   const dir = scaffoldPlugin('fixture-provider', 'provider');
   assert.equal((await testPlugin(dir)).ok, true);
+  const scaffold = (await loadPlugins(join(home, 'plugins'))).providers[0]!;
+  assert.equal(scaffold.capabilities.verify!.command[0], 'node', 'standalone YM is not a JavaScript interpreter');
   const plugins = join(home, 'plugins');
   const duplicate = join(plugins, 'duplicate'); mkdirSync(duplicate);
   writeFileSync(join(duplicate, 'index.mjs'), `export default ${JSON.stringify({ ...plugin, name: 'fixture-provider' })};`);
@@ -137,6 +169,10 @@ test('CLI routes without hub/account setup, supports JSON and refuses accidental
   const cli = (args: string[]) => spawnSync(process.execPath, [new URL('../src/cli.ts', import.meta.url).pathname, 'providers', ...args], { cwd: project, env: { ...env, YARDMASTER_HOME: join(root, 'cli-home') }, encoding: 'utf8', timeout: 15000 });
   const plan = cli(['plan', 'verify', '--json']); assert.equal(plan.status, 0, plan.stderr); assert.equal(JSON.parse(plan.stdout).selected, 'local');
   const run = cli(['run', 'verify', '--json']); assert.equal(run.status, 0, run.stderr); assert.equal(JSON.parse(run.stdout).result.status, 'passed');
+  spawnSync('git', ['init', '-q'], { cwd: project });
+  const nested = join(project, 'src', 'nested'); mkdirSync(nested, { recursive: true });
+  const fromSubdir = spawnSync(process.execPath, [new URL('../src/cli.ts', import.meta.url).pathname, 'providers', 'plan', 'verify', '--json'], { cwd: nested, env: { ...env, YARDMASTER_HOME: join(root, 'cli-home') }, encoding: 'utf8', timeout: 15000 });
+  assert.equal(fromSubdir.status, 0, fromSubdir.stderr); assert.equal(JSON.parse(fromSubdir.stdout).selected, 'local');
   const typo = cli(['run', 'verify', '--provider', 'missing']); assert.notEqual(typo.status, 0); assert.match(typo.stderr, /Unknown provider option/);
   const dry = cli(['run', 'verify', '--dry-run', '--input', '/not-a-real-file']); assert.equal(dry.status, 0, dry.stderr); assert.equal(JSON.parse(dry.stdout).selected, 'local');
 });

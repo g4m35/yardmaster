@@ -5,7 +5,7 @@ path through your own local commands. Coding-agent adapters and notification
 plugins continue to work as before. Service plugins add capabilities without
 requiring a vendor SDK in the core.
 
-This release adds explicit CLI execution and a Node API. It does not
+This release adds explicit CLI execution and importable runtime helpers. It does not
 automatically replace task verification, schedule remote jobs, connect accounts
 or bundle every vendor below. Existing task checks, review and integration
 gates retain their current behavior.
@@ -38,6 +38,10 @@ browser or take a different session's device.
 Add commands you already use to `yardmaster.json`. Commands are executable and
 argument arrays, not shell strings. They run from the project directory.
 Discovery installs and downloads nothing.
+
+Commands receive a small base environment. List required variables such as
+JAVA_HOME or DATABASE_URL in requiredEnv; unrelated environment variables are
+not inherited. Values listed there are treated as sensitive in returned content.
 
 ```json
 {
@@ -111,9 +115,10 @@ of running full suites locally.
 }
 ```
 
-4. Inspect `ym providers plan verify --json`, then explicitly execute with
+4. Inspect `ym providers plan verify --input request.json --json`, then explicitly execute with
    `ym providers run verify --input request.json --json`. `--dry-run` prints the
-   route without reading input or running a provider. `ym doctor` summarizes
+   route without reading input or running a provider; use plan with --input to
+   check input-aware fallback eligibility. `ym doctor` summarizes
    configured/installed providers and eligible routes.
 
 Options are provider-owned JSON. Examples include workspace, region, project,
@@ -150,7 +155,7 @@ export default {
   capabilities: {
     verify: {
       service: 'ci',
-      command: [process.execPath, fileURLToPath(new URL('./provider.mjs', import.meta.url))],
+      command: ['node', fileURLToPath(new URL('./provider.mjs', import.meta.url))],
       protocol: 'json',
       locality: 'remote',
       cost: 'included',
@@ -173,7 +178,9 @@ The helper receives one JSON request on stdin:
 }
 ```
 
-Write exactly one JSON object to stdout after reaching a known terminal state:
+Write exactly one JSON object to stdout after reaching a known terminal state,
+then exit zero, including when the JSON reports a failed check. Nonzero exit
+means the helper itself did not complete its protocol and produces unknown:
 
 ```json
 {
@@ -189,7 +196,12 @@ Status is `passed`, `failed` or `unknown`. Accepted/queued remote work is not a
 passed check. Missing cost is unknown. Artifact references are opaque; the core
 does not fetch, publish or certify them. Provider acceptance tests must bind
 results to the requested commit/build/environment and reject stale results.
-Requests/results are limited to 1 MiB; store large artifacts separately.
+JSON requests/results are limited to 1 MiB; store large artifacts separately.
+Exit-code commands retain only the final 64 KiB of stdout without terminating
+verbose builds/tests. Their result data reports whether output was truncated.
+Helpers need an actual JavaScript runtime; process.execPath in a standalone YM
+binary points to Yardmaster itself. Shell-only Windows .cmd/.bat wrappers are
+not automatically executed; use an executable runtime and its script path.
 
 The helper receives a small base environment and declared `requiredEnv` only.
 Yardmaster owner tokens and inherited Git redirection variables are excluded.
