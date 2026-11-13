@@ -48,3 +48,6 @@ test "$(git rev-parse HEAD)" = "$expected_head"
 test -z "$(git status --porcelain --untracked-files=no)"
 node -e 'console.log(JSON.stringify({head:process.argv[1],platform:process.platform,arch:process.arch,completedAt:new Date().toISOString(),checks:["typecheck","build","test-node24","test-node22","package-smoke","binary-build","binary-smoke","performance"],status:"passed",coverageGap:"macOS lanes were not executed on this Linux runner"},null,2))' "$expected_head" > "$receipt_dir/result.json"
 cat "$receipt_dir/result.json"
+stage=archive
+tar -czf "$receipt_dir.tar.gz" -C "$(dirname "$receipt_dir")" "$(basename "$receipt_dir")"
+node -e 'const fs=require("node:fs"),crypto=require("node:crypto"),file=process.argv[1],data=fs.readFileSync(file);console.log(JSON.stringify({kind:"receipt-archive",head:process.argv[2],path:file,bytes:data.length,sha256:crypto.createHash("sha256").update(data).digest("hex")}))' "$receipt_dir.tar.gz" "$expected_head"

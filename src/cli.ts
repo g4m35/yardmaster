@@ -161,6 +161,7 @@ const HELP = `${bold('Yardmaster')} ${VERSION}: run many coding agents at once w
 ${bold('Get started')}
   ym setup [--agent codex]     guided repo setup; --dry-run previews without changing configs
   ym init                      set up this repo (detects your agents and test command)
+  ym verify [--json]            run committed-artifact checks and configured service verification; save receipts
   ym connect [agent|all]       add Yardmaster tools + skill to Claude Code, Codex, Cursor, OpenCode, Gemini
                                (also installs zero-token hooks for Claude Code and Codex; --no-hooks to skip)
   ym add "what you want"       queue work (--files, --after, --agent, --tier cheap|standard|strong)
@@ -929,9 +930,34 @@ async function cmdProviders(a: Args) {
   const abort = () => stop.abort('provider command interrupted');
   process.once('SIGINT', abort); process.once('SIGTERM', abort);
   try {
-    const result = await runService(capability, input, config.services, loaded.providers, { cwd, signal: stop.signal });
+    const result = await runService(capability, input, config.services, loaded.providers, { cwd, signal: stop.signal, context: { sha: await revParse(cwd, 'HEAD') } });
     console.log(JSON.stringify(result, null, 2));
     if (result.result.status !== 'passed') process.exitCode = 1;
+  } finally { process.off('SIGINT', abort); process.off('SIGTERM', abort); }
+}
+
+async function cmdVerify(a: Args) {
+  for (const name of Object.keys(a.flags)) if (!['json', 'dry-run', 'repo'].includes(name)) die(`Unknown verification option --${name}`);
+  if (a._.length !== 1) die('ym verify [--json] [--dry-run]');
+  let cwd = process.cwd();
+  const root = await repoRoot(cwd).catch(() => null);
+  while (root && cwd !== root && !existsSync(join(cwd, PROJECT_CONFIG_FILE))) cwd = dirname(cwd);
+  const config = loadConfig(cwd);
+  const { verifyArtifact } = await import('./verification.ts');
+  if (a.flags['dry-run']) {
+    const { planService } = await import('./providers.ts'), loaded = await loadPlugins();
+    return console.log(JSON.stringify({ commands: config.verify, services: config.services.verify.map(check => planService(check.capability, config.services, loaded.providers, cwd, process.env, check.input)) }, null, 2));
+  }
+  const stop = new AbortController();
+  const abort = () => stop.abort('verification interrupted');
+  process.once('SIGINT', abort); process.once('SIGTERM', abort);
+  try {
+    const receipts: string[] = [];
+    const result = await verifyArtifact(cwd, config.verify, config.verifyTimeoutMinutes, stop.signal, undefined, {
+      services: config.services, onServiceResult: run => { receipts.push(run.receiptPath); },
+    });
+    console.log(JSON.stringify({ ...result, receipts }, null, 2));
+    if (!result.ok) process.exitCode = 1;
   } finally { process.off('SIGINT', abort); process.off('SIGTERM', abort); }
 }
 
@@ -1099,6 +1125,7 @@ async function main() {
     case 'hook': return cmdHook(a);
     case 'plugin': return cmdPlugin(a);
     case 'providers': return cmdProviders(a);
+    case 'verify': return cmdVerify(a);
     case 'doctor': return cmdDoctor(a);
     case 'presets': return cmdPresets();
     case 'dashboard': return cmdDashboard(a);

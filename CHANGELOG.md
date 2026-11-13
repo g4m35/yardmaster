@@ -3,7 +3,8 @@
 ## Unreleased
 - Optional service-provider plugins and project-local commands share capability routing across research, builds, CI, browsers, devices, deployment, data, observability and notifications. Existing coding-agent adapters and notifier plugins remain compatible.
 - `ym providers list|plan|run` exposes provider prerequisites, ordered preferences, locality and cost policies. Fallback is pre-dispatch only; failed, interrupted or malformed service results never trigger automatic replay through another provider.
-- Versioned JSON request/result contracts, bounded output, declared credential forwarding/redaction and owned-process cleanup support provider authors. Discovery is not account/entitlement verification; vendor integrations and automatic task scheduling require separate acceptance.
+- `services.verify` and `ym verify` run providers through committed-artifact acceptance and integration checks. Private pending/completed receipts survive restarts; dashboard activity/task details report real plans and results. Unknown results stop automatic repair/replay, including merge trains.
+- Optional built-in Browserbase support connects an existing test command to one bounded cloud session and confirms release. Local commands remain account-free; discovery checks prerequisites without claiming account/quota access. Public JavaScript provider APIs and checksum-validated hosted receipt collection are included.
 
 ## 0.9.2
 - Dashboard rebuilt as a three-pane console after the owner rejected the first redesign as looking the same: a left rail with the stage counts, machines and today's spend; the work list in the middle with a filter; and on the right either an overview (what needs you, what just happened, cleanup, connections) or the selected task beside the list. Dark scheme. On narrow screens it becomes one column with what needs you first, and a task opens full screen. See [docs/DASHBOARD.md](docs/DASHBOARD.md).

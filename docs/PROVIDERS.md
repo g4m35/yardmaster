@@ -5,10 +5,12 @@ path through your own local commands. Coding-agent adapters and notification
 plugins continue to work as before. Service plugins add capabilities without
 requiring a vendor SDK in the core.
 
-This release adds explicit CLI execution and importable runtime helpers. It does not
-automatically replace task verification, schedule remote jobs, connect accounts
-or bundle every vendor below. Existing task checks, review and integration
-gates retain their current behavior.
+Use `ym providers` for explicit jobs, or opt capabilities into `services.verify`
+for task acceptance. `ym verify` runs the same committed-artifact checks without
+starting the hub. Provider checks supplement configured shell checks and preserve
+the review and approval gates. The built-in Browserbase connector is disabled
+until configured. The other vendor names below describe integration choices,
+not shipped connectors.
 
 ## Choose by job
 
@@ -21,7 +23,7 @@ can offer the same job.
 | Research | `research.search` | Local source/document search | Search/documentation service |
 | Build | `build` | Existing build command | Hosted runner or EAS |
 | CI | `verify` | Existing test command | GitHub Actions, CircleCI or another runner |
-| Browser | `browser.test` | Authorized local browser runner | Browserbase or another hosted browser |
+| Browser | `browser.verify` | Authorized existing browser-test command | Built-in Browserbase; other hosted browsers through plugins |
 | Device | `device.test` | User-owned simulator/device runner | Hosted simulator or device lab |
 | Deploy | `deploy.preview` | Deployment script/self-hosted target | Vercel, Cloudflare or another host |
 | Data | `data.check` | Local database/fixture checks | Managed database or storage |
@@ -230,8 +232,152 @@ completed jobs after verifying identity and scope. Required checks/device
 requirements must remain fixed when switching providers. A cache miss is not
 permission to accept a stale artifact.
 
-Next stages are scheduler resource leases, task-ledger service receipts,
-dashboard controls and independently verified first-party connectors. Each
-needs real-provider failure/cancellation acceptance before automatic routing.
+Provider plans and completed checks appear in the existing dashboard activity
+feed and task details. Availability is scoped to the machine that reported it;
+the hub's prerequisites do not establish a remote worker's availability.
+Resource leases, vendor connectors beyond Browserbase and dashboard configuration
+controls remain separate extensions.
 The current router makes no measured cost/speed savings claim and creates no
 subscription, remote session or infrastructure during discovery.
+
+## Make providers acceptance checks
+
+Add a verification list to the same `services` configuration used by the CLI:
+
+```json
+{
+  "verify": ["npm test"],
+  "services": {
+    "local": {
+      "browser.verify": {
+        "service": "browser",
+        "command": ["node", "scripts/existing-browser-tests.mjs"],
+        "protocol": "command", "locality": "local", "cost": "free"
+      }
+    },
+    "verify": [{ "capability": "browser.verify" }]
+  }
+}
+```
+
+This account-free configuration uses an already installed, authorized runner.
+It does not download a browser or authorize another local profile/session.
+Run `ym verify --dry-run` to inspect the plan; `ym verify --json` runs the checks.
+The checkout must be committed and clean. Writes to tracked/staged files or a
+changed HEAD invalidate the result and preserve the changed checkout.
+
+Managed agents and native artifact submissions use this gate. Provider checks
+also run on combined integration commits, including merge trains. Plan for a
+session per verification phase; these are not a shared browser or a cached pass.
+Full provider acceptance is never recorded as a shell-only check-cache entry.
+Unknown results (authentication problems, malformed output, cancellation,
+unconfirmed release or missing evidence) stop for inspection. They do not send
+the task into an automatic provider retry or replay a failed merge train
+individually. A reported test failure can enter the existing repair workflow.
+
+Each dispatch first saves a private pending receipt under
+`YARDMASTER_HOME/service-runs/<request-id>/result.json`, then atomically records
+the sanitized result, execution state and verified commit. Receipts survive hub
+restarts and worktree cleanup. A pending receipt after a crash requires service
+inspection; it is not proof that a remote job stopped. The result includes its
+receipt path. Artifacts remain on the executing machine and are never silently
+uploaded, published or opened by the hub. No automatic receipt-retention policy
+deletes this evidence.
+
+## Use Browserbase with your existing tests
+
+Enable the built-in connector and configure your existing test command:
+
+```json
+{
+  "services": {
+    "providers": {
+      "browserbase": {
+        "enabled": true,
+        "options": {
+          "command": ["node", "scripts/browser-check.mjs"],
+          "timeoutSeconds": 180,
+          "requiredEnv": ["PREVIEW_URL"]
+        }
+      }
+    },
+    "routes": {
+      "browser.verify": {
+        "prefer": ["browserbase", "local"],
+        "allowedCosts": ["unknown", "free"]
+      }
+    },
+    "local": {
+      "browser.verify": {
+        "service": "browser", "command": ["node", "scripts/existing-browser-tests.mjs"],
+        "protocol": "command", "locality": "local", "cost": "free"
+      }
+    },
+    "verify": [{ "capability": "browser.verify" }]
+  }
+}
+```
+
+Set `BROWSERBASE_API_KEY` in the executing machine's environment. `projectId`
+and `region` are optional provider options. `requiredEnv` lists extra variables
+your test command needs; normal owner-token and Git-variable restrictions apply.
+Discovery checks those variable names and both executables, without running the
+test command or validating dependencies, account access or allowance.
+
+Browserbase has cost class `unknown`: Yardmaster cannot verify remaining
+included minutes, overage settings or final charges. Explicitly allowing this
+class authorizes provider selection under your own billing policy; it is not a
+dollar cap. Sessions last at most the configured 60–240 seconds, never use
+keep-alive, and are explicitly released in cleanup. An unconfirmed release
+returns `unknown`. Creation is attempted once, with no SDK retry or local replay.
+A timeout/crash during creation can leave an unidentified session until its
+hard timeout. A process kill or network outage cannot guarantee remote cleanup.
+
+The connector passes these values to the configured command:
+
+| Variable | Purpose |
+| --- | --- |
+| `BROWSERBASE_CDP_URL` | Credential-bearing connection for the created session |
+| `BROWSERBASE_SESSION_ID` | Created session ID |
+| `YARDMASTER_VERIFY_SHA` | Committed artifact being checked; empty for a manual run without a commit |
+| `YARDMASTER_VERIFY_INPUT` | JSON input from the capability's verification entry |
+| `YARDMASTER_ARTIFACT_DIR` | Private directory for screenshots, traces and assertions |
+
+Use Playwright's `chromium.connectOverCDP` or your existing Puppeteer CDP client.
+For example, a project that already has Playwright can adapt this harness:
+
+```js
+import assert from 'node:assert/strict';
+import { join } from 'node:path';
+import { chromium } from 'playwright';
+const browser = await chromium.connectOverCDP(process.env.BROWSERBASE_CDP_URL);
+try {
+  const page = await browser.contexts()[0].newPage();
+  await page.goto(process.env.PREVIEW_URL);
+  // The preview must expose its deployed commit; use your app's real identity endpoint/marker.
+  assert.equal(await page.locator('meta[name="build-sha"]').getAttribute('content'), process.env.YARDMASTER_VERIFY_SHA);
+  assert.equal(await page.getByRole('heading', { name: 'Your expected heading' }).isVisible(), true);
+  await page.screenshot({ path: join(process.env.YARDMASTER_ARTIFACT_DIR, 'browser.png') });
+} finally { await browser.close(); }
+```
+
+Exit zero only after your actual assertions pass. The command is trusted test
+code: it must connect to the supplied session, check the intended application,
+and establish that the preview matches the requested SHA. Passing a URL or SHA
+to a test does not independently prove deployed content identity. Protect
+preview access through your existing authorized mechanism; never send the hub
+token to the browser. Treat the CDP URL as a credential, even if it contains an
+account API key. The connector redacts known credentials from its bounded log,
+does not save connection URLs and disables Browserbase recording/logging. It
+cannot sanitize arbitrary screenshot/trace files written by your tests.
+
+See the official [session creation](https://docs.browserbase.com/reference/api/create-a-session),
+[release](https://docs.browserbase.com/reference/api/update-a-session) and
+[Playwright](https://docs.browserbase.com/introduction/playwright) documentation.
+
+## JavaScript API
+
+Published entry points are `yardmaster/providers`, `yardmaster/provider-contract`
+and `yardmaster/verification`. They export the same routing, schemas and
+verification functions used by the CLI. These are JavaScript entry points;
+this release does not ship generated TypeScript declarations.

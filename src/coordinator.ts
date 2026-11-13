@@ -264,7 +264,7 @@ export class Coordinator {
         const scope = explicit.length ? explicit : inferScope(`${input.title}\n${prompt}`);
         const inferred = inferTier(`${input.title} ${prompt}`, cfg.defaultTier ?? 'standard');
         // Cheap first for small tasks with checks; anything flagged hard, or set by hand, keeps its tier.
-        const checks = cfg.verify.length > 0 || (input.verify?.length ?? 0) > 0;
+        const checks = cfg.verify.length > 0 || cfg.services.verify.length > 0 || (input.verify?.length ?? 0) > 0;
         const guessed: Tier = input.tier ?? (cfg.cheapFirst && inferred === 'standard' && isSmallCheckedTask(scope, prompt, checks) ? 'cheap' : inferred);
         const { effects, matched } = applyPolicies(cfg, { title: input.title, prompt, scope, tier: guessed, createdBy });
         const tier: Tier = input.tier ?? effects.tier ?? guessed;
