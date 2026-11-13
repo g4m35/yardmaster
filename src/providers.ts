@@ -6,6 +6,7 @@ import { runOwnedProcess, type OwnedRunOptions } from './proc.ts';
 import { ProviderResultSchema, SERVICE_KINDS, type ProviderOperation, type ProviderPlugin, type ServicesConfig } from './provider-contract.ts';
 import { serviceReceipt, type ServiceContext } from './service-receipts.ts';
 import { BrowserbaseOptionsSchema, runBrowserbase } from './browserbase-provider.ts';
+import type { ServiceIntent } from './service-holds.ts';
 
 function browserbaseOperation(provider: string, op: ProviderOperation): boolean {
   return provider === 'browserbase' && op.command.at(-1) === '__browserbase-provider';
@@ -110,6 +111,7 @@ function redactValue(value: unknown, secrets: string[]): unknown {
 export async function runService(capability: string, input: unknown, services: ServicesConfig, plugins: ProviderPlugin[], options: {
   cwd: string; env?: NodeJS.ProcessEnv; signal?: AbortSignal;
   context?: ServiceContext; onSpawn?: OwnedRunOptions['onSpawn'];
+  beforeDispatch?: (intent: ServiceIntent) => void | Promise<void>;
 }) {
   const env = options.env ?? process.env;
   const plan = planService(capability, services, plugins, options.cwd, env, input);
@@ -132,6 +134,12 @@ export async function runService(capability: string, input: unknown, services: S
   const receipt = serviceReceipt(requestId, { provider, capability, cwd: options.cwd, context: options.context ?? {} });
   const finish = <T extends Record<string, unknown>>(value: T) => { receipt.finish(value); return { ...value, receiptPath: receipt.file }; };
   const onSpawn: OwnedRunOptions['onSpawn'] = async process => { receipt.spawned({ pid: process.pid, startedAt: process.startedAt }); await options.onSpawn?.(process); };
+  try { await options.beforeDispatch?.({ requestId, capability, provider, receiptPath: receipt.file }); }
+  catch {
+    return finish({ apiVersion: 1, requestId, provider, capability, dispatched: false,
+      execution: { end: 'blocked', code: null, reaped: true },
+      result: { status: 'unknown' as const, summary: 'Durable dispatch authorization was not confirmed. Inspect pending service requests before retrying; no action was dispatched by this request.', artifacts: [], costUsd: null } });
+  }
   const envelope = JSON.stringify({ ...request, context: { ...options.context, evidenceDir: receipt.directory } });
   if (Buffer.byteLength(envelope) > 1024 * 1024) throw new Error('Provider input exceeds 1 MiB. No command was dispatched.');
   if (browserbaseOperation(provider, op)) {

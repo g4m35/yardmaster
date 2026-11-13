@@ -4,6 +4,7 @@ import { loadPlugins } from './plugins.ts';
 import { planService, runService, type ServicePlan } from './providers.ts';
 import type { ServicesConfig } from './provider-contract.ts';
 import type { ServiceContext } from './service-receipts.ts';
+import type { ServiceIntent } from './service-holds.ts';
 
 export type ServiceRun = Awaited<ReturnType<typeof runService>>;
 type VerificationLifecycle = {
@@ -11,6 +12,7 @@ type VerificationLifecycle = {
   services?: ServicesConfig; context?: ServiceContext;
   onServicePlan?: (plan: ServicePlan) => void | Promise<void>;
   onServiceResult?: (result: ServiceRun) => void | Promise<void>;
+  beforeService?: (intent: ServiceIntent) => void | Promise<void>;
 };
 
 export function hasVerification(commands: string[], services?: ServicesConfig): boolean {
@@ -19,11 +21,13 @@ export function hasVerification(commands: string[], services?: ServicesConfig): 
 
 /** Reuse the dashboard's existing activity and task-detail surfaces. No credentials or request input. */
 export function serviceVerificationHooks(services: ServicesConfig, context: ServiceContext,
-  emit: (level: 'info' | 'warn' | 'success', kind: string, message: string, data: unknown) => void | Promise<unknown>) {
+  emit: (level: 'info' | 'warn' | 'success', kind: string, message: string, data: unknown) => void | Promise<unknown>,
+  durable?: { begin: (intent: ServiceIntent) => void | Promise<void>; finish: (result: ServiceRun) => void | Promise<void> }) {
   return { services, context,
+    beforeService: durable?.begin,
     onServicePlan: async (plan: ServicePlan) => { await emit(plan.selected ? 'info' : 'warn', 'service.plan',
       `${plan.capability}: ${plan.selected ? `selected ${plan.selected}` : 'no eligible provider; check provider setup'}. Discovery does not verify account access or quota.`, plan); },
-    onServiceResult: async (run: ServiceRun) => { await emit(run.result.status === 'passed' ? 'success' : 'warn', 'service.result',
+    onServiceResult: async (run: ServiceRun) => { if (run.execution.end !== 'blocked') await durable?.finish(run); await emit(run.result.status === 'passed' ? 'success' : 'warn', 'service.result',
       `${run.capability} via ${run.provider}: ${run.result.status}. ${run.result.summary} Receipt on the executing machine: ${run.receiptPath}`, run); },
   };
 }
@@ -70,7 +74,7 @@ export async function verifyArtifact(cwd: string, commands: string[], timeoutMin
       let run: ServiceRun;
       try {
         run = await runService(check.capability, check.input, services, plugins.providers, {
-          cwd, signal, onSpawn, context: { ...lifecycle.context, sha },
+          cwd, signal, onSpawn, context: { ...lifecycle.context, sha }, beforeDispatch: lifecycle.beforeService,
         });
       } catch {
         // An exception may happen after dispatch or while saving evidence. Do not claim a clean process exit.
@@ -78,7 +82,8 @@ export async function verifyArtifact(cwd: string, commands: string[], timeoutMin
         return { ...fail(command, 'Provider verification or evidence persistence failed. Inspect service receipts and owned processes before retrying.'), reaped: false, serviceStatus: 'unknown' };
       }
       await lifecycle.onExit?.(run.execution.reaped);
-      await lifecycle.onServiceResult?.(run);
+      try { await lifecycle.onServiceResult?.(run); }
+      catch { return { ...fail(command, `Provider completion could not be durably recorded. Inspect pending services and receipt: ${run.receiptPath}`), reaped: run.execution.reaped, serviceStatus: 'unknown' }; }
       if (!run.execution.reaped) return { ...fail(command, `Provider process cleanup is unconfirmed. Receipt: ${run.receiptPath}`), reaped: false, serviceStatus: 'unknown' };
       if ((await revParse(cwd, 'HEAD')) !== sha || !(await isClean(cwd))) return { ...fail(command, `Provider verification changed the committed artifact. Preserve the changes and rerun verification. Receipt: ${run.receiptPath}`), serviceStatus: 'unknown' };
       if (signal?.aborted || run.result.status !== 'passed') return { ...fail(command, `${run.result.summary}\nReceipt: ${run.receiptPath}`),

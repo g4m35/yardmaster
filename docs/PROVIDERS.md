@@ -275,6 +275,17 @@ unconfirmed release or missing evidence) stop for inspection. They do not send
 the task into an automatic provider retry or replay a failed merge train
 individually. A reported test failure can enter the existing repair workflow.
 
+Before managed-task or integration dispatch, the hub durably records a service
+intent. A pending or unknown intent blocks another dispatch even after a crash,
+process cleanup, generation change or reassignment to another worker. Local
+process exit does not establish remote job termination. Inspect holds with
+`ym providers pending`, inspect the remote session/job and its worker receipt,
+then record your inspection with
+`ym providers resolve REQUEST_ID --note "confirmed remote job stopped ..."`.
+Resolution records an owner attestation and leaves affected tasks waiting for
+an explicit retry; it does not terminate a job or retry it. Paired workers can
+record only their own run's service intents/results and cannot resolve holds.
+
 Each dispatch first saves a private pending receipt under
 `YARDMASTER_HOME/service-runs/<request-id>/result.json`, then atomically records
 the sanitized result, execution state and verified commit. Receipts survive hub
@@ -340,7 +351,8 @@ The connector passes these values to the configured command:
 | `BROWSERBASE_CDP_URL` | Credential-bearing connection for the created session |
 | `BROWSERBASE_SESSION_ID` | Created session ID |
 | `YARDMASTER_VERIFY_SHA` | Committed artifact being checked; empty for a manual run without a commit |
-| `YARDMASTER_VERIFY_INPUT` | JSON input from the capability's verification entry |
+| `YARDMASTER_VERIFY_INPUT_FILE` | Private JSON input file; supports the full request-size limit |
+| `YARDMASTER_VERIFY_INPUT` | Compatibility value for input up to 32 KiB; absent for larger input |
 | `YARDMASTER_ARTIFACT_DIR` | Private directory for screenshots, traces and assertions |
 
 Use Playwright's `chromium.connectOverCDP` or your existing Puppeteer CDP client.
@@ -370,6 +382,9 @@ token to the browser. Treat the CDP URL as a credential, even if it contains an
 account API key. The connector redacts known credentials from its bounded log,
 does not save connection URLs and disables Browserbase recording/logging. It
 cannot sanitize arbitrary screenshot/trace files written by your tests.
+The private input file is removed after execution; a crash can leave it in the
+private receipt directory for inspection. Prefer the file interface so Linux's
+per-environment-variable size limit cannot prevent your test from starting.
 
 See the official [session creation](https://docs.browserbase.com/reference/api/create-a-session),
 [release](https://docs.browserbase.com/reference/api/update-a-session) and
@@ -381,3 +396,8 @@ Published entry points are `yardmaster/providers`, `yardmaster/provider-contract
 and `yardmaster/verification`. They export the same routing, schemas and
 verification functions used by the CLI. These are JavaScript entry points;
 this release does not ship generated TypeScript declarations.
+
+Unchanged plugin entry files reuse their content-addressed ESM module during
+availability refreshes. Changed entry source loads a new version. As with other
+Node ESM plugins, changes to imported manifest dependencies can require a hub
+restart; command helper scripts are executed afresh by their runtime.

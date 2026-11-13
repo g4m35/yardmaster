@@ -859,7 +859,10 @@ async function acceptArtifact(ctx: RunContext, wt: string, baseSha: string, file
     const result = await ctx.verifySlots.use(() => runVerify(wt, commands, config.verifyTimeoutMinutes, ctx.signal,
       async ({ pid, startedAt }) => { await api['run.update']({ runId, patch: { phase: 'verify', pid, proc_started: startedAt } }); }, {
         ...serviceVerificationHooks(config.services, { projectId: task.project_id, taskId: task.id, runId },
-          (level, kind, message, data) => event(ctx, level, kind, message, data)),
+          (level, kind, message, data) => event(ctx, level, kind, message, data), {
+            begin: intent => api['run.service']({ runId, taskId: task.id, owner: claimOwner(task), action: { kind: 'begin', ...intent } }),
+            finish: run => api['run.service']({ runId, taskId: task.id, owner: claimOwner(task), action: { kind: 'finish', requestId: run.requestId, status: run.result.status, reaped: run.execution.reaped } }),
+          }),
         beforeSpawn: async () => {
           await api['run.update']({ runId, patch: { phase: 'verify:spawning' } });
           setAttemptReaped(false);

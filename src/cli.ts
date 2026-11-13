@@ -894,6 +894,17 @@ async function cmdPlugin(a: Args) {
 async function cmdProviders(a: Args) {
   const { planService, providerInventory, runService } = await import('./providers.ts');
   const sub = a._[1] ?? 'list';
+  if (sub === 'pending' || sub === 'resolve') {
+    for (const name of Object.keys(a.flags)) if (!['json', 'repo', 'note', 'hub', 'token'].includes(name)) die(`Unknown provider option --${name}`);
+    const client = await getClient(a);
+    if (sub === 'pending') {
+      if (a._.length !== 2) die('ym providers pending');
+      return console.log(JSON.stringify(await client['providers.pending']({}), null, 2));
+    }
+    const requestId = a._[2], note = flag(a, 'note');
+    if (!requestId || !note || a._.length !== 3) die('ym providers resolve <request-id> --note "inspected remote state"');
+    return console.log(JSON.stringify(await client['providers.resolve']({ requestId, note }), null, 2));
+  }
   if (!['list', 'plan', 'run'].includes(sub)) die('ym providers list|plan|run [capability]');
   for (const name of Object.keys(a.flags)) if (!['json', 'input', 'dry-run', 'repo'].includes(name)) die(`Unknown provider option --${name}`);
   if (a._.length > (sub === 'list' ? 2 : 3)) die('Too many provider arguments. Use --input file.json for request data.');
