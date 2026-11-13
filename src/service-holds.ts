@@ -7,8 +7,12 @@ export interface ServiceHold extends ServiceIntent {
   startedAt: number; state: 'pending' | 'unknown';
 }
 const prefix = 'service-hold:';
+const lookups = new WeakMap<Db, ReturnType<Db['prepare']>>();
 export function serviceHold(db: Db, scope: string): ServiceHold | null {
-  const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(prefix + scope) as { value: string } | undefined;
+  let lookup = lookups.get(db);
+  if (!lookup) { lookup = db.prepare('SELECT value FROM meta WHERE key = ?'); lookups.set(db, lookup); }
+  // Reuse only the prepared statement. Read the current row on every call; resolved/new holds cannot be cached away.
+  const row = lookup.get(prefix + scope) as { value: string } | undefined;
   return row ? JSON.parse(row.value) as ServiceHold : null;
 }
 export function serviceHolds(db: Db): ServiceHold[] {

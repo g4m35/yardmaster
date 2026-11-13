@@ -18,15 +18,12 @@ to bypass required checks. Existing workflow/protection settings remain intact.
 
 The script also creates `<receipt-dir>.tar.gz` and prints its byte count and
 SHA-256. Download that archive **before** shutdown. Connector previews can
-truncate base64 strings: use a full API response saved directly to disk, for
-example through an already authenticated Vercel CLI:
+truncate base64 strings, and CLI display layers can corrupt raw binary. Use the
+text-only exporter with an already authenticated Vercel CLI:
 
 ```sh
-# Use the session/team that this task created, and its reported archive path.
-printf '%s' '{"path":"/tmp/yardmaster-verification.tar.gz"}' > /tmp/ym-read-request.json
-vercel api '/v2/sandboxes/sessions/SESSION_ID/fs/read?teamId=TEAM_ID' \
-  --method POST --input /tmp/ym-read-request.json > /tmp/ym-archive-response.json
-node scripts/collect-hosted-verification.mjs /tmp/ym-archive-response.json REMOTE_SHA256 ./receipts.tar.gz
+node scripts/export-hosted-verification.mjs SESSION_ID TEAM_ID \
+  /tmp/yardmaster-verification.tar.gz REMOTE_SHA256 ./receipts.tar.gz
 ```
 
 The collector rejects truncation, incorrect length and checksum mismatches
@@ -35,6 +32,11 @@ collector succeeds and you have inspected its result receipt. A stopped,
 nonpersistent Sandbox returns HTTP 410 for files and logs; it cannot recover a
 download that was never saved. Remove the task-owned temporary response files
 after collection. This does not authorize creating a paid VM or restarting one.
+The exporter runs one bounded read-only Node command in the existing VM, reads
+ASCII JSON from its command log and validates the remote byte count and digest.
+It starts no VM and stops none. `collect-hosted-verification.mjs` also accepts
+a full base64 API response or a binary download from a transport that preserves
+its bytes; every path requires the same remote digest.
 
 More agents means more pushes, and every push to a pull request runs your whole GitHub Actions suite. On private
 repositories that drains the monthly allowance fast: GitHub Free includes $12 of Actions usage (2,000 Linux
