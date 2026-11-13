@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, statfsSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, statSync, statfsSync, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { createInterface as createLineReader } from 'node:readline';
 import { homedir as homedirPath, hostname, networkInterfaces, tmpdir } from 'node:os';

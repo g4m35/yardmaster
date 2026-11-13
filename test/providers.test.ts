@@ -169,6 +169,9 @@ test('CLI routes without hub/account setup, supports JSON and refuses accidental
   const cli = (args: string[]) => spawnSync(process.execPath, [new URL('../src/cli.ts', import.meta.url).pathname, 'providers', ...args], { cwd: project, env: { ...env, YARDMASTER_HOME: join(root, 'cli-home') }, encoding: 'utf8', timeout: 15000 });
   const plan = cli(['plan', 'verify', '--json']); assert.equal(plan.status, 0, plan.stderr); assert.equal(JSON.parse(plan.stdout).selected, 'local');
   const run = cli(['run', 'verify', '--json']); assert.equal(run.status, 0, run.stderr); assert.equal(JSON.parse(run.stdout).result.status, 'passed');
+  const inputPath = join(project, 'request.json'); writeFileSync(inputPath, '{"requiresJson":true}');
+  const inputPlan = cli(['plan', 'verify', '--input', inputPath, '--json']);
+  assert.equal(inputPlan.status, 0, inputPlan.stderr); assert.equal(JSON.parse(inputPlan.stdout).selected, null, 'plain commands cannot silently ignore request input');
   spawnSync('git', ['init', '-q'], { cwd: project });
   const nested = join(project, 'src', 'nested'); mkdirSync(nested, { recursive: true });
   const fromSubdir = spawnSync(process.execPath, [new URL('../src/cli.ts', import.meta.url).pathname, 'providers', 'plan', 'verify', '--json'], { cwd: nested, env: { ...env, YARDMASTER_HOME: join(root, 'cli-home') }, encoding: 'utf8', timeout: 15000 });
