@@ -59,7 +59,7 @@ export class Hub {
   private server: Server | null = null;
   private timers: NodeJS.Timeout[] = [];
   private lastNotified = 0;
-  private plugins: LoadedPlugins = { adapters: [], notifiers: [], errors: [] };
+  private plugins: LoadedPlugins = { adapters: [], notifiers: [], providers: [], errors: [] };
   readonly supervisor: Supervisor;
   private looping = false;
   private again = false;

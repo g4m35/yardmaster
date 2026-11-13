@@ -223,6 +223,13 @@ ym hub restart
 
 Notifier plugins can send updates to Slack, ntfy, or a webhook. See `~/.yardmaster/plugins/<name>/PLUGIN_GUIDE.md`.
 
+Optional service providers use the tools/accounts you already have, with configured local commands
+for account-free use. `ym providers list` shows configured providers; `ym providers plan <capability>`
+explains routing without dispatching work; `ym providers run <capability>` executes explicitly.
+Create a connector with `ym plugin new my-service --kind provider`. Service categories cover research,
+builds, CI, browsers, devices, deployment, data, observability and notifications; vendor connectors
+are optional plugins, not bundled integrations. See [provider setup and protocol](docs/PROVIDERS.md).
+
 ## Speed
 
 Yardmaster stays out of your agents' way and cuts what each task costs:

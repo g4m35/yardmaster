@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+- Optional service-provider plugins and project-local commands share capability routing across research, builds, CI, browsers, devices, deployment, data, observability and notifications. Existing coding-agent adapters and notifier plugins remain compatible.
+- `ym providers list|plan|run` exposes provider prerequisites, ordered preferences, locality and cost policies. Fallback is pre-dispatch only; failed, interrupted or malformed service results never trigger automatic replay through another provider.
+- Versioned JSON request/result contracts, bounded output, declared credential forwarding/redaction and owned-process cleanup support provider authors. Discovery is not account/entitlement verification; vendor integrations and automatic task scheduling require separate acceptance.
+
 ## 0.9.2
 - Dashboard rebuilt as a three-pane console after the owner rejected the first redesign as looking the same: a left rail with the stage counts, machines and today's spend; the work list in the middle with a filter; and on the right either an overview (what needs you, what just happened, cleanup, connections) or the selected task beside the list. Dark scheme. On narrow screens it becomes one column with what needs you first, and a task opens full screen. See [docs/DASHBOARD.md](docs/DASHBOARD.md).
 - The selected task has tabs: Changes, Activity, Request, History and Details. Changes shows the actual diff, file by file, read from the hub with the new owner-only `task.diff` method: the saved commit once it exists (what approval merges), or the live working copy while the attempt runs. Large changes are cut at a line and say so.
