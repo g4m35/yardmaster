@@ -31,7 +31,7 @@ const plugin = ProviderPluginSchema.parse({ kind: 'provider', apiVersion: 1, nam
 const local = ProviderOperationSchema.parse({ service: 'ci', command: [process.execPath, '-e', 'console.log("local check")'], protocol: 'command', locality: 'local', cost: 'free' });
 
 test('service config is backward compatible and rejects unsupported contracts', () => {
-  assert.deepEqual(resolveConfig([{}]).services, { providers: {}, routes: {}, local: {} });
+  assert.deepEqual(resolveConfig([{}]).services, { providers: {}, routes: {}, local: {}, verify: [] });
   assert.deepEqual(unknownSettings({ services: { providers: { 'existing-ci': { enabled: true, options: { project: 'test' } } }, routes: { verify: { prefer: ['existing-ci'] } }, local: { verify: local } } }), []);
   assert.throws(() => ProviderOperationSchema.parse({ ...op, protocol: 'command' }), /exit-code protocol/);
   assert.throws(() => ProviderPluginSchema.parse({ ...plugin, name: 'local' }), /reserved/);
@@ -154,13 +154,13 @@ test('timeout and cancellation return unknown rather than a passing check', asyn
 test('provider scaffold validates without executing and duplicate identifiers are disabled', async () => {
   const dir = scaffoldPlugin('fixture-provider', 'provider');
   assert.equal((await testPlugin(dir)).ok, true);
-  const scaffold = (await loadPlugins(join(home, 'plugins'))).providers[0]!;
+  const scaffold = (await loadPlugins(join(home, 'plugins'))).providers.find(provider => provider.name === 'fixture-provider')!;
   assert.equal(scaffold.capabilities.verify!.command[0], 'node', 'standalone YM is not a JavaScript interpreter');
   const plugins = join(home, 'plugins');
   const duplicate = join(plugins, 'duplicate'); mkdirSync(duplicate);
   writeFileSync(join(duplicate, 'index.mjs'), `export default ${JSON.stringify({ ...plugin, name: 'fixture-provider' })};`);
   const loaded = await loadPlugins(plugins);
-  assert.equal(loaded.providers.length, 0); assert.match(loaded.errors[0]!.error, /Duplicate/);
+  assert.equal(loaded.providers.some(provider => provider.name === 'fixture-provider'), false); assert.match(loaded.errors[0]!.error, /Duplicate/);
 });
 
 test('CLI routes without hub/account setup, supports JSON and refuses accidental options', () => {

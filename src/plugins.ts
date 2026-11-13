@@ -57,7 +57,8 @@ function entryOf(dir: string): string | null {
 }
 
 export async function loadPlugins(root = paths.plugins()): Promise<LoadedPlugins> {
-  const out: LoadedPlugins = { adapters: [], notifiers: [], providers: [], errors: [] };
+  const { builtinProviders } = await import('./provider-builtins.ts');
+  const out: LoadedPlugins = { adapters: [], notifiers: [], providers: builtinProviders(), errors: [] };
   const duplicateProviders = new Set<string>();
   for (const name of readdirSync(root)) {
     const dir = join(root, name);

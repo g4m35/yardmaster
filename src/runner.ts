@@ -23,7 +23,7 @@ import { emptyUsage, UsageMeter, type UsageSnapshot } from './usage.ts';
 import { routeEffort, routedEffortOf } from './jev.ts';
 import { withProcessScope, UtilityProcessError, currentProcessScopeSignal } from './proc.ts';
 import { EffortPolicyError, launchEffort, launchIdentity } from './effort.ts';
-import { verifyArtifact as runVerify } from './verification.ts';
+import { verifyArtifact as runVerify, hasVerification, serviceVerificationHooks } from './verification.ts';
 
 export class Semaphore {
   private queue: { grant: () => void; reject: (error: Error) => void; signal?: AbortSignal; abort: () => void }[] = [];
@@ -152,6 +152,7 @@ function buildResumePrompt(ctx: RunContext, extra: { messages: { from: string; b
   if (extra.conflicts.length) parts.push(`First resolve the merge conflict markers in: ${extra.conflicts.join(', ')} (the latest merged work was combined into your branch).`);
   if (extra.messages.length) parts.push(`Notes from teammates:\n${extra.messages.map((m) => `- ${m.from}: ${clip(m.body, 400)}`).join('\n')}`);
   parts.push(doneMeans(task, config));
+  if (config.services.verify.length) parts.push(`Yardmaster runs these service acceptance checks after committing your artifact: ${config.services.verify.map(check => check.capability).join(', ')}. Do not start duplicate service jobs yourself.`);
   parts.push('Fix what is described, keep your other work, and end with a 1-3 sentence summary of what you changed.');
   return parts.join('\n\n');
 }
@@ -848,15 +849,17 @@ async function acceptArtifact(ctx: RunContext, wt: string, baseSha: string, file
   const reportOnly = task.allow_no_changes && files.length === 0;
   if (reportOnly) await api['task.touched']({ taskId: task.id, runId, files });
   const commands = native ? verifyCommands(task, config) : taskChecks(task, config, files);
-  if (!commands.length && !reportOnly) return finishNeedsHuman(ctx, `${native ? 'Native handoff' : 'Managed work'} requires configured verification commands. Work is preserved; add verify commands to yardmaster.json and retry.`, runId);
+  if (!hasVerification(commands, config.services) && !reportOnly) return finishNeedsHuman(ctx, `${native ? 'Native handoff' : 'Managed work'} requires configured verification commands. Work is preserved; add verify commands to yardmaster.json and retry.`, runId);
   const head = await revParse(wt, 'HEAD');
   await update(ctx, { status: 'verifying', head_sha: head, summary });
-  if (commands.length) {
+  if (hasVerification(commands, config.services)) {
     await api['run.update']({ runId, patch: { phase: 'verify' } });
     log.push(`verify ${commands.join(' && ')}`);
     phase('collect');
     const result = await ctx.verifySlots.use(() => runVerify(wt, commands, config.verifyTimeoutMinutes, ctx.signal,
       async ({ pid, startedAt }) => { await api['run.update']({ runId, patch: { phase: 'verify', pid, proc_started: startedAt } }); }, {
+        ...serviceVerificationHooks(config.services, { projectId: task.project_id, taskId: task.id, runId },
+          (level, kind, message, data) => event(ctx, level, kind, message, data)),
         beforeSpawn: async () => {
           await api['run.update']({ runId, patch: { phase: 'verify:spawning' } });
           setAttemptReaped(false);
@@ -875,11 +878,12 @@ async function acceptArtifact(ctx: RunContext, wt: string, baseSha: string, file
       }
       await finishRun('failed');
       log.push(`verify failed`);
+      if (result.serviceStatus === 'unknown') return finishNeedsHuman(ctx, result.output, runId);
       return artifactFailure(`Checks failed (\`${result.command}\`):\n${tail(result.output, 40, 2500)}`, errorFingerprint(result.output), { backoff: false });
     }
     log.push('verify passed');
     await api['run.update']({ runId, patch: { phase: 'collect', pid: null, proc_started: null } });
-    if (head && (await isClean(wt))) await rememberChecked(wt, head, commands);
+    if (head && !config.services.verify.length && (await isClean(wt))) await rememberChecked(wt, head, commands);
   } else {
     await event(ctx, 'info', 'task.report', 'Explicit report-only task changed no files. No code verification is claimed.');
   }
@@ -1007,8 +1011,8 @@ async function update(ctx: RunContext, patch: TaskPatch) {
   await ctx.api['task.update']({ id: ctx.task.id, patch, owner: claimOwner(ctx.task) });
 }
 
-async function event(ctx: RunContext, level: 'info' | 'warn' | 'error' | 'success', kind: string, message: string) {
-  await ctx.api['task.event']({ projectId: ctx.task.project_id, taskId: ctx.task.id, level, kind, message, owner: claimOwner(ctx.task) }).catch(() => undefined);
+async function event(ctx: RunContext, level: 'info' | 'warn' | 'error' | 'success', kind: string, message: string, data?: unknown) {
+  await ctx.api['task.event']({ projectId: ctx.task.project_id, taskId: ctx.task.id, level, kind, message, data, owner: claimOwner(ctx.task) }).catch(() => undefined);
 }
 
 async function finishNeedsHuman(ctx: RunContext, message: string, runId?: string, totals: TaskPatch = {}): Promise<RunOutcome> {

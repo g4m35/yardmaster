@@ -13,6 +13,7 @@ cleanup() {
 trap cleanup EXIT
 "$bin" --version
 "$bin" help > /dev/null
+"$bin" providers list --json | grep -q '"browserbase"'
 test "$("$bin" recover --json)" = '{"replayed":[],"pending":[],"skippedLive":[]}'
 echo "local recovery ok"
 mkdir -p "$home/plugins/smoke"
@@ -26,10 +27,11 @@ git init -q -b main "$repo"
   cd "$repo"
   git config user.email smoke@example.com
   git config user.name smoke
-  printf '{"verify":["sh check.sh"]}\n' > yardmaster.json
+  printf '{"verify":["sh check.sh"],"services":{"local":{"browser.verify":{"service":"browser","command":["sh","check.sh"],"protocol":"command","locality":"local","cost":"free"}},"verify":[{"capability":"browser.verify"}]}}\n' > yardmaster.json
   printf 'if grep -q BAD flag.txt; then echo "flag is BAD"; exit 1; fi\n' > check.sh
   echo ok > flag.txt
   git add -A && git commit -qm init && git remote add origin "$home/gate-remote.git"
+  "$bin" verify --json | grep -q '"ok": true'
   "$bin" ci init > /dev/null
   git push -q origin main
   echo BAD > flag.txt && git commit -qam bad

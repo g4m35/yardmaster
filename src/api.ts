@@ -19,6 +19,8 @@ import { tx } from './transaction.ts';
 import { WORKER_ACTIVE_STATUSES, WORKER_FINALIZE_STATUSES } from './worker-policy.ts';
 import { recordUtility, runUtilityKey, utilitiesStopped, utilities, taskHasPendingUtilities } from './utility-records.ts';
 import { noteControllerActivity } from './controller-activity.ts';
+import { loadPlugins } from './plugins.ts';
+import { planService, providerInventory } from './providers.ts';
 
 /**
  * The single API surface. The hub serves it over HTTP, the CLI and MCP server call it locally or
@@ -191,6 +193,14 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
     'project.register': method(z.object({ cwd: z.string() }), (p) => coord.registerProject(p.cwd)),
     'project.resolve': method(z.object({ cwd: z.string().optional(), projectId: z.string().optional() }), (p) => resolveProject(p.cwd, p.projectId)),
     'project.list': method(z.object({}), () => coord.listProjects()),
+    'providers.list': method(z.object({ projectId: Id }), async (p) => {
+      const project = coord.getProject(p.projectId);
+      if (!project) throw new Error('Unknown project');
+      const config = coord.configFor(project.id), loaded = await loadPlugins();
+      return { machineId: hooks.machineId, ...providerInventory(config.services, loaded.providers, project.root),
+        verification: config.services.verify.map(check => planService(check.capability, config.services, loaded.providers, project.root, process.env, check.input)),
+        errors: loaded.errors.map(error => ({ dir: error.dir, error: 'Plugin could not be loaded; inspect it on the hub.' })) };
+    }),
 
     'task.add': method(
       z.object({ projectId: Id, tasks: z.array(NewTaskSchema).min(1).max(50), createdBy: z.string().default('cli'), force: z.boolean().optional() }),

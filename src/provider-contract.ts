@@ -41,6 +41,8 @@ export const ServicesConfigSchema = z.object({
   })).default({}),
   /** Account-free fallback. The user supplies each capability's real command; none is invented or downloaded. */
   local: z.record(CapabilityIdSchema, ProviderOperationSchema).default({}),
+  /** Additional acceptance checks, run for artifacts and again on combined integration commits. */
+  verify: z.array(z.object({ capability: CapabilityIdSchema, input: z.json().default({}) })).max(20).default([]),
 }).prefault({});
 export type ServicesConfig = z.infer<typeof ServicesConfigSchema>;
 

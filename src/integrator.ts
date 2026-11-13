@@ -7,7 +7,7 @@ import { tx } from './db.ts';
 import { addWorktree, branchExists, conflictedFiles, git, isAncestor, isClean, isLinkedWorktreeOf, removeWorktree, revParse } from './git.ts';
 import { rememberChecked } from './ci/verified.ts';
 import { Semaphore, verifyCommands } from './runner.ts';
-import { verifyArtifact } from './verification.ts';
+import { verifyArtifact, hasVerification, serviceVerificationHooks } from './verification.ts';
 import { runShell, terminateRecordedProcess, withProcessScope, UtilityProcessError, type OwnedRunOptions } from './proc.ts';
 import { integrationUtilityKey, utilityHooks, recoverUtilities, forgetStoppedUtilities, taskHasPendingUtilities, utilitiesStopped } from './utility-records.ts';
 import { lockHash, refreshDeps, siblingWorktrees } from './warmstart.ts';
@@ -232,9 +232,11 @@ export class Integrator {
       if (!isLinkedWorktreeOf(path, project.root) || !(await isClean(path)) || await revParse(path, 'HEAD') !== expectedHead) throw new Error('Commit/resolve the inspected integration state and pass its exact current HEAD. Nothing was changed.');
       const config = this.coord.configFor(projectId);
       const checked = await this.verifySlots.use(() => verifyArtifact(path, config.verify, config.verifyTimeoutMinutes, this.lifetime.signal, this.processGuard(project, 'verify', false), {
+        ...serviceVerificationHooks(config.services, { projectId }, (level, kind, message, data) => this.coord.event(projectId, null, level, kind, message, data)),
         beforeSpawn: () => { this.processGuard(project, 'verify'); }, onExit: reaped => this.processFinished(project, reaped),
       }), this.lifetime.signal);
       this.processFinished(project, checked.reaped);
+      if (!checked.reaped) throw new IntegrationHeld('Verification process cleanup is unconfirmed. Integration work is preserved.');
       if (!checked.ok || checked.sha !== expectedHead) throw new Error(`Inspected integration commit did not pass checks: ${clip(checked.output, 1000)}`);
       tx(this.coord.db, () => {
         this.coord.setMeta(`integrating:${projectId}`, null);
@@ -300,7 +302,7 @@ export class Integrator {
     const ready = this.coord
       .listTasks(projectId, ['ready'])
       .filter((t) => {
-        if (!verifyCommands(t, config).length) {
+        if (!hasVerification(verifyCommands(t, config), config.services)) {
           this.transition(t, ['ready'], { status: 'needs_human', attention: 'No verification commands are configured. Work is preserved; add verify commands and retry.' });
           return false;
         }
@@ -392,17 +394,20 @@ export class Integrator {
       return this.onConflict(project, task, config, files);
     }
     // Quick per-task checks mean the full suite hasn't run on this change yet, so run it now.
-    const baseMoved = !task.base_sha || task.base_sha !== before || config.verifyQuick.length > 0;
+    const baseMoved = !task.base_sha || task.base_sha !== before || config.verifyQuick.length > 0 || config.services.verify.length > 0;
     this.coord.setMeta(`integrating_result:${project.id}`, await revParse(path, 'HEAD'));
     const commands = verifyCommands(task, config);
-    if (baseMoved && commands.length) {
+    if (baseMoved && hasVerification(commands, config.services)) {
       this.coord.event(project.id, task.id, 'info', 'integration.reverify', `Re-checking "${task.title}" combined with work merged since it started`);
       await this.prepareDeps(project, path, config, task.worktree ? [task.worktree] : []);
       const result = await this.verifySlots.use(() => verifyArtifact(path, commands, config.verifyTimeoutMinutes, this.lifetime.signal, this.processGuard(project, 'verify', false), {
+        ...serviceVerificationHooks(config.services, { projectId: project.id, taskId: task.id },
+          (level, kind, message, data) => this.coord.event(project.id, task.id, level, kind, message, data)),
         beforeSpawn: () => { this.processGuard(project, 'verify'); },
         onExit: reaped => this.processFinished(project, reaped),
       }), this.lifetime.signal);
       this.processFinished(project, result.reaped);
+      if (!result.reaped) throw new IntegrationHeld('Verification process cleanup is unconfirmed. Integration work is preserved.');
       await this.preserveChangedVerification(project, path, result.sha, [task]);
       if (!result.ok) {
         await git(path, ['reset', '--hard', before]);
@@ -410,7 +415,7 @@ export class Integrator {
         // "merge:" marks failures that only appear when combined, so passing alone doesn't reset the count.
         const fp = `merge:${errorFingerprint(result.output)}`;
         const same = task.error_fp === fp ? task.same_error_count + 1 : 1;
-        const giveUp = same >= config.retry.sameFailureLimit || task.attempts >= task.max_attempts;
+        const giveUp = result.serviceStatus === 'unknown' || same >= config.retry.sameFailureLimit || task.attempts >= task.max_attempts;
         const note = `After combining with the latest merged work, checks failed (\`${result.command}\`):\n${tail(result.output, 40, 2500)}`;
         if (!this.transition(task, ['merging'], giveUp
           ? { status: 'needs_human', attention: `It works alone but breaks when combined with other merged work. ${clip(note, 500)}`, error_fp: fp, same_error_count: same }
@@ -420,7 +425,7 @@ export class Integrator {
       }
     }
     const after = await revParse(path, 'HEAD');
-    if (after && baseMoved && commands.length) await rememberChecked(path, after, commands);
+    if (after && baseMoved && commands.length && !config.services.verify.length) await rememberChecked(path, after, commands);
     // A cancel that arrived during re-verification wins: undo the merge.
     if (!this.current(task, ['merging'])) {
       await git(path, ['reset', '--hard', before]);
@@ -450,8 +455,8 @@ export class Integrator {
     if (!ensured) return true;
     const { path, head: before } = ensured;
     const fresh = train.filter((t) => this.current(t, ['ready']));
-    const needsCheck = fresh.filter((t) => t.base_sha !== before || config.verifyQuick.length > 0);
-    if (fresh.length < 2 || needsCheck.length < 2 || !config.verify.length) return false;
+    const needsCheck = fresh.filter((t) => t.base_sha !== before || config.verifyQuick.length > 0 || config.services.verify.length > 0);
+    if (fresh.length < 2 || needsCheck.length < 2 || !hasVerification(config.verify, config.services)) return false;
     this.coord.setMeta(`integrating:${project.id}`, before);
     for (const t of fresh) if (!this.transition(t, ['ready'], { status: 'merging' })) return false;
     const merged: Task[] = [];
@@ -472,22 +477,30 @@ export class Integrator {
     this.coord.event(project.id, null, 'info', 'integration.train', `Checking ${merged.length} finished tasks together in one run: ${merged.map((t) => `"${clip(t.title, 40)}"`).join(', ')}`);
     await this.prepareDeps(project, path, config, merged.flatMap((t) => (t.worktree ? [t.worktree] : [])));
     const result = await this.verifySlots.use(() => verifyArtifact(path, config.verify, config.verifyTimeoutMinutes, this.lifetime.signal, this.processGuard(project, 'verify', false), {
+      ...serviceVerificationHooks(config.services, { projectId: project.id }, (level, kind, message, data) => {
+        for (const task of merged) this.coord.event(project.id, task.id, level, kind, message, data);
+      }),
       beforeSpawn: () => { this.processGuard(project, 'verify'); },
       onExit: reaped => this.processFinished(project, reaped),
     }), this.lifetime.signal);
     this.processFinished(project, result.reaped);
+    if (!result.reaped) throw new IntegrationHeld('Verification process cleanup is unconfirmed. Integration work is preserved.');
     await this.preserveChangedVerification(project, path, result.sha, merged);
     const stillMerging = merged.every((t) => this.current(t, ['merging']));
     if (!result.ok || !stillMerging) {
       await git(path, ['reset', '--hard', before]);
       this.coord.setMeta(`integrating:${project.id}`, null);
-      for (const t of merged) this.transition(t, ['merging'], { status: 'ready' });
+      for (const t of merged) this.transition(t, ['merging'], result.serviceStatus === 'unknown'
+        ? { status: 'needs_human', attention: `Combined provider verification is unknown. Inspect service receipts before retrying. ${clip(result.output, 1000)}` }
+        : { status: 'ready' });
       for (const t of merged) this.trainFailed.add(t.id);
-      if (!result.ok) this.coord.event(project.id, null, 'warn', 'integration.train_failed', `The combined checks failed; merging those ${merged.length} tasks one at a time to find which one breaks.`);
-      return false;
+      if (!result.ok) this.coord.event(project.id, null, 'warn', 'integration.train_failed', result.serviceStatus === 'unknown'
+        ? 'Combined provider verification needs inspection; no individual provider replay was started.'
+        : `The combined checks failed; merging those ${merged.length} tasks one at a time to find which one breaks.`);
+      return result.serviceStatus === 'unknown';
     }
     const after = (await revParse(path, 'HEAD'))!;
-    await rememberChecked(path, after, config.verify);
+    if (!config.services.verify.length) await rememberChecked(path, after, config.verify);
     const committed = tx(this.coord.db, () => {
       if (!merged.every((t) => this.current(t, ['merging']))) return false;
       for (const t of merged) this.coord.updateTask(t.id, { status: 'done', finished_at: Date.now(), attention: null });

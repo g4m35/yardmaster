@@ -3,6 +3,13 @@
   "version": "0.9.1",
   "description": "Model-independent orchestration for the coding agents you already use (Claude Code, Codex, Cursor, OpenCode, Gemini, T3 Code). Parallel work without collisions, loops, or leftover mess.",
   "type": "module",
+  "exports": {
+    "./providers": "./dist/providers.js",
+    "./provider-contract": "./dist/provider-contract.js",
+    "./verification": "./dist/verification.js",
+    "./dist/*": "./dist/*",
+    "./package.json": "./package.json"
+  },
   "license": "MIT",
   "bin": {
     "yardmaster": "dist/cli.js",
