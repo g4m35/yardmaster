@@ -190,6 +190,7 @@ JSON protocol: read one object from stdin:
 { apiVersion: 1, requestId, capability, input, options }.
 Write exactly one JSON object to stdout after the operation finishes:
 { status: "passed" | "failed" | "unknown", summary, data?, artifacts?: string[], costUsd?: number | null }.
+Exit zero after writing this result, even for status failed; nonzero means a helper/protocol failure.
 Use stderr for private diagnostics, which Yardmaster does not print. Do not put credentials in results.
 An accepted remote job is not a passed test: wait for its terminal result.
 Unknown or interrupted results never trigger automatic fallback/replay. Use requestId as an
@@ -208,7 +209,7 @@ export default {
   kind: 'provider', apiVersion: 1, name: '${name}', label: '${name}',
   capabilities: {
     'verify': {
-      service: 'ci', command: [process.execPath, fileURLToPath(new URL('./provider.mjs', import.meta.url))],
+      service: 'ci', command: ['node', fileURLToPath(new URL('./provider.mjs', import.meta.url))],
       locality: 'remote', cost: 'unknown', requiredEnv: [], timeoutMs: 120000,
     },
   },
@@ -262,7 +263,7 @@ export function creatorPrompt(name: string, kind: string, describe: string): str
   return [
     `You are building a Yardmaster ${kind} plugin named "${name}" in the current directory.`,
     `What it should do: ${describe}`,
-    'Read PLUGIN_GUIDE.md first. Edit index.mjs (plain ESM JavaScript, no dependencies).',
+    kind === 'provider' ? 'Read PLUGIN_GUIDE.md first. Implement provider.mjs and its index.mjs manifest (plain ESM JavaScript, no dependencies). The scaffold reports unknown until implemented.' : 'Read PLUGIN_GUIDE.md first. Edit index.mjs (plain ESM JavaScript, no dependencies).',
     `When done, run \`ym plugin test ${name}\` and fix problems until all checks pass. If you need to learn the target CLI's flags or output format, run its --help.`,
     'Finish with a one-paragraph summary of how the plugin works.',
   ].join('\n');

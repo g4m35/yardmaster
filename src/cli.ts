@@ -4,7 +4,7 @@ import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, 
 import { createInterface } from 'node:readline/promises';
 import { createInterface as createLineReader } from 'node:readline';
 import { homedir as homedirPath, hostname, networkInterfaces, tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { buildMethods, localClient, remoteClient, type Client } from './api.ts';
 import { Coordinator } from './coordinator.ts';
 import { openDb } from './db.ts';
@@ -13,7 +13,7 @@ import { configWarnings, loadConfig, PRESETS, PROJECT_CONFIG_FILE, writeProjectC
 import { detectAgents, getAdapter } from './adapters/index.ts';
 import { clearHubInfo, Hub, readHubInfo, writeHubInfo } from './hub.ts';
 import { planCleanup, runCleanup, type CleanPlan } from './janitor.ts';
-import { currentBranch, mainRepoRoot, projectIdFor, git, revParse } from './git.ts';
+import { currentBranch, mainRepoRoot, repoRoot, projectIdFor, git, revParse } from './git.ts';
 import { isAlive, run, which } from './proc.ts';
 import { ago, clip, formatUsd } from './text.ts';
 import { STATUS_LABEL, type Task } from './types.ts';
@@ -205,7 +205,7 @@ ${bold('Extend')}
   ym plugin new <name> [--kind adapter|notifier|provider] [--describe "..."] [--with claude]
   ym plugin test <name>   ym plugin list   ym presets   ym doctor   ym demo
   ym providers list [--json]              configured service providers and routing
-  ym providers plan <capability> [--json]  explain selection without dispatching work
+  ym providers plan <capability> [--input file.json] [--json]  explain selection without dispatch
   ym providers run <capability> [--input file.json] [--json]  explicitly execute once
 `;
 
@@ -884,7 +884,7 @@ async function cmdPlugin(a: Args) {
     await new Promise((r) => child.on('close', r));
     const r = await testPlugin(dir);
     for (const ch of r.checks) console.log(`${ch.ok ? green('✔') : red('✖')} ${ch.name}`);
-    console.log(r.ok ? green(`\n✔ Plugin ${name} works. Run "ym hub restart" to load it.`) : yellow(`\nThe plugin needs more work: edit ${dir} or run the command again.`));
+    console.log(r.ok ? green(kind === 'provider' ? `\n✔ Provider ${name} manifest valid; commands not executed. Implement provider.mjs, enable a route and verify the real service.` : `\n✔ Plugin ${name} works. Run "ym hub restart" to load it.`) : yellow(`\nThe plugin needs more work: edit ${dir} or run the command again.`));
     return;
   }
   die('ym plugin new|test|list');
@@ -897,7 +897,9 @@ async function cmdProviders(a: Args) {
   for (const name of Object.keys(a.flags)) if (!['json', 'input', 'dry-run', 'repo'].includes(name)) die(`Unknown provider option --${name}`);
   if (a._.length > (sub === 'list' ? 2 : 3)) die('Too many provider arguments. Use --input file.json for request data.');
   if (a.flags.input === true) die('--input needs a JSON file path');
-  const cwd = process.cwd();
+  let cwd = process.cwd();
+  const root = await repoRoot(cwd).catch(() => null);
+  while (root && cwd !== root && !existsSync(join(cwd, PROJECT_CONFIG_FILE))) cwd = dirname(cwd);
   const config = loadConfig(cwd);
   const loaded = await loadPlugins();
   const report = providerInventory(config.services, loaded.providers, cwd);
@@ -912,13 +914,17 @@ async function cmdProviders(a: Args) {
     return;
   }
   const capability = a._[2] ?? die(`ym providers ${sub} <capability>`);
-  if (sub === 'plan' || a.flags['dry-run']) {
+  if (a.flags['dry-run']) {
     console.log(JSON.stringify(planService(capability, config.services, loaded.providers, cwd), null, 2));
     return;
   }
   const inputFile = flag(a, 'input');
   if (inputFile && statSync(resolve(inputFile)).size > 1024 * 1024) die('Provider input exceeds 1 MiB');
   const input = inputFile ? JSON.parse(readFileSync(resolve(inputFile), 'utf8')) as unknown : {};
+  if (sub === 'plan') {
+    console.log(JSON.stringify(planService(capability, config.services, loaded.providers, cwd, process.env, input), null, 2));
+    return;
+  }
   const stop = new AbortController();
   const abort = () => stop.abort('provider command interrupted');
   process.once('SIGINT', abort); process.once('SIGTERM', abort);
