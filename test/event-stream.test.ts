@@ -128,3 +128,21 @@ test('a caught-up client receives the next live event even while another replays
   assert.equal(batch.length, 200);
   assert.equal(batch[0]!.id, 2);
 });
+
+
+test('an event batch is serialized once for clients sharing a cursor', t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const { stream, add } = fixture(t);
+  const first = new Response(); const second = new Response();
+  stream.connect(first.response(), 0); stream.connect(second.response(), 0);
+  add(2);
+  let serialized = 0;
+  const stringify = JSON.stringify;
+  t.mock.method(JSON, 'stringify', (value: unknown) => {
+    if (Array.isArray(value)) serialized++;
+    return stringify(value);
+  });
+  t.mock.timers.tick(700);
+  assert.equal(serialized, 1);
+  assert.equal(first.frames[1], second.frames[1]);
+});

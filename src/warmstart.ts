@@ -44,7 +44,7 @@ export const LOCKFILES = [
 /** Only tracked inputs can identify the install a fresh worktree is expected to have. */
 export async function lockHash(dir: string, shareDirs = ['node_modules', 'vendor', '.bundle', 'target', '.gradle', 'Pods']): Promise<string | null> {
   try {
-    const listed = await git(dir, ['ls-files', '-z'], { timeoutMs: 30_000 });
+    const listed = await git(dir, ['ls-files', '-z', '--recurse-submodules'], { timeoutMs: 30_000 });
     const locks = listed.stdout.split('\0').filter(path => path && LOCKFILES.includes(basename(path)) &&
       !path.split('/').slice(0, -1).some(part => shareDirs.includes(part))).sort();
     if (!locks.length) return '';
@@ -128,7 +128,7 @@ export async function warmStart(repoRoot: string, worktree: string, config: Conf
         }
         const r = await cloneTree(d.path, target, { allowPlainCopy: !cow });
         if (r.ok) {
-          await recordDependencyClone(target, r.method);
+          await recordDependencyClone(target, r.method, d.path);
           out.cloned.push({ rel: d.rel, bytes, method: r.method });
         }
         else out.skipped.push({ rel: d.rel, why: `copy failed: ${r.error ?? 'unknown error'}` });
@@ -154,7 +154,7 @@ export async function warmStart(repoRoot: string, worktree: string, config: Conf
  */
 export async function refreshDeps(repoRoot: string, worktree: string, config: Config, knownHash: string | null, candidates: string[]): Promise<WarmStartResult | null> {
   const now = await lockHash(worktree, config.worktree.shareDirs);
-  if (now !== null && knownHash === now) return null;
+  if (now !== null && knownHash === now && (now !== '' || config.worktree.setup.length === 0)) return null;
   // An unreadable tracked input cannot authorize removing an existing install either.
   if (now === null) return warmStart(repoRoot, worktree, config, { candidates });
   const trash = join(dirname(dirname(worktree)), '.trash');

@@ -41,6 +41,25 @@ export async function dirBytes(path: string, maxAgeMs = 60_000, exclude: string[
   return bytes;
 }
 
+export async function dirBytesMany(paths: string[], maxAgeMs = 60_000): Promise<number> {
+  if (!paths.length) return 0;
+  if (paths.length === 1) return dirBytes(paths[0]!, maxAgeMs);
+  paths = [...paths].sort();
+  const key = paths.join('\0') + '\0batch';
+  const hit = sizeCache.get(key);
+  if (hit && Date.now() - hit.at < maxAgeMs) return hit.bytes;
+  let bytes = 0;
+  // Bound argv size, and let du account for hard links across siblings without descending into exempt paths.
+  for (let offset = 0; offset < paths.length; offset += 128) {
+    const batch = paths.slice(offset, offset + 128);
+    const result = process.platform === 'win32' ? null : await run('du', ['-skc', ...batch], { timeoutMs: 60_000 }).catch(() => null);
+    const total = result?.code === 0 ? Number(result.stdout.trim().split('\n').at(-1)?.split(/\s+/)[0]) : NaN;
+    bytes += Number.isFinite(total) ? total * 1024 : batch.reduce((sum, path) => sum + walkBytes(path), 0);
+  }
+  sizeCache.set(key, { at: Date.now(), bytes });
+  return bytes;
+}
+
 function walkBytes(path: string, exclude: string[] = []): number {
   let total = 0;
   const stack = [path];
@@ -71,7 +90,11 @@ function safeReaddir(p: string): string[] {
 
 export function invalidateSize(path: string): void {
   sizeRevision++;
-  for (const k of sizeCache.keys()) if (k === path || k.startsWith(path + '/') || k.startsWith(path + '\0')) sizeCache.delete(k);
+  for (const key of sizeCache.keys()) {
+    const parts = key.split('\0');
+    const measured = parts.at(-1) === 'batch' ? parts.slice(0, -1) : [parts[0]!];
+    if (measured.some(root => root === path || root.startsWith(path + '/') || path.startsWith(root + '/'))) sizeCache.delete(key);
+  }
 }
 
 export interface ArtifactDir {

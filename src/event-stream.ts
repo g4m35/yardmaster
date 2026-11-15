@@ -54,9 +54,10 @@ export class EventStream {
     for (const [after, clients] of [...groups].sort(([a], [b]) => b - a)) {
       const rows = this.events.all(after) as unknown as (Omit<YardEvent, 'data'> & { data: string | null })[];
       const events = rows.map(row => ({ ...row, data: row.data ? JSON.parse(row.data) : null }));
+      const batch = events.length ? `data: ${JSON.stringify(events)}\n\n` : ': keepalive\n\n';
       for (const client of clients) {
         if (events.length) client.last = events[events.length - 1]!.id;
-        let frame = events.length ? `data: ${JSON.stringify(events)}\n\n` : ': keepalive\n\n';
+        let frame = batch;
         // Machine/session records and time-based freshness can change without durable events.
         if (Date.now() - client.refreshedAt >= 30_000) {
           frame += 'event: refresh\ndata: {}\n\n';
