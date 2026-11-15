@@ -3,6 +3,7 @@
 // so concurrent callers in different processes share one simulated machine. Never touches real simulators.
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmdirSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -35,7 +36,17 @@ try {
       const udid = randomUUID().toUpperCase();
       state.devices.push({ udid, name: rest[0], state: 'Shutdown', type: rest[1], runtime: rest[2], installed: [] });
       out(udid + '\n');
-    } else if (cmd === 'boot') { const d = device(rest[0]); if (!d) code = 164; else d.state = 'Booted'; }
+    } else if (cmd === 'boot') {
+      const d = device(rest[0]);
+      if (!d) code = 164;
+      else {
+        d.state = 'Booted';
+        // Like launchd_sim: a detached process that outlives simctl, inherits its environment and belongs to the simulator.
+        const sim = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 15000)'], { detached: true, stdio: 'ignore' });
+        sim.unref();
+        d.simPid = sim.pid;
+      }
+    }
     else if (cmd === 'bootstatus') { if (device(rest[0])?.state !== 'Booted') code = 165; }
     else if (cmd === 'install') { const d = device(rest[0]); if (!d || !existsSync(rest[1])) code = 22; else d.installed.push(rest[1]); }
     else if (cmd === 'launch') {
@@ -44,7 +55,18 @@ try {
       if (!d || d.state !== 'Booted' || !d.installed.length) code = 4;
       else { if (stdout) writeFileSync(stdout, 'app ready\n'); out(`${bundle}: 4242\n`); }
     } else if (cmd === 'io') { if (!device(rest[0])) code = 5; else writeFileSync(rest[2], Buffer.from('89504e470d0a1a0a', 'hex')); }
-    else if (cmd === 'shutdown') { const d = device(rest[0]); if (!d) code = 164; else if (d.state === 'Shutdown') code = 149; else d.state = 'Shutdown'; }
+    else if (cmd === 'shutdown') {
+      const d = device(rest[0]);
+      if (!d) code = 164;
+      else if (d.state === 'Shutdown') code = 149;
+      else {
+        d.state = 'Shutdown';
+        // Record whether the simulator's own process was still running when the simulator was shut down.
+        let alive = false;
+        if (d.simPid) { try { process.kill(d.simPid, 0); alive = true; process.kill(d.simPid, 'SIGTERM'); } catch { alive = false; } }
+        appendFileSync(join(here, 'sim-processes'), `${d.simPid ?? 'none'} ${alive}\n`);
+      }
+    }
     else if (cmd === 'delete') { const before = state.devices.length; state.devices = state.devices.filter(d => d.udid !== rest[0]); if (state.devices.length === before) code = 164; }
     else code = 3;
   }

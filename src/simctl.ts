@@ -1,3 +1,4 @@
+import { execFile } from 'node:child_process';
 import { accessSync, constants, statSync } from 'node:fs';
 import { delimiter, resolve } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
@@ -35,7 +36,22 @@ export async function exec(ctx: Omit<ToolContext, 'xcrun'>, command: string, arg
   return { ok: clean && r.code === 0, clean, reaped: r.reaped, code: r.code, end: r.end, stdout, durationMs: Date.now() - started };
 }
 
-const simctl = (ctx: ToolContext, args: string[], timeoutMs = 60_000, cancel = true) => exec(ctx, ctx.xcrun, ['simctl', ...args], { timeoutMs, cancel });
+/**
+ * simctl is not run as an owned process group: booting starts the simulator's own processes, which inherit our
+ * environment yet belong to the simulator. They end with `simctl shutdown`/`delete`, never with a signal from us.
+ */
+function simctl(ctx: ToolContext, args: string[], timeoutMs = 60_000, cancel = true): Promise<ExecResult> {
+  const started = Date.now();
+  return new Promise(resolve => {
+    execFile(ctx.xcrun, ['simctl', ...args], { cwd: ctx.cwd, env: ctx.env, timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024, encoding: 'utf8',
+      signal: cancel ? ctx.signal : undefined }, (error, stdout) => {
+      const e = error as (Error & { code?: number | string; killed?: boolean }) | null;
+      const end = !e ? 'exit' : e.name === 'AbortError' ? 'aborted' : e.killed ? 'timeout' : typeof e.code === 'number' ? 'exit' : 'spawn_failed';
+      const code = !e ? 0 : typeof e.code === 'number' ? e.code : null;
+      resolve({ ok: !e, clean: end === 'exit', reaped: true, code, end, stdout: String(stdout ?? '').slice(-256 * 1024), durationMs: Date.now() - started });
+    });
+  });
+}
 
 const ListSchema = z.object({
   devicetypes: z.array(z.object({ identifier: z.string(), name: z.string(), productFamily: z.string().optional(), modelIdentifier: z.string().optional() })).default([]),

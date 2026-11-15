@@ -88,6 +88,9 @@ test('the simulator smoke workflow leases, installs, launches, tests and records
   assertForeignUntouched(m);
   assert.equal(leasesNow().length, 0);
   assert.equal(e.lease!.cleanup, 'released');
+  // The simulator's own processes outlive simctl; they belong to the simulator and end with its shutdown.
+  assert.match(readFileSync(join(m.bin, 'sim-processes'), 'utf8'), /^\d+ true\n$/);
+  assert.equal(run.execution.reaped, true);
 });
 
 test('a physical-device requirement stays untested after a simulator pass and is not accepted', async () => {
@@ -390,4 +393,43 @@ test('declared credentials are redacted from saved device logs and evidence', as
   for (const file of run.result.data.evidence.files.filter(f => f.kind === 'log')) assert(!readFileSync(file.path, 'utf8').includes(secret), file.path);
   assert(!readFileSync(join(run.result.artifacts[0]!), 'utf8').includes(secret));
   assert.match(readFileSync(run.result.data.evidence.checks.find(c => c.name === 'build')!.log!, 'utf8'), /token=\[redacted\]/);
+});
+
+test('built-in phase names are reserved, so a user test can never hide among them', () => {
+  for (const name of ['build', 'boot', 'install', 'launch']) {
+    assert.throws(() => options({ tests: [{ name, runner: 'command', command: ['true'] }] }), /reserved check names/);
+  }
+});
+
+test('the run installs and hashes its own copy of the build, not output a later build overwrote', async () => {
+  const s = appRepo(), m = fakeMachine();
+  const blocker = await acquireLease({ pool: 'simulator', capacity: 1, holder: 'blocker', ttlMs: 60_000, waitMs: 0, cleanup: async () => ({ ok: true, detail: '' }) });
+  assert(blocker.lease);
+  const running = runAppleSimulator(options(), context(s, m));
+  // Once it queues for the simulator its build is done; another build now rewrites the shared output.
+  await until(() => leasesNow(), leases => leases.some(l => l.state === 'waiting'), 20_000, 'the run to queue for a simulator');
+  const app = join(s.repo, 'build/Smoke.app');
+  const original = artifactSha256(app);
+  writeFileSync(join(app, 'Smoke'), 'binary from someone else');
+  blocker.lease.release();
+  const run = await running;
+  assert.equal(run.result.status, 'passed', run.result.summary);
+  assert.equal(run.result.data.evidence.artifact!.sha256, original);
+  const installed = m.log().find(e => e.args[1] === 'install')!.args[3]!;
+  assert.notEqual(installed, app, 'installed from the run-owned snapshot');
+  assert(!existsSync(installed), 'the snapshot is removed after the run');
+});
+
+test('a project cannot raise the machine-wide simulator limit set in the global config', async () => {
+  const s = appRepo({ devices: { holdAtPressure: 'off', minFreeMemMb: 0, limits: { simulator: 1 } } }), m = fakeMachine();
+  writeFileSync(join(s.repo, 'yardmaster.json'), JSON.stringify({ verify: ['node check.mjs'], devices: { limits: { simulator: 2 }, waitMinutes: 0 } }));
+  sh(s.repo, 'git', ['commit', '-qam', 'project asks for two simulators']);
+  const other = await acquireLease({ pool: 'simulator', capacity: 1, holder: 'other-project', ttlMs: 60_000, waitMs: 0, cleanup: async () => ({ ok: true, detail: '' }) });
+  assert(other.lease);
+  try {
+    const run = await runAppleSimulator(options(), { ...context(s, m), devices: undefined });
+    assert.equal(run.result.status, 'unknown');
+    assert.match(run.result.summary, /No simulator slot: waiting in queue position 1/);
+    assert.equal(created(m).length, 0);
+  } finally { other.lease.release(); }
 });

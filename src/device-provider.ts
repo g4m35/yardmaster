@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { constants, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { arch, platform, release } from 'node:os';
 import { basename, join, relative, resolve } from 'node:path';
 import * as z from 'zod/v4';
@@ -15,8 +15,10 @@ import type { ServiceContext } from './service-receipts.ts';
 import { chooseTarget, cleanupOwnedSimulators, exec, listSimulators, OwnedSimulator, resolveTool, type ExecResult, type ToolContext } from './simctl.ts';
 
 const Command = z.array(z.string().min(1)).min(1);
+/** Names of the built-in phases; a user test may not reuse them and hide among them. */
+const PHASES = ['build', 'boot', 'install', 'launch'];
 const TestSchema = z.object({
-  name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,59}$/),
+  name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,59}$/).refine(name => !PHASES.includes(name), 'build, boot, install and launch are reserved check names'),
   /** Labels the tool for availability checks and evidence. Commands are argument arrays, never shell strings. */
   runner: z.enum(['maestro', 'xcodebuild', 'agent-device', 'command']),
   command: Command.optional(),
@@ -87,6 +89,8 @@ export async function runAppleSimulator(options: AppleSimulatorOptions, ctx: Dev
   const checks: Check[] = [];
   const files: Files = [];
   const config = ctx.devices ?? loadConfig(ctx.cwd).devices;
+  // A project may only lower the machine's limits: capacity is shared with every other project here.
+  const machine = ctx.devices ?? loadConfig().devices;
   const sample = ctx.sampleMemory ?? sampleMemory;
   const admit = async () => memoryHold(await sample(), config);
   let reaped = true;
@@ -117,13 +121,17 @@ export async function runAppleSimulator(options: AppleSimulatorOptions, ctx: Dev
   const environment = { machineId: machineId(), os: `${platform()} ${release()}`, arch: arch(),
     xcode: xcodeVersion?.ok ? xcodeVersion.stdout.trim().split('\n').join(' ').slice(0, 200) : null };
 
-  const lease = (pool: 'build' | 'simulator'): Promise<LeaseOutcome> => acquireLease({ pool, capacity: config.limits[pool],
+  const lease = (pool: 'build' | 'simulator'): Promise<LeaseOutcome> => acquireLease({ pool, capacity: Math.min(config.limits[pool], machine.limits[pool]),
     holder: ctx.context.taskId ? `task:${ctx.context.taskId}` : ctx.context.projectId ? `project:${ctx.context.projectId}` : 'cli',
     projectId: ctx.context.projectId ?? null, taskId: ctx.context.taskId ?? null, requestId: ctx.requestId,
     ttlMs: config.leaseMinutes * 60_000, waitMs: config.waitMinutes * 60_000, pollMs: ctx.pollMs, signal: ctx.signal, admit,
     cleanup: owned => cleanupOwnedSimulators(tool, owned) });
 
   // ---- artifact: reuse only on an exact compatibility key; anything uncertain builds normally ----
+  // The artifact is hashed, installed and cached from this run's own copy, never from a path others write to.
+  const snapshotDir = join(yardHome(), 'tmp', `device-${ctx.requestId}`);
+  let installPath: string | null = null;
+  let built: { path: string; sha256: string } | null = null;
   if (!problem) {
     const appPath = resolve(ctx.cwd, options.build.app);
     let fingerprint: string | null = null;
@@ -136,7 +144,11 @@ export async function runAppleSimulator(options: AppleSimulatorOptions, ctx: Dev
     const cacheDir = options.build.reuse === 'fingerprint' && fingerprint && project ? join(yardHome(), 'device-builds',
       createHash('sha256').update(JSON.stringify({ project, bundleId: options.bundleId, app: options.build.app, command: options.build.command ?? null, fingerprint })).digest('hex').slice(0, 32)) : null;
     const cached = cacheDir ? readCache(cacheDir) : null;
-    if (cached) {
+    let reused: { path: string; sha256: string } | null = null;
+    // Another run may replace the cache while this one copies it; that only means building normally.
+    if (cached) try { reused = snapshot(cached.path, snapshotDir); } catch { reused = null; }
+    if (cached && reused?.sha256 === cached.sha256) {
+      installPath = reused.path;
       artifact = { path: cached.path, sha256: cached.sha256, bundleId: options.bundleId, source: 'reused', fingerprint, builtFromCommit: cached.commit };
       checks.push({ name: 'build', runner: 'reuse', status: 'skipped', durationMs: 0, detail: `Reused the build of ${cached.commit?.slice(0, 12) ?? 'an earlier commit'}: fingerprint ${fingerprint} matched and the stored artifact hash verified.`, log: null });
     } else if (options.build.command) {
@@ -151,21 +163,24 @@ export async function runAppleSimulator(options: AppleSimulatorOptions, ctx: Dev
           checks.push({ name: 'build', runner: 'command', status, durationMs: r?.durationMs ?? null, detail: status === 'passed' ? 'Build command passed.' : `Build ${status}${r?.code ? ` (exit ${r.code})` : ''}: ${tail(r?.stdout ?? '', 600)}`, log });
           if (status === 'failed') failedBuild = true;
           else if (status !== 'passed') problem = 'The build did not complete cleanly.';
+          // Copy while still holding the slot: the next build may overwrite this output before it is installed.
+          else built = existsSync(appPath) ? snapshot(appPath, snapshotDir) : null;
         } finally { slot.lease.release(); }
       }
     }
     if (!problem && !failedBuild && !artifact) {
-      if (!existsSync(appPath)) problem = `No app at ${options.build.app}. Set build.app to the .app your build produces.`;
+      const taken = built ?? (!options.build.command && existsSync(appPath) ? snapshot(appPath, snapshotDir) : null);
+      if (!taken) problem = `No app at ${options.build.app}. Set build.app to the .app your build produces.`;
       else {
-        const sha256 = artifactSha256(appPath);
-        artifact = { path: appPath, sha256, bundleId: options.bundleId, source: options.build.command ? 'built' : 'existing', fingerprint, builtFromCommit: options.build.command ? sha : null };
-        if (cacheDir && options.build.command) storeCache(cacheDir, appPath, sha256, sha);
+        installPath = taken.path;
+        artifact = { path: appPath, sha256: taken.sha256, bundleId: options.bundleId, source: options.build.command ? 'built' : 'existing', fingerprint, builtFromCommit: options.build.command ? sha : null };
+        if (cacheDir && options.build.command) storeCache(cacheDir, taken.path, taken.sha256, sha);
       }
     }
   }
 
   // ---- simulator: one machine-wide lease; only the simulator this lease creates is touched ----
-  if (!problem && !failedBuild && artifact) {
+  if (!problem && !failedBuild && artifact && installPath) {
     const slot = await lease('simulator');
     if (!slot.lease) {
       problem = `No simulator slot: ${slot.reason}.`;
@@ -173,7 +188,7 @@ export async function runAppleSimulator(options: AppleSimulatorOptions, ctx: Dev
     } else {
       const held = slot.lease;
       leaseRecord = { id: held.id, pool: 'simulator', queuedAt: held.queuedAt, acquiredAt: held.acquiredAt, releasedAt: null, waitedMs: slot.waitedMs, cleanup: 'released' };
-      const outcome = await onSimulator(options, ctx, { ...tool, signal: AbortSignal.any([held.lost, ...(ctx.signal ? [ctx.signal] : [])]) }, held, artifact, sha, checks, files, saveLog, track);
+      const outcome = await onSimulator(options, ctx, { ...tool, signal: AbortSignal.any([held.lost, ...(ctx.signal ? [ctx.signal] : [])]) }, held, artifact, installPath, sha, checks, files, saveLog, track);
       device = outcome.device;
       problem = outcome.problem;
       const cleanup = await finishLease(held, tool, outcome.owned);
@@ -182,6 +197,7 @@ export async function runAppleSimulator(options: AppleSimulatorOptions, ctx: Dev
     }
   }
 
+  rmSync(snapshotDir, { recursive: true, force: true });
   const canceled = !!ctx.signal?.aborted;
   const ran = checks.filter(c => c.name !== 'build');
   if (failedBuild) simulator = 'not-run';
@@ -211,7 +227,7 @@ export async function runAppleSimulator(options: AppleSimulatorOptions, ctx: Dev
 }
 
 async function onSimulator(options: AppleSimulatorOptions, ctx: DeviceRunContext, tool: ToolContext, lease: LeaseHandle, artifact: NonNullable<DeviceEvidence['artifact']>,
-  sha: string | null, checks: Check[], files: Files, saveLog: (name: string, text: string) => string, track: (r: ExecResult) => ExecResult) {
+  installPath: string, sha: string | null, checks: Check[], files: Files, saveLog: (name: string, text: string) => string, track: (r: ExecResult) => ExecResult) {
   const owned: OwnedResource[] = [];
   const result = { device: null as DeviceEvidence['device'], problem: null as string | null, owned };
   const step = (name: string, runner: string, r: ExecResult, detail: string) => {
@@ -237,7 +253,7 @@ async function onSimulator(options: AppleSimulatorOptions, ctx: DeviceRunContext
     result.device = { kind: 'simulator', name, model: target.deviceType.name, modelIdentifier: target.deviceType.modelIdentifier,
       runtime: target.runtime.name, runtimeIdentifier: target.runtime.identifier, udid: sim.udid, createdByYardmaster: true };
     if (!step('boot', 'simctl', await sim.boot(options.simulator.bootTimeoutMinutes * 60_000), `Booted ${target.deviceType.name} on ${target.runtime.name}.`)) return result;
-    if (!step('install', 'simctl', await sim.install(artifact.path), `Installed ${basename(artifact.path)} (sha256 ${artifact.sha256.slice(0, 12)}).`)) return result;
+    if (!step('install', 'simctl', await sim.install(installPath), `Installed ${basename(artifact.path)} (sha256 ${artifact.sha256.slice(0, 12)}).`)) return result;
     if (options.launch) {
       const out = join(ctx.evidenceDir, 'app-stdout.log'), err = join(ctx.evidenceDir, 'app-stderr.log');
       const launched = await sim.launch(options.bundleId, out, err);
@@ -289,12 +305,20 @@ function walkFiles(dir: string, depth = 0): string[] {
     : entry.isFile() ? [join(dir, entry.name)] : []).slice(0, 80);
 }
 
+/** Copy-on-write clone where the filesystem supports it (APFS), otherwise a plain copy. */
+function snapshot(app: string, dir: string): { path: string; sha256: string } | null {
+  const target = join(dir, `${randomBytes(4).toString('hex')}-${basename(app)}`);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  cpSync(app, target, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE });
+  return { path: target, sha256: artifactSha256(target) };
+}
+
 const CacheSchema = z.object({ path: z.string(), sha256: z.string(), commit: z.string().nullable() });
 function readCache(dir: string): z.infer<typeof CacheSchema> | null {
   try {
     const entry = CacheSchema.parse(JSON.parse(readFileSync(join(dir, 'artifact.json'), 'utf8')));
-    // A cached artifact is reused only if it still hashes to what was stored.
-    return existsSync(entry.path) && relative(dir, entry.path).split('/')[0] !== '..' && artifactSha256(entry.path) === entry.sha256 ? entry : null;
+    // The caller hashes its own copy and reuses it only if that still matches what was stored.
+    return existsSync(entry.path) && relative(dir, entry.path).split('/')[0] !== '..' ? entry : null;
   } catch { return null; }
 }
 function storeCache(dir: string, app: string, sha256: string, commit: string | null): void {

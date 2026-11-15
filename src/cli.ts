@@ -974,16 +974,19 @@ async function cmdDevices(a: Args) {
   for (const name of Object.keys(a.flags)) if (!allowed[sub]!.includes(name)) die(`Unknown devices option --${name}`);
   const cwd = process.cwd();
   const config = loadConfig((await mainRepoRoot(cwd).catch(() => null)) ?? undefined).devices;
+  // Projects may lower the machine-wide limits, never raise them.
+  const machine = loadConfig().devices;
+  const capacity = (pool: (typeof LEASE_POOLS)[number]) => Math.min(config.limits[pool], machine.limits[pool]);
   if (sub === 'status') {
     const { memoryHold, sampleMemory } = await import('./machine-pressure.ts');
     const db = openDb();
     const leases = (() => { try { return listLeases(db); } finally { db.close(); } })();
     const memory = await sampleMemory();
     const hold = memoryHold(memory, config);
-    const report = { machineId: machineId(), limits: config.limits, memory: { ...memory, admitsHeavyWork: !hold, hold },
+    const report = { machineId: machineId(), limits: Object.fromEntries(LEASE_POOLS.map(pool => [pool, capacity(pool)])), memory: { ...memory, admitsHeavyWork: !hold, hold },
       leases: leases.map(lease => ({ ...lease, position: queuePosition(leases, lease) })) };
     if (a.flags.json) return console.log(JSON.stringify(report, null, 2));
-    console.log(`Limits on this machine: ${LEASE_POOLS.map(pool => `${pool} ${leases.filter(l => l.pool === pool && l.state !== 'waiting').length}/${config.limits[pool]}`).join(', ')}`);
+    console.log(`Limits on this machine: ${LEASE_POOLS.map(pool => `${pool} ${leases.filter(l => l.pool === pool && l.state !== 'waiting').length}/${capacity(pool)}`).join(', ')}`);
     console.log(hold ? yellow(`Heavy device work is held: ${hold}.`) : green(`Memory admits heavy device work (${Math.round(memory.availableMb)} MB available${memory.pressure ? `, pressure ${memory.pressure}` : ''}).`));
     if (!leases.length) return console.log(dim('No leases held or queued.'));
     for (const lease of report.leases) {
@@ -1027,7 +1030,7 @@ async function cmdDevices(a: Args) {
   process.once('SIGINT', abort); process.once('SIGTERM', abort);
   try {
     const waitMinutes = flag(a, 'wait-minutes') !== undefined ? Number(flag(a, 'wait-minutes')) : config.waitMinutes;
-    const outcome = await acquireLease({ pool, capacity: config.limits[pool], holder: `cli:${command[0]}`, ...await cliProject(cwd).catch(() => ({})),
+    const outcome = await acquireLease({ pool, capacity: capacity(pool), holder: `cli:${command[0]}`, ...await cliProject(cwd).catch(() => ({})),
       ttlMs: config.leaseMinutes * 60_000, waitMs: waitMinutes * 60_000, signal: stop.signal, cleanup: hostCleanup(),
       admit: async () => memoryHold(await sampleMemory(), config),
       onWait: ({ reason }) => process.stderr.write(dim(`${reason}\n`)) });
