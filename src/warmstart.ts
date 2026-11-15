@@ -150,7 +150,8 @@ export async function warmStart(repoRoot: string, worktree: string, config: Conf
  */
 export async function refreshDeps(repoRoot: string, worktree: string, config: Config, knownHash: string | null, candidates: string[]): Promise<WarmStartResult | null> {
   const now = lockHash(worktree);
-  if (knownHash !== null && knownHash === now) return null;
+  // Missing or unreadable lockfiles cannot prove an existing install is still compatible.
+  if (now && knownHash === now) return null;
   const trash = join(dirname(dirname(worktree)), '.trash');
   for (const d of await findArtifacts(worktree, config.worktree.shareDirs, 3, { sizes: false })) removeFast(d.path, trash);
   return warmStart(repoRoot, worktree, config, { candidates });

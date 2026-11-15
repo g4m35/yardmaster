@@ -157,3 +157,22 @@ test('an unreadable candidate never yields a partial matching fingerprint or abo
     assert.deepEqual(scan.identical, []);
   } finally { chmodSync(unreadable, 0o755); }
 });
+
+test('repeated unreadable fingerprints never suppress dependency refresh after a lock change', async t => {
+  if (process.getuid?.() === 0) { t.skip('root bypasses directory permissions'); return; }
+  const box = dependencyFixture();
+  const config = loadConfig();
+  await warmStart(box.repo, box.worktree, config);
+  const unreadable = join(box.worktree, 'unrelated-output');
+  mkdirSync(unreadable); chmodSync(unreadable, 0);
+  try {
+    const known = lockHash(box.worktree);
+    assert.equal(known, '');
+    writeFileSync(join(box.worktree, 'package-lock.json'), 'updated-lock');
+    assert.equal(lockHash(box.worktree), known);
+    const result = await refreshDeps(box.repo, box.worktree, config, known, []);
+    assert.notEqual(result, null, 'unknown hashes must leave refresh/setup enabled');
+    assert.equal(result?.stale, true);
+    assert.equal(existsSync(join(box.worktree, 'node_modules')), false);
+  } finally { chmodSync(unreadable, 0o755); }
+});
