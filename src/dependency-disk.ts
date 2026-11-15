@@ -1,6 +1,8 @@
-import { watch, type FSWatcher, type Dirent } from 'node:fs';
-import { lstat, readdir, mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { watch, rmSync, type FSWatcher, type Dirent } from 'node:fs';
+import { lstat, readdir, mkdtemp, writeFile, rm, mkdir } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { run, UtilityProcessError } from './proc.ts';
 import { dirBytes, dirBytesMany, invalidateSize, diskSizeRevision } from './disk.ts';
 import type { CloneResult } from './fastfs.ts';
 
@@ -9,10 +11,13 @@ interface Source {
   stamp: string;
   id: number;
   dirty: boolean;
+  changedAt?: bigint;
+  uncertain: boolean;
   users: number;
+  marker: string;
   ready: Promise<void>;
   stop(): void;
-  invalidate(): void;
+  invalidate(at?: bigint, uncertain?: boolean): void;
 }
 interface Clone {
   stamp: string;
@@ -20,9 +25,12 @@ interface Clone {
   stop(): void;
   source: Source;
   shared: boolean;
+  copiedAt: bigint;
 }
 const clones = new Map<string, Clone>();
 const sources = new Map<string, Source>();
+const proofs = new Set<string>();
+process.once('exit', () => { for (const proof of proofs) rmSync(proof, { recursive: true, force: true }); });
 let sourceEpoch = 0;
 let revision = 0;
 const totals = new Map<string, { at: number; bytes: number; revision: number }>();
@@ -37,57 +45,89 @@ function changed(path: string): void {
   invalidateSize(path); totals.clear(); revision++;
 }
 
-async function monitor(path: string, since: bigint, invalidate: () => void): Promise<() => void> {
+async function monitor(path: string, since: bigint, invalidate: (at?: bigint, uncertain?: boolean) => void): Promise<() => void> {
   const watchers: FSWatcher[] = [];
   let closed = false;
-  const stop = () => { closed = true; for (const watcher of watchers) watcher.close(); };
-  const fail = () => { if (!closed) { stop(); invalidate(); } };
+  const stop = () => { closed = true; for (const watcher of watchers.splice(0)) watcher.close(); };
+  const fail = (at?: bigint, uncertain = false) => { if (!closed) { stop(); invalidate(at, uncertain); } };
   const observe = (dir: string, recursive: boolean) => {
     const watcher = watch(dir, { recursive }, (_, name) => {
-      if (!name) { fail(); return; }
-      void lstat(join(dir, name), { bigint: true }).catch((err: NodeJS.ErrnoException) => {
+      if (!name) { fail(undefined, true); return; }
+      const file = join(dir, name);
+      void lstat(file, { bigint: true }).catch((err: NodeJS.ErrnoException) => {
         // FSEvents may name the watched root relative to its parent.
         if (process.platform === 'darwin' && name === basename(dir) && err.code === 'ENOENT') return lstat(dir, { bigint: true });
+        if (err.code === 'ENOENT') return lstat(dirname(file), { bigint: true });
         throw err;
       }).then(st => {
-        // Delayed creation events from before the clone finished are harmless.
-        if (st.ctimeNs > since) fail();
-      }, fail);
+        if (st.ctimeNs > since) fail(st.ctimeNs);
+      }, (err: NodeJS.ErrnoException) => { fail(undefined, err.code !== 'ENOENT'); });
     });
-    watcher.on('error', fail); watcher.on('close', fail); watcher.unref(); watchers.push(watcher);
+    watcher.on('error', () => fail(undefined, true)); watcher.on('close', () => fail(undefined, true));
+    watcher.unref(); watchers.push(watcher);
   };
   try {
     if (process.platform !== 'linux') observe(path, true);
     else {
-      // Node 22's recursive watcher also watches every file. Inotify directory watches already report file writes.
+      // Node 22's recursive watcher also watches every file. Directory watches already report file writes.
       const pending = [path];
       while (pending.length && !closed) {
         const dir = pending.pop()!;
         observe(dir, false);
-        for (const entry of await readdir(dir, { withFileTypes: true })) if (entry.isDirectory()) pending.push(join(dir, entry.name));
+        for (const entry of await readdir(dir, { withFileTypes: true })) {
+          if (closed) break;
+          const file = join(dir, entry.name);
+          if (entry.isDirectory()) pending.push(file);
+        }
       }
     }
-  } catch { fail(); }
+  } catch { fail(undefined, true); }
   return stop;
 }
 
-async function acquireSource(path: string, since: bigint): Promise<Source> {
+async function verifySource(source: Source): Promise<boolean> {
+  if (source.dirty) return false;
+  try {
+    if (source.stamp !== await stamp(source.path)) { source.invalidate(); return false; }
+    // Native metadata traversal closes notification startup gaps without reading dependency file contents.
+    const result = await run('find', [source.path, '-cnewer', source.marker, '-print0', '-quit'], { timeoutMs: 30_000 });
+    if (result.code !== 0) { source.invalidate(undefined, true); return false; }
+    const path = result.stdout.split('\0')[0];
+    if (path) {
+      const at = await lstat(path, { bigint: true }).then(st => st.ctimeNs, () => undefined);
+      source.invalidate(at); return false;
+    }
+    return !source.dirty;
+  } catch (err) {
+    source.invalidate(undefined, (err as NodeJS.ErrnoException).code !== 'ENOENT');
+    if (err instanceof UtilityProcessError) throw err;
+    return false;
+  }
+}
+
+async function acquireSource(path: string): Promise<Source> {
   path = resolve(path);
   const current = await stamp(path);
   const previous = sources.get(path);
-  if (previous && !previous.dirty && previous.stamp === current) {
+  if (previous && previous.stamp === current && await verifySource(previous)) {
     previous.users++; await previous.ready; return previous;
   }
   previous?.invalidate();
-  const source: Source = { path, stamp: current, id: ++sourceEpoch, dirty: false, users: 1,
-    ready: Promise.resolve(), stop: () => {}, invalidate: () => {
+  const proof = await mkdtemp(join(tmpdir(), 'yardmaster-clone-proof-'));
+  proofs.add(proof);
+  const marker = join(proof, 'started');
+  await writeFile(marker, '');
+  const since = (await lstat(marker, { bigint: true })).mtimeNs;
+  const cleanup = () => { void rm(proof, { recursive: true, force: true }).then(() => proofs.delete(proof), () => {}); };
+  const source: Source = { path, stamp: current, id: ++sourceEpoch, dirty: false, uncertain: false, users: 1, marker,
+    ready: Promise.resolve(), stop: () => {}, invalidate: (at, uncertain = false) => {
       if (source.dirty) return;
-      source.dirty = true; source.stop();
+      source.dirty = true; source.changedAt = at; source.uncertain = uncertain; source.stop(); cleanup();
       if (sources.get(path) === source) sources.delete(path);
       changed(path);
     } };
   sources.set(path, source);
-  source.ready = monitor(path, since, source.invalidate).then(stop => { source.stop = stop; });
+  source.ready = monitor(path, since, source.invalidate).then(stop => { source.stop = () => { stop(); cleanup(); }; });
   await source.ready;
   return source;
 }
@@ -105,35 +145,60 @@ function discard(path: string, record: Clone): void {
   changed(path);
 }
 
-export async function recordDependencyClone(path: string, method: CloneResult['method'], sourcePath: string): Promise<void> {
+async function clock(parent: string): Promise<bigint> {
+  const marker = await mkdtemp(join(parent, '.clone-proof-'));
+  try {
+    const file = join(marker, 'complete');
+    await writeFile(file, '');
+    return (await lstat(file, { bigint: true })).ctimeNs;
+  } finally { await rm(marker, { recursive: true, force: true }); }
+}
+
+async function recordDependencyClone(path: string, source: Source, copiedAt: bigint): Promise<void> {
+  let record: Clone | null = null;
+  try {
+    record = { stamp: await stamp(path), dirty: false, stop: () => {}, source, shared: true, copiedAt };
+    const clone = record;
+    record.stop = await monitor(path, copiedAt, () => discard(path, clone));
+    if (!await verifySource(source) || record.stamp !== await stamp(path)) discard(path, record);
+    if (!record.dirty) clones.set(path, record);
+  } catch (err) {
+    if (record) discard(path, record);
+    else releaseSource(source);
+    if (err instanceof UtilityProcessError) throw err;
+  }
+}
+
+export async function cloneDependency(sourcePath: string, path: string, copy: () => Promise<CloneResult>): Promise<CloneResult> {
   path = resolve(path);
   const previous = clones.get(path);
   if (previous) discard(path, previous);
-  totals.clear(); revision++;
-  if (method === 'cp') return;
-  let record: Clone | null = null;
-  let source: Source | null = null;
+  changed(path);
+  await mkdir(dirname(path), { recursive: true });
+  // The source monitor must cover both copying and the target monitor's setup.
+  let held: Source | null = await acquireSource(sourcePath).catch(err => {
+    if (err instanceof UtilityProcessError) throw err;
+    return null;
+  });
   try {
-    const marker = await mkdtemp(join(dirname(path), '.clone-proof-'));
-    let since: bigint;
-    try {
-      const file = join(marker, 'complete');
-      await writeFile(file, ''); since = (await lstat(file, { bigint: true })).ctimeNs;
-    } finally { await rm(marker, { recursive: true, force: true }); }
-    source = await acquireSource(sourcePath, since);
-    record = { stamp: await stamp(path), dirty: false, stop: () => {}, source, shared: true };
-    const clone = record;
-    record.stop = await monitor(path, since, () => discard(path, clone));
-    if (source.dirty || record.stamp !== await stamp(path)) discard(path, record);
-    if (!record.dirty) clones.set(path, record);
-  } catch {
-    if (record) discard(path, record);
-    else if (source) releaseSource(source);
-  }
+    const result = await copy();
+    if (result.ok && result.method !== 'cp' && held && await verifySource(held)) {
+      const copiedAt = await clock(dirname(path));
+      const source = held; held = null;
+      await recordDependencyClone(path, source, copiedAt);
+    }
+    return result;
+  } finally { if (held) releaseSource(held); }
 }
 
 export async function worktreeBytes(root: string, shareDirs: string[]): Promise<number> {
   root = resolve(root);
+  const key = `${root}\0${shareDirs.join('\0')}`;
+  const cached = totals.get(key);
+  if (!cached || cached.revision !== diskSizeRevision() || Date.now() - cached.at >= 60_000) {
+    const relevant = new Set([...clones].filter(([path]) => path.startsWith(root + '/')).map(([, record]) => record.source));
+    for (const source of relevant) await verifySource(source);
+  }
   const started = revision;
   const exempt = new Set<string>();
   const orphans = new Set<number>();
@@ -149,6 +214,10 @@ export async function worktreeBytes(root: string, shareDirs: string[]): Promise<
       discard(path, record);
       continue;
     }
+    if (record.source.dirty && (record.source.uncertain || (record.source.changedAt !== undefined && record.copiedAt >= record.source.changedAt))) {
+      // A delayed notification can describe a write during copying; these copies cannot share an exemption cohort.
+      discard(path, record); continue;
+    }
     if (record.shared && (record.source.dirty || record.source.stamp !== await currentStamp(record.source.path))) {
       record.source.invalidate();
       record.shared = false; totals.clear(); revision++; invalidateSize(root);
@@ -160,7 +229,6 @@ export async function worktreeBytes(root: string, shareDirs: string[]): Promise<
     }
     exempt.add(path);
   }
-  const key = `${root}\0${shareDirs.join('\0')}`;
   if (revision !== started) return worktreeBytes(root, shareDirs);
   const hit = totals.get(key);
   if (hit && hit.revision === diskSizeRevision() && Date.now() - hit.at < 60_000) return hit.bytes;

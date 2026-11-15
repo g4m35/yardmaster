@@ -1,7 +1,7 @@
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { git } from './git.ts';
-import { recordDependencyClone } from './dependency-disk.ts';
+import { cloneDependency } from './dependency-disk.ts';
 import { createHash } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 import type { Config } from './config.ts';
@@ -41,16 +41,31 @@ export const LOCKFILES = [
   'Podfile.lock', 'composer.lock', 'poetry.lock', 'uv.lock', 'go.sum', 'Pipfile.lock', 'mix.lock', 'pubspec.lock',
 ];
 
+function availableIn(source: string, worktree: string, rel: string): boolean {
+  if (source === worktree) return true;
+  const parts = rel.split('/');
+  for (let depth = 1; depth < parts.length; depth++) {
+    const prefix = parts.slice(0, depth).join('/');
+    if (existsSync(join(source, prefix, '.git')) && !existsSync(join(worktree, prefix, '.git'))) return false;
+  }
+  return true;
+}
+
 /** Only tracked inputs can identify the install a fresh worktree is expected to have. */
-export async function lockHash(dir: string, shareDirs = ['node_modules', 'vendor', '.bundle', 'target', '.gradle', 'Pods']): Promise<string | null> {
+export async function lockHash(dir: string, shareDirs = ['node_modules', 'vendor', '.bundle', 'target', '.gradle', 'Pods'], populatedIn = dir): Promise<string | null> {
   try {
     const listed = await git(dir, ['ls-files', '-z', '--recurse-submodules'], { timeoutMs: 30_000 });
     const locks = listed.stdout.split('\0').filter(path => path && LOCKFILES.includes(basename(path)) &&
       !path.split('/').slice(0, -1).some(part => shareDirs.includes(part))).sort();
     if (!locks.length) return '';
     const h = createHash('sha1');
-    for (const path of locks) h.update(path).update('\0').update(await readFile(join(dir, path))).update('\0');
-    return h.digest('hex').slice(0, 16);
+    let found = false;
+    for (const path of locks) {
+      if (!availableIn(dir, populatedIn, path)) continue;
+      h.update(path).update('\0').update(await readFile(join(dir, path))).update('\0');
+      found = true;
+    }
+    return found ? h.digest('hex').slice(0, 16) : '';
   } catch (err) {
     if (err instanceof UtilityProcessError) throw err;
     return null;
@@ -92,7 +107,7 @@ async function pickSource(worktree: string, sources: string[], shareDirs: string
   for (const s of sources) {
     if (!existsSync(s) || s === worktree) continue;
     if ((await findArtifacts(s, shareDirs, 3, { sizes: false })).length === 0) continue;
-    const have = await lockHash(s, shareDirs);
+    const have = await lockHash(s, shareDirs, worktree);
     if (want && have === want) return { source: s, stale: false };
     if (want === '' && have === '' && allowUnpinned) return { source: s, stale: true };
     stale = true;
@@ -113,6 +128,10 @@ export async function warmStart(repoRoot: string, worktree: string, config: Conf
       const dirs = await findArtifacts(picked.source, cfg.shareDirs, 3, { sizes: false });
       const cow = dirs.length ? await supportsCow(dirname(worktree)) : false;
       for (const d of dirs) {
+        if (!availableIn(picked.source, worktree, d.rel)) {
+          out.skipped.push({ rel: d.rel, why: 'The destination submodule is not initialized; run project setup first' });
+          continue;
+        }
         const target = join(worktree, d.rel);
         if (existsSync(target)) continue;
         // Even if configured: a virtualenv copy keeps pointing at (and installing into) the original environment.
@@ -126,9 +145,9 @@ export async function warmStart(repoRoot: string, worktree: string, config: Conf
           out.skipped.push({ rel: d.rel, why: `${gb(bytes)} and this disk can't clone copy-on-write` });
           continue;
         }
-        const r = await cloneTree(d.path, target, { allowPlainCopy: !cow });
+        const copy = () => cloneTree(d.path, target, { allowPlainCopy: !cow });
+        const r = cow ? await cloneDependency(d.path, target, copy) : await copy();
         if (r.ok) {
-          await recordDependencyClone(target, r.method, d.path);
           out.cloned.push({ rel: d.rel, bytes, method: r.method });
         }
         else out.skipped.push({ rel: d.rel, why: `copy failed: ${r.error ?? 'unknown error'}` });
