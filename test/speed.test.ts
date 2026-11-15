@@ -281,9 +281,6 @@ test('identical installs elsewhere on the machine can be shared, byte-identical 
     mkdirSync(join(root, p));
     writeFileSync(join(root, p, 'package-lock.json'), '{"lockfileVersion":3}');
     fakeInstall(join(root, p), 60, p === 'four' ? 'different' : 'same');
-    sh(join(root, p), 'git', ['init', '-qb', 'main']);
-    sh(join(root, p), 'git', ['add', 'package-lock.json']);
-    sh(join(root, p), 'git', ['commit', '-qm', 'tracked lockfile']);
   }
   // Same lockfile and same installed-state record, but a patched file: must never be swapped.
   writeFileSync(join(root, 'three', 'node_modules', 'pkg2', 'f2.js'), 'module.exports = "patched";\n');

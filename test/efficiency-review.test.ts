@@ -105,3 +105,18 @@ test('the integrator records a lockless reuse warning and preserves merge depend
     assert.equal(coord.eventsSince(0).filter(event => event.kind === 'integration.deps_unverified').length, 1);
   } finally { await integrator.stop(); db.close(); }
 });
+
+test('disk deduplication still compares readable untracked locks outside Git', async () => {
+  const box = sandbox();
+  const roots = [join(box.root, 'unversioned-one'), join(box.root, 'unversioned-two')];
+  for (const root of roots) {
+    mkdirSync(join(root, 'node_modules/pkg'), { recursive: true });
+    writeFileSync(join(root, 'package-lock.json'), 'same-lock');
+    writeFileSync(join(root, 'node_modules/.package-lock.json'), '{"packages":{"node_modules/pkg":{"version":"1.0.0"}}}');
+    writeFileSync(join(root, 'node_modules/pkg/index.js'), 'same-code');
+  }
+  const { scanDeps } = await import('../src/devdeps.ts');
+  const result = await scanDeps([box.root]);
+  assert.equal(result.identical.length, 1);
+  assert.equal(result.identical[0]!.dirs.length, 2);
+});

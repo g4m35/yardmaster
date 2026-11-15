@@ -1,4 +1,4 @@
-import { watch, type FSWatcher } from 'node:fs';
+import { watch, type FSWatcher, type Dirent } from 'node:fs';
 import { lstat, readdir, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { dirBytes, invalidateSize, diskSizeRevision } from './disk.ts';
@@ -80,7 +80,7 @@ export async function worktreeBytes(root: string, shareDirs: string[]): Promise<
   let bytes = await dirBytes(root, 60_000, shareDirs);
   const names = new Set(shareDirs);
   const walk = async (path: string): Promise<void> => {
-    let entries;
+    let entries: Dirent[];
     try { entries = await readdir(path, { withFileTypes: true }); } catch { return; }
     for (const entry of entries) {
       if (entry.name === '.git') continue;
