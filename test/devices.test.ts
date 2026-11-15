@@ -749,16 +749,21 @@ test('a long run of overlapping matches streams in bounded memory and time', () 
   // 16 MiB of "a" with the declared value "aa": every position starts a match, so the whole run is one span.
   const size = 16 * 1024 * 1024;
   writeFileSync(file, Buffer.concat([Buffer.from('start '), Buffer.alloc(size, 'a'), Buffer.from(' end')]));
-  const before = process.memoryUsage().arrayBuffers;
-  const started = Date.now();
-  assert.equal(scrubFile(file, ['aa', 'aaa'], 64 * 1024), true);
-  const elapsed = Date.now() - started;
-  // Measured before the test reads the result back: that read allocates a file-sized buffer of its own.
-  const grown = process.memoryUsage().arrayBuffers - before;
+  // Measured in a fresh process with garbage collected before each sample: the scrubber's per-chunk temporaries
+  // are then gone, so only memory it actually keeps can count (in-process sampling depended on GC timing).
+  const probe = `const { scrubFile } = await import(${JSON.stringify(new URL('../src/device-evidence.ts', import.meta.url).href)});
+globalThis.gc(); const before = process.memoryUsage().arrayBuffers;
+const started = Date.now();
+const ok = scrubFile(${JSON.stringify(file)}, ['aa', 'aaa'], 64 * 1024);
+const elapsed = Date.now() - started;
+globalThis.gc(); const after = process.memoryUsage().arrayBuffers;
+console.log(JSON.stringify({ ok, elapsed, retained: after - before }));`;
+  const out = JSON.parse(execFileSync(process.execPath, ['--expose-gc', '--input-type=module', '-e', probe], { encoding: 'utf8' }).trim().split('\n').at(-1)!) as { ok: boolean; elapsed: number; retained: number };
+  assert.equal(out.ok, true);
   assert.equal(readFileSync(file, 'utf8'), 'start [redacted] end');
-  assert(elapsed < 10_000, `streamed in ${elapsed} ms`);
-  // Nothing proportional to the file stays allocated: buffers in use stay far below its size.
-  assert(grown < size / 4, `no file-sized buffer was retained (grew ${grown} bytes)`);
+  assert(out.elapsed < 10_000, `streamed in ${out.elapsed} ms`);
+  // Nothing proportional to the file stays allocated once the scrub is done.
+  assert(out.retained < size / 4, `no file-sized buffer was retained (kept ${out.retained} bytes)`);
   assert.equal(artifactSha256(file), fileSha256(file));
 });
 
