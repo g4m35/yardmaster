@@ -10,6 +10,7 @@ import { clip, formatUsd } from './text.ts';
 import { machineId } from './paths.ts';
 import { VERSION } from './version.ts';
 import { nativeSessionName } from './hookclient.ts';
+import { evidenceLine } from './device-evidence.ts';
 
 /**
  * The MCP server is how Yardmaster meets people inside the agent they already use. Any MCP client
@@ -51,6 +52,10 @@ async function projectId(ctx: Ctx, repo?: string): Promise<{ id: string; root: s
   return { id, root, identity, checkout: cwd };
 }
 
+async function projectIdOnly(ctx: Ctx, repo?: string): Promise<string> {
+  return (await projectId(ctx, repo)).id;
+}
+
 const text = (s: string) => ({ content: [{ type: 'text' as const, text: s }] });
 const fail = (err: unknown) => ({ content: [{ type: 'text' as const, text: `Error: ${(err as Error).message}` }], isError: true });
 
@@ -68,7 +73,7 @@ export function buildMcpServer(ctx: Ctx): McpServer {
     cb: (args: unknown) => Promise<unknown>,
   ) => void;
   const handlers = new Map<string, { description: string; schema: z.ZodObject; run: (args: unknown) => Promise<string>; readOnly: boolean }>();
-  const READ_ONLY = new Set(['yard_status', 'yard_wait', 'yard_task', 'yard_who', 'yard_inbox']);
+  const READ_ONLY = new Set(['yard_status', 'yard_wait', 'yard_task', 'yard_who', 'yard_inbox', 'yard_devices']);
   const tool = <S extends z.ZodObject>(name: string, description: string, schema: S, run: (args: z.infer<S>) => Promise<string>) => {
     handlers.set(name, { description, schema, run: (a) => run(a as z.infer<S>), readOnly: READ_ONLY.has(name) });
   };
@@ -110,6 +115,15 @@ export function buildMcpServer(ctx: Ctx): McpServer {
       t.branch ? `branch: ${t.branch}${t.worktree ? ` (worktree ${t.worktree})` : ''}` : '',
       d.deps.length ? `after: ${d.deps.map((x) => `${x.id}[${x.status}]`).join(', ')}` : '',
     ].filter(Boolean).join('\n');
+  });
+
+  tool('yard_devices', 'Device verification for a task or this repo: simulator/build/physical-device leases on the hub machine and evidence (commit, artifact sha256, device, runtime). A simulator pass never counts as a physical-device pass.', z.object({ taskId: z.string().regex(/^t-[a-z0-9]+$/).optional(), ...repoArg }), async (a) => {
+    const projectId = a.taskId ? undefined : (await projectIdOnly(ctx, a.repo));
+    const d = await ctx.client['devices.status']({ projectId, taskId: a.taskId, limit: 5 });
+    const leases = d.leases.map((l) => `- ${l.pool} ${l.state}${l.position ? ` #${l.position}` : ''} ${l.holder}${l.owned.length ? ` (owns ${l.owned.map((o) => o.name).join(', ')})` : ''}`);
+    const evidence = d.evidence.map(({ evidence: e, receiptPath }) => `${evidenceLine(e)}\n  ${clip(e.summary, 300)}${receiptPath ? `\n  receipt ${receiptPath}` : ''}`);
+    return [leases.length ? `Leases on ${d.machineId}:\n${leases.join('\n')}` : `No device leases on ${d.machineId}.`,
+      evidence.length ? evidence.join('\n') : 'No device evidence recorded yet.'].join('\n');
   });
 
   tool('yard_claim_files', 'Reserve files/globs before you edit them so background agents and other sessions stay away. Returns who holds them if taken.', z.object({ patterns: z.array(z.string()).min(1), reason: z.string().optional(), minutes: z.number().min(1).max(480).default(30), ...repoArg }), async (a) => {

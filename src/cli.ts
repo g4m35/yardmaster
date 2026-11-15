@@ -208,6 +208,9 @@ ${bold('Extend')}
   ym providers list [--json]              configured service providers and routing
   ym providers plan <capability> [--input file.json] [--json]  explain selection without dispatch
   ym providers run <capability> [--input file.json] [--json]  explicitly execute once
+  ym devices status|evidence [--task id] [--json]  machine-wide device/build leases and device evidence
+  ym devices reap | release <lease-id> --note "..."  free leases of crashed holders; resolve a failed cleanup
+  ym devices lease <build|simulator|physical> -- <command...>  run any tool while holding a machine-wide slot
 `;
 
 async function cmdInit(a: Args) {
@@ -941,9 +944,100 @@ async function cmdProviders(a: Args) {
   const abort = () => stop.abort('provider command interrupted');
   process.once('SIGINT', abort); process.once('SIGTERM', abort);
   try {
-    const result = await runService(capability, input, config.services, loaded.providers, { cwd, signal: stop.signal, context: { sha: await revParse(cwd, 'HEAD') } });
+    const result = await runService(capability, input, config.services, loaded.providers, { cwd, signal: stop.signal, context: { sha: await revParse(cwd, 'HEAD'), ...await cliProject(cwd) } });
+    await keepDeviceEvidence(result.result, result.receiptPath);
     console.log(JSON.stringify(result, null, 2));
     if (result.result.status !== 'passed') process.exitCode = 1;
+  } finally { process.off('SIGINT', abort); process.off('SIGTERM', abort); }
+}
+
+async function cliProject(cwd: string): Promise<{ projectId?: string }> {
+  const root = await mainRepoRoot(cwd).catch(() => null);
+  return root ? { projectId: await projectIdFor(root) } : {};
+}
+
+/** Device evidence from CLI runs joins the same machine-local record the hub shows. */
+async function keepDeviceEvidence(result: object, receiptPath: string): Promise<void> {
+  const { evidenceOf, recordDeviceEvidence } = await import('./device-evidence.ts');
+  const evidence = evidenceOf(result);
+  if (!evidence) return;
+  const db = openDb();
+  try { recordDeviceEvidence(db, evidence, receiptPath); } finally { db.close(); }
+}
+
+async function cmdDevices(a: Args) {
+  const { LEASE_POOLS, acquireLease, listLeases, queuePosition, reapLeases, resolveLease } = await import('./leases.ts');
+  const { hostCleanup } = await import('./simctl.ts');
+  const sub = a._[1] ?? 'status';
+  const allowed: Record<string, string[]> = { status: ['json'], evidence: ['json', 'task', 'limit'], reap: ['json'], release: ['note', 'json'], lease: ['wait-minutes'] };
+  if (!allowed[sub]) die('ym devices status|evidence|reap|release|lease');
+  for (const name of Object.keys(a.flags)) if (!allowed[sub]!.includes(name)) die(`Unknown devices option --${name}`);
+  const cwd = process.cwd();
+  const config = loadConfig((await mainRepoRoot(cwd).catch(() => null)) ?? undefined).devices;
+  if (sub === 'status') {
+    const { memoryHold, sampleMemory } = await import('./machine-pressure.ts');
+    const db = openDb();
+    const leases = (() => { try { return listLeases(db); } finally { db.close(); } })();
+    const memory = await sampleMemory();
+    const hold = memoryHold(memory, config);
+    const report = { machineId: machineId(), limits: config.limits, memory: { ...memory, admitsHeavyWork: !hold, hold },
+      leases: leases.map(lease => ({ ...lease, position: queuePosition(leases, lease) })) };
+    if (a.flags.json) return console.log(JSON.stringify(report, null, 2));
+    console.log(`Limits on this machine: ${LEASE_POOLS.map(pool => `${pool} ${leases.filter(l => l.pool === pool && l.state !== 'waiting').length}/${config.limits[pool]}`).join(', ')}`);
+    console.log(hold ? yellow(`Heavy device work is held: ${hold}.`) : green(`Memory admits heavy device work (${Math.round(memory.availableMb)} MB available${memory.pressure ? `, pressure ${memory.pressure}` : ''}).`));
+    if (!leases.length) return console.log(dim('No leases held or queued.'));
+    for (const lease of report.leases) {
+      const where = [lease.projectId, lease.taskId].filter(Boolean).join(' ');
+      const owned = lease.owned.map(o => `${o.name}${o.udid ? ` ${o.udid}` : ''}`).join(', ');
+      console.log(`${lease.id} ${lease.pool} ${lease.state}${lease.position ? ` #${lease.position}` : ''} ${lease.holder}${where ? ` (${where})` : ''} pid ${lease.pid}${owned ? ` owns ${owned}` : ''}${lease.note ? ` - ${lease.note}` : ''}`);
+    }
+    return;
+  }
+  if (sub === 'evidence') {
+    const { deviceEvidence, evidenceLine } = await import('./device-evidence.ts');
+    const db = openDb();
+    const root = await mainRepoRoot(cwd).catch(() => null);
+    const projectId = flag(a, 'task') ? undefined : root ? await projectIdFor(root).catch(() => undefined) : undefined;
+    const items = (() => { try { return deviceEvidence(db, { taskId: flag(a, 'task'), projectId, limit: Number(flag(a, 'limit') ?? 10) }); } finally { db.close(); } })();
+    if (a.flags.json) return console.log(JSON.stringify(items, null, 2));
+    if (!items.length) return console.log(dim('No device evidence recorded on this machine yet. Configure device.test (docs/DEVICES.md) and run ym verify.'));
+    for (const item of items) console.log(`${evidenceLine(item.evidence)}\n  ${dim(item.evidence.summary)}${item.receiptPath ? dim(`\n  receipt ${item.receiptPath}`) : ''}`);
+    return;
+  }
+  if (sub === 'reap') {
+    const results = await reapLeases(hostCleanup());
+    if (a.flags.json) return console.log(JSON.stringify(results, null, 2));
+    if (!results.length) return console.log(dim('Nothing to reap: every lease has a live holder.'));
+    for (const r of results) console.log(`${r.outcome === 'cleanup_failed' ? yellow('!') : green('✔')} ${r.id} ${r.pool} ${r.holder}: ${r.outcome} (${r.detail})`);
+    return;
+  }
+  if (sub === 'release') {
+    const id = a._[2], note = flag(a, 'note');
+    if (!id || !note || a._.length !== 3) die('ym devices release <lease-id> --note "how the leftover simulator was inspected and removed"');
+    const lease = resolveLease(id, note);
+    return console.log(a.flags.json ? JSON.stringify(lease, null, 2) : green(`✔ Recorded your inspection and freed ${lease.pool} lease ${lease.id}. No device was touched.`));
+  }
+  const pool = a._[2] as (typeof LEASE_POOLS)[number];
+  const command = a._.slice(3);
+  if (!LEASE_POOLS.includes(pool) || !command.length) die('ym devices lease <build|simulator|physical> [--wait-minutes N] -- <command> [args...]');
+  const { memoryHold, sampleMemory } = await import('./machine-pressure.ts');
+  const { runOwnedProcess } = await import('./proc.ts');
+  const stop = new AbortController();
+  const abort = () => stop.abort('interrupted');
+  process.once('SIGINT', abort); process.once('SIGTERM', abort);
+  try {
+    const waitMinutes = flag(a, 'wait-minutes') !== undefined ? Number(flag(a, 'wait-minutes')) : config.waitMinutes;
+    const outcome = await acquireLease({ pool, capacity: config.limits[pool], holder: `cli:${command[0]}`, ...await cliProject(cwd).catch(() => ({})),
+      ttlMs: config.leaseMinutes * 60_000, waitMs: waitMinutes * 60_000, signal: stop.signal, cleanup: hostCleanup(),
+      admit: async () => memoryHold(await sampleMemory(), config),
+      onWait: ({ reason }) => process.stderr.write(dim(`${reason}\n`)) });
+    if (!outcome.lease) die(`No ${pool} slot: ${outcome.reason}`);
+    try {
+      const r = await runOwnedProcess(command[0]!, command.slice(1), { cwd, env: { ...process.env, YARDMASTER_LEASE_ID: outcome.lease.id }, signal: AbortSignal.any([stop.signal, outcome.lease.lost]),
+        onStdout: chunk => process.stdout.write(chunk), onStderr: chunk => process.stderr.write(chunk) });
+      process.exitCode = r.end === 'exit' && r.code !== null ? r.code : 1;
+      if (!r.reaped) process.stderr.write(yellow('! The command left processes that could not be confirmed stopped.\n'));
+    } finally { outcome.lease.release(); }
   } finally { process.off('SIGINT', abort); process.off('SIGTERM', abort); }
 }
 
@@ -965,7 +1059,8 @@ async function cmdVerify(a: Args) {
   try {
     const receipts: string[] = [];
     const result = await verifyArtifact(cwd, config.verify, config.verifyTimeoutMinutes, stop.signal, undefined, {
-      services: config.services, onServiceResult: run => { receipts.push(run.receiptPath); },
+      services: config.services, context: await cliProject(cwd),
+      onServiceResult: async run => { receipts.push(run.receiptPath); await keepDeviceEvidence(run.result, run.receiptPath); },
     });
     console.log(JSON.stringify({ ...result, receipts }, null, 2));
     if (!result.ok) process.exitCode = 1;
@@ -1136,6 +1231,7 @@ async function main() {
     case 'hook': return cmdHook(a);
     case 'plugin': return cmdPlugin(a);
     case 'providers': return cmdProviders(a);
+    case 'devices': return cmdDevices(a);
     case 'verify': return cmdVerify(a);
     case 'doctor': return cmdDoctor(a);
     case 'presets': return cmdPresets();
