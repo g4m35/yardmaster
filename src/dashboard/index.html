@@ -672,6 +672,7 @@
   function loseAuth() {
     if (authFailed) return;
     authFailed = true;
+    updatePolling();
     localStorage.removeItem('ym-token');
     clearInterval(logTimer);
     if ($('drawer').open) $('drawer').close();
@@ -996,7 +997,7 @@
   let refreshAgain = false;
   let refreshTimer = null;
   function scheduleRefresh() {
-    if (authFailed || refreshTimer !== null) return;
+    if (authFailed || document.hidden || refreshTimer !== null) return;
     refreshTimer = setTimeout(() => { refreshTimer = null; refresh(); }, 250);
   }
   async function refresh() {
@@ -1065,6 +1066,8 @@
         if (res.status === 401) { loseAuth(); return; }
         if (!res.ok || !res.body) throw new Error('Stream unavailable');
         streamConnected = true;
+        updatePolling();
+        scheduleRefresh();
         renderConnectionNotice();
         conn.className = 'conn live'; conn.lastElementChild.textContent = 'Live';
         const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
@@ -1090,6 +1093,7 @@
       } catch {}
       if (authFailed) return;
       streamConnected = false;
+      updatePolling();
       conn.className = 'conn'; conn.lastElementChild.textContent = 'Reconnecting';
       renderConnectionNotice();
       await new Promise((r) => setTimeout(r, 2000));
@@ -1218,7 +1222,7 @@
     if (!quiet) presentDrawer();
     restoreFocus(savedFocus, drawer);
     const loadLog = async () => {
-      if (openTask !== id || logInFlight || authFailed) return;
+      if (document.hidden || openTask !== id || logInFlight || authFailed) return;
       logInFlight = true;
       const target = $('d-log');
       try {
@@ -1576,9 +1580,20 @@
     refresh(); rpc('events.since', { after: 0, limit: 60, projectId: scope || null }).then(events => { if (scope === projectId) pushEvents(events); }).catch(() => {});
   });
 
+  let pollTimer = null;
+  function updatePolling() {
+    if (pollTimer !== null) { clearInterval(pollTimer); pollTimer = null; }
+    if (!authFailed && !streamConnected && !document.hidden) pollTimer = setInterval(refresh, 10000);
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      if (refreshTimer !== null) { clearTimeout(refreshTimer); refreshTimer = null; }
+    } else scheduleRefresh();
+    updatePolling();
+  });
   refresh();
   stream();
-  setInterval(refresh, 10000);
+  updatePolling();
 })();
 </script>
 </body>

@@ -29,6 +29,7 @@ import { notify } from './notify.ts';
 import { shortId } from './text.ts';
 import type { YardEvent } from './types.ts';
 import { VERSION } from './version.ts';
+import { EventStream } from './event-stream.ts';
 import { submitSessionHandoff } from './handoff.ts';
 import { PairingStore, authorizeWorkerRpc, authorizeWorkerBaseBundle, authorizeWorkerUpload, type WorkerIdentity } from './pairing.ts';
 
@@ -69,6 +70,7 @@ export class Hub {
   private readonly captureAbort = new AbortController();
   private readonly background = new Set<Promise<unknown>>();
   private server: Server | null = null;
+  private readonly eventStream: EventStream;
   private timers: NodeJS.Timeout[] = [];
   private lastNotified = 0;
   private plugins: LoadedPlugins = { adapters: [], notifiers: [], providers: [], errors: [] };
@@ -83,6 +85,7 @@ export class Hub {
   constructor(opts: HubOptions = {}) {
     this.opts = opts;
     this.coord = new Coordinator(opts.db ?? openDb());
+    this.eventStream = new EventStream(this.coord);
     this.pairing = new PairingStore(this.coord.db, { ownerId: 'personal' });
     this.token = opts.token ?? hubToken();
     this.machineId = opts.machineId ?? machineId();
@@ -143,6 +146,7 @@ export class Hub {
     } catch (err) {
       // Undo everything a partial start set up, so nothing schedules on behalf of a hub that never ran.
       this.coord.onChange = null;
+      this.eventStream.close();
       if (this.kickTimer) clearTimeout(this.kickTimer);
       for (const t of this.timers) clearInterval(t);
       await new Promise<void>((r) => (this.server?.listening ? this.server.close(() => r()) : r()));
@@ -376,6 +380,7 @@ export class Hub {
 
   async stop(): Promise<void> {
     this.captureAbort.abort('The hub is shutting down.');
+    this.eventStream.close();
     for (const t of this.timers) clearInterval(t);
     this.coord.onChange = null;
     if (this.kickTimer) clearTimeout(this.kickTimer);
@@ -433,7 +438,9 @@ export class Hub {
       }
       if (url.pathname === '/api/stream' && req.method === 'GET') {
         if (worker) return json(res, 403, { ok: false, error: 'The dashboard event stream requires owner access.' });
-        return this.stream(req, res, Number(url.searchParams.get('after') ?? 0));
+        const after = Number(url.searchParams.get('after') ?? 0);
+        if (!Number.isSafeInteger(after) || after < 0) return json(res, 400, { ok: false, error: 'Invalid event cursor.' });
+        return this.eventStream.connect(res, after);
       }
 
       const base = url.pathname.match(/^\/api\/projects\/([\w-]+)\/base-bundle$/);
@@ -467,22 +474,6 @@ export class Hub {
       'referrer-policy': 'no-referrer',
     });
     res.end(html);
-  }
-
-  private stream(req: IncomingMessage, res: ServerResponse, after: number) {
-    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
-    let last = after || this.coord.lastEventId();
-    res.write(`event: hello\ndata: ${JSON.stringify({ last })}\n\n`);
-    const timer = setInterval(() => {
-      const events = this.coord.eventsSince(last, null, 200);
-      if (events.length) {
-        last = events[events.length - 1]!.id;
-        res.write(`data: ${JSON.stringify(events)}\n\n`);
-      } else {
-        res.write(': keepalive\n\n');
-      }
-    }, 700);
-    req.on('close', () => clearInterval(timer));
   }
 
   private async sendBaseBundle(res: ServerResponse, projectId: string, have: string | null, guard: () => void = () => {}, workerId?: string) {

@@ -94,10 +94,13 @@ test('warm start takes dependencies from a checkout with the same lockfiles, and
   assert.equal(r.stale, false);
   assert.match(readFileSync(join(group, 'w2', 'node_modules', '.package-lock.json'), 'utf8'), /new/);
   assert.equal(lockHash(join(group, 'w2')), lockHash(join(group, 'w1')));
-  // No candidate matches: falls back to the checkout and flags it.
+  // No candidate matches: leave installation to setup and explain why reuse was skipped.
   sh(box.repo, 'git', ['worktree', 'add', '-q', '-b', 'task2', join(group, 'w3'), 'newdeps']);
   const fallback = await warmStart(box.repo, join(group, 'w3'), config);
-  assert.equal(fallback.source, box.repo);
+  assert.equal(fallback.source, null);
+  assert.deepEqual(fallback.cloned, []);
+  assert.equal(existsSync(join(group, 'w3', 'node_modules')), false);
+  assert.match(fallback.skipped[0]!.why, /not reused/);
   assert.equal(fallback.stale, true);
 });
 

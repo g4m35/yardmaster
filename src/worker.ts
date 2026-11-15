@@ -7,7 +7,6 @@ import { memoryHold, sampleMemory, type MemorySampler } from './machine-pressure
 import { WorkerJournal, type JournalArtifact } from './worker-journal.ts';
 import { git, isClean, isLinkedWorktreeOf, listWorktrees, revParse } from './git.ts';
 import { dirBytes, freeGb, gb } from './disk.ts';
-import { clonesAreFree } from './warmstart.ts';
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { MachineInfo, Project, Task } from './types.ts';
@@ -100,9 +99,8 @@ export class WorkerLoop {
   async disk(): Promise<{ freeGb: number; worktreesGb: number }> {
     const cfg = this.local();
     const root = worktreeRootOf(cfg);
-    // Copy-on-write clones of dependencies cost no real disk, so they don't count against the quota.
-    const exclude = cfg.worktree.warmStart === 'clone' && existsSync(root) && (await clonesAreFree(root)) ? cfg.worktree.shareDirs : [];
-    return { freeGb: freeGb(root), worktreesGb: (await dirBytes(root, 60_000, exclude)) / 1e9 };
+    // Clone capability cannot prove which blocks an install has since rewritten; count dependencies conservatively.
+    return { freeGb: freeGb(root), worktreesGb: (await dirBytes(root, 60_000)) / 1e9 };
   }
 
   async info(): Promise<MachineInfo> {

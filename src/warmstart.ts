@@ -32,23 +32,30 @@ async function supportsCow(dir: string): Promise<boolean> {
   return ok;
 }
 
-/** Lockfiles that pin a dependency install. Only the ones at the repo root are compared (monorepos keep them there). */
+/** Lockfiles that pin a dependency install. */
 export const LOCKFILES = [
   'package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb', 'Cargo.lock', 'Gemfile.lock',
   'Podfile.lock', 'composer.lock', 'poetry.lock', 'uv.lock', 'go.sum', 'Pipfile.lock', 'mix.lock', 'pubspec.lock',
 ];
 
-/** One hash over every lockfile at the root of `dir`; "" when there are none. */
+/** Include package roots as well as lock contents; independent nested installs must match too. */
 export function lockHash(dir: string): string {
   const h = createHash('sha1');
-  let any = false;
-  for (const f of LOCKFILES) {
-    const p = join(dir, f);
-    if (!existsSync(p)) continue;
-    any = true;
-    h.update(f).update('\0').update(readFileSync(p)).update('\0');
-  }
-  return any ? h.digest('hex').slice(0, 16) : '';
+  const excluded = new Set(['.git', 'node_modules', 'vendor', '.bundle', 'target', '.gradle', 'Pods', '.venv']);
+  let found = false;
+  const walk = (root: string, rel: string) => {
+    for (const entry of readdirSync(root, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const path = join(root, entry.name);
+      const key = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory() && !excluded.has(entry.name)) walk(path, key);
+      else if (entry.isFile() && LOCKFILES.includes(entry.name)) {
+        found = true;
+        h.update(key).update('\0').update(readFileSync(path)).update('\0');
+      }
+    }
+  };
+  walk(dir, '');
+  return found ? h.digest('hex').slice(0, 16) : '';
 }
 
 export interface WarmStartResult {
@@ -58,7 +65,7 @@ export interface WarmStartResult {
   ms: number;
   /** Where the dependencies came from. */
   source: string | null;
-  /** True when no source had matching lockfiles, so the reused dependencies may be out of date. */
+  /** True when dependencies were rejected because no source had matching lockfiles. */
   stale: boolean;
 }
 
@@ -80,19 +87,16 @@ export function siblingWorktrees(worktree: string, limit = 8): string[] {
     .map((x) => x.p);
 }
 
-async function pickSource(worktree: string, sources: string[], shareDirs: string[]): Promise<{ source: string; stale: boolean } | null> {
+async function pickSource(worktree: string, sources: string[], shareDirs: string[]): Promise<{ source: string | null; stale: boolean }> {
   const want = lockHash(worktree);
-  const usable: string[] = [];
+  let stale = false;
   for (const s of sources) {
     if (!existsSync(s) || s === worktree) continue;
-    if (!shareDirs.some((d) => existsSync(join(s, d)))) {
-      // Monorepos keep node_modules in packages too; the deeper search below finds them.
-      if ((await findArtifacts(s, shareDirs, 3, { sizes: false })).length === 0) continue;
-    }
-    usable.push(s);
-    if (lockHash(s) === want) return { source: s, stale: false };
+    if ((await findArtifacts(s, shareDirs, 3, { sizes: false })).length === 0) continue;
+    if (want && lockHash(s) === want) return { source: s, stale: false };
+    stale = true;
   }
-  return usable[0] ? { source: usable[0], stale: want !== '' } : null;
+  return { source: null, stale };
 }
 
 export async function warmStart(repoRoot: string, worktree: string, config: Config, opts: { candidates?: string[] } = {}): Promise<WarmStartResult> {
@@ -101,9 +105,10 @@ export async function warmStart(repoRoot: string, worktree: string, config: Conf
   const cfg = config.worktree;
   if (cfg.warmStart === 'clone') {
     const picked = await pickSource(worktree, [repoRoot, ...(opts.candidates ?? [])], cfg.shareDirs);
-    if (picked) {
+    out.stale = picked.stale;
+    if (picked.stale) out.skipped.push({ rel: '*', why: 'No checkout has matching root and nested lockfiles; dependencies were not reused. Run the project setup to install them.' });
+    if (picked.source) {
       out.source = picked.source;
-      out.stale = picked.stale;
       const dirs = await findArtifacts(picked.source, cfg.shareDirs, 3, { sizes: false });
       const cow = dirs.length ? await supportsCow(dirname(worktree)) : false;
       for (const d of dirs) {

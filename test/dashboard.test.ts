@@ -84,6 +84,7 @@ class Document {
   root = new Element('html', this);
   body = new Element('body', this);
   activeElement: Element = this.body;
+  hidden = false;
   constructor() { this.root.append(this.body); }
   getElementById(id: string): Element | null {
     const find = (n: Element): Element | null => n.id === id ? n : n.children.map(find).find(Boolean) || null;
@@ -129,7 +130,8 @@ function harness(options: { token?: string | null; hash?: string; wide?: boolean
   }
   const storage = new Map<string, string>(); if (options.token !== null) storage.set('ym-token', options.token || 'disposable-test-token');
   const calls: { method: string; params: any }[] = [];
-  const timers = new Map<number, { fn: Function; ms: number }>(); let nextTimer = 1;
+  const timers = new Map<number, { fn: Function; ms: number }>();
+  const intervals = new Map<number, { fn: Function; ms: number }>(); let nextTimer = 1;
   let respond: (method: string, params: any) => any = method => method === 'board.status' ? board() : method === 'registry.list' ? snapshot() : method === 'task.get' ? detail() : '';
   const context: any = { document: doc, Node: Element, URLSearchParams, Date, console,
     ...(options.wide ? { matchMedia: () => ({ matches: true, addEventListener() {} }) } : {}),
@@ -137,7 +139,7 @@ function harness(options: { token?: string | null; hash?: string; wide?: boolean
     location: { hash: options.hash || '', pathname: '/' }, history: { replaceState() { context.location.hash = ''; } },
     localStorage: { getItem: (k: string) => storage.get(k) || null, setItem: (k: string, v: string) => storage.set(k, v), removeItem: (k: string) => storage.delete(k) },
     setTimeout(fn: Function, ms: number) { const id = nextTimer++; timers.set(id, { fn, ms }); return id; }, clearTimeout(id: number) { timers.delete(id); },
-    setInterval() { return nextTimer++; }, clearInterval() {},
+    setInterval(fn: Function, ms: number) { const id = nextTimer++; intervals.set(id, { fn, ms }); return id; }, clearInterval(id: number) { intervals.delete(id); },
     async fetch(url: string, init: any) {
       const method = url.replace('/api/rpc/', ''); const params = JSON.parse(init.body); calls.push({ method, params });
       const result = await respond(method, params);
@@ -145,10 +147,10 @@ function harness(options: { token?: string | null; hash?: string; wide?: boolean
       return { status: 200, ok: true, json: async () => ({ ok: true, result }) };
     },
   };
-  const exposed = script.replace(/  refresh\(\);\n  stream\(\);\n  setInterval\(refresh, 10000\);/, `  globalThis.dashboard = { refresh, scheduleRefresh, showTask, showEntry, closeDrawer, requestStop, renderRegistry, actionButtons, pushEvents, stream, rpc, state: () => ({ board, registry, openTask, openEntry }) };`);
+  const exposed = script.replace(/  refresh\(\);\n  stream\(\);\n  updatePolling\(\);/, `  globalThis.dashboard = { refresh, scheduleRefresh, showTask, showEntry, closeDrawer, requestStop, renderRegistry, actionButtons, pushEvents, stream, rpc, updatePolling, state: () => ({ board, registry, openTask, openEntry }) };`);
   runInNewContext(exposed, context);
   const $ = (id: string) => doc.getElementById(id)!;
-  return { doc, $, api: context.dashboard, calls, storage, context, timers,
+  return { doc, $, api: context.dashboard, calls, storage, context, timers, intervals,
     respond(fn: typeof respond) { respond = fn; },
     async flush(ms = 250) { const pending = [...timers].filter(([, t]) => t.ms === ms); for (const [id, t] of pending) { timers.delete(id); await t.fn(); } await new Promise(resolve => setImmediate(resolve)); },
   };
@@ -669,4 +671,46 @@ test('task details show device evidence as separate code, simulator and physical
   h.respond(method => method === 'task.get' ? { ...detail(), task: { ...detail().task, branch: 'yardmaster/t-one' } } : method === 'registry.list' ? snapshot() : board());
   await h.api.showTask('t-one');
   assert.equal(h.$('d-devices'), null);
+});
+
+test('fallback polling stops on SSE connect, resumes on disconnect, and pauses while hidden', async () => {
+  const h = harness();
+  h.respond(method => method === 'events.since' ? [] : method === 'registry.list' ? snapshot() : board());
+  const fetchRpc = h.context.fetch;
+  let finishRead!: (value: { done: boolean }) => void;
+  let attempts = 0;
+  h.context.TextDecoderStream = class {};
+  h.context.fetch = (url: string, init: unknown) => {
+    if (!url.startsWith('/api/stream')) return fetchRpc(url, init);
+    if (attempts++) return Promise.resolve({ status: 401 });
+    return Promise.resolve({ status: 200, ok: true, body: { pipeThrough: () => ({ getReader: () => ({
+      read: () => new Promise(resolve => { finishRead = resolve; }), cancel: async () => {},
+    }) }) } });
+  };
+  h.api.updatePolling();
+  assert.equal([...h.intervals.values()].filter(timer => timer.ms === 10000).length, 1);
+  const streaming = h.api.stream();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal([...h.intervals.values()].filter(timer => timer.ms === 10000).length, 0);
+  await h.flush();
+  finishRead({ done: true });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal([...h.intervals.values()].filter(timer => timer.ms === 10000).length, 1);
+  const calls = h.calls.length;
+  for (const timer of h.intervals.values()) if (timer.ms === 10000) await timer.fn();
+  assert.equal(h.calls.length, calls + 2, 'fallback reads one snapshot pair');
+  h.api.scheduleRefresh();
+  h.doc.hidden = true;
+  for (const listener of h.doc.listeners.get('visibilitychange') || []) listener();
+  assert.equal([...h.intervals.values()].filter(timer => timer.ms === 10000).length, 0);
+  const hiddenCalls = h.calls.length;
+  h.api.scheduleRefresh(); await h.flush();
+  assert.equal(h.calls.length, hiddenCalls, 'hidden events do not trigger snapshots');
+  h.doc.hidden = false;
+  for (const listener of h.doc.listeners.get('visibilitychange') || []) listener();
+  assert.equal([...h.intervals.values()].filter(timer => timer.ms === 10000).length, 1);
+  await h.flush();
+  assert.equal(h.calls.length, hiddenCalls + 2, 'returning to the page refreshes immediately');
+  await h.flush(2000); await streaming;
+  assert.equal(h.intervals.size, 0, 'authentication failure also clears fallback polling');
 });
