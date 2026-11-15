@@ -15,7 +15,9 @@ async function fixture(prompt = '@mock sleep 60000', overlap = 10) {
   const coord = new Coordinator(db), project = await coord.registerProject(box.repo);
   coord.addTasks(project.id, [{ title: 'Runner efficiency', prompt, agent: 'mock' }], 'test');
   const claim = coord.claimNext({ machineId: 'm', agents: ['mock'], repos: { [project.id]: box.repo }, runningByAgent: {} })!;
-  const api = localClient(buildMethods(coord, { machineId: 'm' }));
+  const methods = buildMethods(coord, { machineId: 'm' });
+  const client = localClient(methods);
+  const api = Object.fromEntries(Object.keys(methods).map(key => [key, client[key as keyof typeof client]])) as typeof client;
   const ctx = { api, task: claim.task, project, machineId: 'm', agent: 'mock', model: null, repoPath: box.repo,
     config: loadConfig(box.repo), startPoint: sh(box.repo, 'git', ['rev-parse', 'HEAD']), verifySlots: new Semaphore(1) };
   return { db, coord, ctx };
@@ -25,9 +27,11 @@ for (const mode of ['cancel', 'stop', 'stop-pause', 'redirect', 'generation', 'e
   test(`the shared control loop preserves ${mode} response and claim expiry during preparation`, async (t) => {
     const f = await fixture();
     let entered = false;
+    let stop: ((reason: StopReason, message: string) => void) | undefined;
     const now = Date.now();
     t.mock.timers.enable({ apis: ['setInterval', 'Date'], now });
     const running = runAttempt({ ...f.ctx,
+      onSpawn: handler => { stop = handler; },
       prepareBase: async signal => {
         entered = true;
         await new Promise<void>((_resolve, reject) => signal!.addEventListener('abort', () => {
@@ -55,7 +59,7 @@ for (const mode of ['cancel', 'stop', 'stop-pause', 'redirect', 'generation', 'e
       const outcome = await running;
       const reason = mode === 'cancel' ? 'canceled' : ['generation', 'expiry', 'outage'].includes(mode) ? 'lost' : mode === 'redirect' ? 'redirected' : mode === 'stop-pause' ? 'shutdown' : 'stopped';
       assert.equal(outcome.status, reason === 'canceled' ? 'canceled' : reason === 'lost' ? 'superseded' : ['shutdown', 'redirected'].includes(reason) ? 'queued' : 'needs_human');
-    } finally { t.mock.timers.reset(); f.db.close(); }
+    } finally { stop?.('shutdown', 'fixture cleanup'); await running; t.mock.timers.reset(); f.db.close(); }
   });
 }
 

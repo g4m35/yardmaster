@@ -533,7 +533,6 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   let lastActivity = '';
   let acknowledgedActivity: string | null = null;
   const budget = reservation.amountUsd;
-  const owner = claimOwner(task);
 
   let coding: OwnedProcess | null = null;
   const requestStop = (reason: StopReason, message: string) => {
