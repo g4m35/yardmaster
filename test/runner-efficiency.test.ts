@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { setImmediate } from 'node:timers/promises';
 import { join } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
 import { openDb } from '../src/db.ts';
 import { Coordinator } from '../src/coordinator.ts';
 import { buildMethods, localClient } from '../src/api.ts';
@@ -75,6 +76,8 @@ test('a running agent has one control poll per tick and sends usage/activity onl
   const running = runAttempt({ ...f.ctx, onSpawn: handler => { stop = handler; } });
   try {
     await until(() => f.coord.latestRun(f.ctx.task.id)?.phase, value => value === 'agent', 15_000, 'agent');
+    const log = f.coord.latestRun(f.ctx.task.id)!.log_path;
+    await until(() => existsSync(log) && readFileSync(log, 'utf8').includes('"costUsd":0.1'), value => value, 5000, 'first usage output');
     const before = polling;
     for (let i = 0; i < 16; i++) {
       t.mock.timers.tick(250);
