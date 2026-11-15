@@ -173,7 +173,11 @@ export class Hub {
     this.coord.onChange = () => this.kick();
     const addr = this.server.address();
     const actualPort = typeof addr === 'object' && addr ? addr.port : port;
-    this.url = `http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${actualPort}`;
+    // Publish the address actually bound, not the configured name: a hostname (mac.local, a MagicDNS name) is not
+    // provably this machine to local clients, while the IP it resolved to is one of this machine's interfaces.
+    const bound = typeof addr === 'object' && addr ? addr.address : host;
+    const shown = bound === '0.0.0.0' || bound === '::' ? '127.0.0.1' : bound.includes(':') ? `[${bound}]` : bound;
+    this.url = `http://${shown}:${actualPort}`;
     await this.heartbeat();
     const tick = this.opts.tickMs ?? 1500;
     let n = 0;

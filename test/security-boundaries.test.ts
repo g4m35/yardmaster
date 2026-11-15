@@ -12,7 +12,7 @@ import { networkInterfaces } from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { hookClient } from '../src/hookclient.ts';
 import { remoteClient } from '../src/rpc.ts';
-import { saveWorkerCredential } from '../src/fleet-client.ts';
+import { isThisMachineAddress, saveWorkerCredential } from '../src/fleet-client.ts';
 import { bundleRetryDelay, httpTransport } from '../src/transport.ts';
 import { paths, machineId } from '../src/paths.ts';
 import { buildMethods, dispatch, localClient } from '../src/api.ts';
@@ -123,11 +123,21 @@ test('the hub this machine published on its own overlay address stays owner-loca
   } finally { globalThis.fetch = original; restore(); }
 });
 
+test('a hub started with a host name publishes the address it bound, so local clients still trust it', async () => {
+  const box = sandbox();
+  const hub = new Hub({ db: openDb(join(box.home, 'named.db')), token: 'fixture', machineId: 'm-hub', host: 'localhost', port: 0, includeMock: false, quiet: true });
+  try {
+    const url = await hub.start();
+    assert.doesNotMatch(url, /localhost/, 'publishes the bound IP, not the configured name');
+    assert.equal(isThisMachineAddress(url), true);
+  } finally { await hub.stop(); hub.coord.db.close(); }
+});
+
 test('agents keep cloud-provider sign-in, and region, profile and user-only URLs are not treated as secrets', () => {
   const restore = envFixture({ CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_USE_VERTEX: undefined, AWS_PROFILE: 'dev', AWS_REGION: 'us-east-1',
     AWS_BEARER_TOKEN_BEDROCK: 'bedrock-fixture', AWS_SECRET_ACCESS_KEY: 'aws-fixture', AZURE_OPENAI_API_KEY: 'azure-fixture',
     GOOGLE_APPLICATION_CREDENTIALS: '/fixture/adc.json', REPO_URL: 'ssh://git@github.com/acme/app.git', DB_URL: 'postgres://app:hunter2@db/app',
-    MIRROR_URL: 'https://deploy@git.example/acme/app.git', AZURE_OPENAI_ENDPOINT: 'https://svc:hunter2@gateway.example', ORIGIN_URL: 'https://ghp_0123456789abcdefghijABCDEFGHIJ012345@github.com/acme/app.git' });
+    MIRROR_URL: 'https://deploy@git.example/acme/app.git', METRICS_URL: 'https://abcdef0123456789abcdef0123456789@intake.example', AZURE_OPENAI_ENDPOINT: 'https://svc:hunter2@gateway.example', ORIGIN_URL: 'https://ghp_0123456789abcdefghijABCDEFGHIJ012345@github.com/acme/app.git' });
   try {
     const claude = cleanEnv({}, { agent: 'claude' });
     // Bedrock is switched on, so AWS credentials are Claude Code's own sign-in.
@@ -143,7 +153,7 @@ test('agents keep cloud-provider sign-in, and region, profile and user-only URLs
     assert.equal(check.REPO_URL, 'ssh://git@github.com/acme/app.git');
     assert.equal(check.DB_URL, undefined); assert.equal(check.AWS_SECRET_ACCESS_KEY, undefined);
     // A token written as the URL user is a secret; a short account name is not.
-    assert.equal(check.ORIGIN_URL, undefined); assert.equal(check.MIRROR_URL, 'https://deploy@git.example/acme/app.git');
+    assert.equal(check.ORIGIN_URL, undefined); assert.equal(check.METRICS_URL, undefined); assert.equal(check.MIRROR_URL, 'https://deploy@git.example/acme/app.git');
     process.env.CLAUDE_CODE_USE_BEDROCK = ''; process.env.CLAUDE_CODE_USE_VERTEX = '1';
     const vertex = cleanEnv({}, { agent: 'claude' });
     assert.equal(vertex.GOOGLE_APPLICATION_CREDENTIALS, '/fixture/adc.json'); assert.equal(vertex.AWS_SECRET_ACCESS_KEY, undefined);
@@ -242,6 +252,10 @@ test('worker paths are literal: glob characters in real file names are matched a
     assert.deepEqual((await dispatch(f.methods, 'lock.check', { projectId: f.project.id, paths: ['lib/other.ts'] }) as unknown[]).length, 0);
     const literal = await dispatch(f.methods, 'hook.check', { projectId: f.project.id, paths: ['lib/*.ts'], cwd: f.box.repo, sessionId: 'session:c' }) as { detail: string } | null;
     assert.match(literal!.detail, /reserved lib\/\*\.ts/);
+    // Releasing the plain name finds the encoded reservation, and event text shows the real name.
+    const sessionB = (f.coord.db.prepare("SELECT holder FROM locks WHERE project_id = ? AND holder != 'session:a'").get(f.project.id) as { holder: string }).holder;
+    assert.equal(f.coord.releaseLocks(f.project.id, sessionB, ['lib/*.ts']), 1);
+    assert.doesNotMatch(f.coord.eventsSince(0, f.project.id, 50).map(e => e.message).join('\n'), /[\ue000-\ue0ff]/);
   } finally { f.coord.db.close(); }
 });
 

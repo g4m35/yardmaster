@@ -804,7 +804,7 @@ export class Coordinator {
       const graph = this.configFor(task.project_id).coupling === 'serialize' ? this.graphs.get(task.project_id) : undefined;
       for (const { task: other, scope } of this.activeScopes(task.project_id, task.id)) {
         const hits = scopesOverlap(mine, scope);
-        if (hits.length) return `Waiting: ${other.id} "${clip(other.title, 40)}" is changing overlapping files (${clip(hits[0], 50)})`;
+        if (hits.length) return `Waiting: ${other.id} "${clip(other.title, 40)}" is changing overlapping files (${clip(fromLiteralPattern(hits[0]!), 50)})`;
         const tied = graph ? coupling(graph, mine, scope)[0] : undefined;
         if (tied) return `Waiting: ${other.id} "${clip(other.title, 40)}" is changing ${tied.theirs}, which ${tied.mine} ${tied.direction === 'imports' ? 'imports' : 'is imported by'}`;
       }
@@ -1256,7 +1256,7 @@ export class Coordinator {
       for (const { task, scope } of this.activeScopes(projectId)) {
         if (task.id === holder || task.assignee === holder) continue;
         const hits = scopesOverlap(norm, scope);
-        if (hits.length) conflicts.push({ pattern: hits[0]!, holder: task.id, reason: `task "${clip(task.title, 50)}" (${task.status})` });
+        if (hits.length) conflicts.push({ pattern: fromLiteralPattern(hits[0]!), holder: task.id, reason: `task "${clip(task.title, 50)}" (${task.status})` });
       }
       if (conflicts.length) return { ok: false, conflicts };
       const until = Date.now() + ttlMinutes * 60_000;
@@ -1265,7 +1265,7 @@ export class Coordinator {
         this.db.prepare('INSERT INTO locks (id, project_id, pattern, holder, reason, lease_until, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
           .run(shortId('l'), projectId, p, holder, reason, until, Date.now());
       }
-      this.event(projectId, null, 'info', 'lock.claimed', `${holder} reserved ${norm.join(', ')}${reason ? ` for ${clip(reason, 60)}` : ''}`);
+      this.event(projectId, null, 'info', 'lock.claimed', `${holder} reserved ${norm.map(fromLiteralPattern).join(', ')}${reason ? ` for ${clip(reason, 60)}` : ''}`);
       return { ok: true, conflicts };
     });
   }
@@ -1274,7 +1274,8 @@ export class Coordinator {
     this.changed();
     if (patterns?.length) {
       let n = 0;
-      for (const p of patterns.map(normalizePattern)) n += Number(this.db.prepare('DELETE FROM locks WHERE project_id = ? AND holder = ? AND pattern = ?').run(projectId, holder, p).changes);
+      // A file reserved by an edit hook is stored as its encoded name; releasing the plain name must find it.
+      for (const p of [...new Set(patterns.flatMap(p => [normalizePattern(p), literalPattern(normalizePattern(p))]))]) n += Number(this.db.prepare('DELETE FROM locks WHERE project_id = ? AND holder = ? AND pattern = ?').run(projectId, holder, p).changes);
       return n;
     }
     return Number(this.db.prepare('DELETE FROM locks WHERE project_id = ? AND holder = ?').run(projectId, holder).changes);

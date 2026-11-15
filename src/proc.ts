@@ -55,6 +55,8 @@ function secretUrl(value: string): boolean {
     if (userinfo.includes(':')) return true;
     if (/^(?:ssh|git\+ssh|ssh\+git)$/i.test(scheme)) continue;
     if (!/^[a-z][a-z0-9_-]{0,31}$/.test(userinfo) || /^(?:gh[pousr]|github_pat|glpat|xox[a-z])[_-]/i.test(userinfo)) return true;
+    // Long or hex-looking user parts are keys (Datadog, Mailgun style), not account names.
+    if ((userinfo.length >= 20 && /\d/.test(userinfo)) || /^[0-9a-f]{16,}$/i.test(userinfo)) return true;
   }
   return false;
 }

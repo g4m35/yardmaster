@@ -22,7 +22,8 @@ export function hubCredential(input: string, explicit?: string, opts: PrivateTra
 
 function alive(pid: number | undefined): boolean {
   if (!pid) return false;
-  try { process.kill(pid, 0); return true; } catch (err) { return (err as NodeJS.ErrnoException).code === 'EPERM'; }
+  // The hub runs as this user; EPERM means the pid now belongs to someone else, who could hold the port.
+  try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
 export function hookClient(): Client | null {
