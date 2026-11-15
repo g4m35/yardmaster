@@ -5,7 +5,7 @@ import { planService, runService, type ServicePlan } from './providers.ts';
 import type { ServicesConfig } from './provider-contract.ts';
 import type { ServiceContext } from './service-receipts.ts';
 import type { ServiceIntent } from './service-holds.ts';
-import { evidenceOf } from './device-evidence.ts';
+import { evidenceState } from './device-evidence.ts';
 
 export type ServiceRun = Awaited<ReturnType<typeof runService>>;
 type VerificationLifecycle = {
@@ -90,7 +90,9 @@ export async function verifyArtifact(cwd: string, commands: string[], timeoutMin
       if (signal?.aborted || run.result.status !== 'passed') return { ...fail(command, `${run.result.summary}\nReceipt: ${run.receiptPath}`),
         serviceStatus: signal?.aborted || run.result.status === 'unknown' ? 'unknown' : 'failed' };
       // Device evidence must describe this commit and meet its own requirement; a simulator never stands in for hardware.
-      const evidence = evidenceOf(run.result);
+      const device = evidenceState(run.result);
+      if (device.kind === 'invalid') return { ...fail(command, `The provider attached malformed device evidence; it cannot establish a pass.\nReceipt: ${run.receiptPath}`), serviceStatus: 'unknown' };
+      const evidence = device.kind === 'valid' ? device.evidence : null;
       if (evidence && (evidence.commit !== sha || evidence.status.overall !== 'passed' || (evidence.requirement === 'physical' && evidence.status.physical !== 'passed'))) {
         return { ...fail(command, `Device evidence does not establish a pass for commit ${sha}: ${evidence.summary}\nReceipt: ${run.receiptPath}`), serviceStatus: 'unknown' };
       }

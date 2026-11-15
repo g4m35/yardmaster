@@ -75,11 +75,13 @@ export interface ReapResult { id: string; pool: LeasePool; holder: string; outco
 export async function reapLeases(cleanup: ResourceCleanup, now = Date.now()): Promise<ReapResult[]> {
   const me = await selfIdentity();
   const candidates = withDb(db => listLeases(db)).filter(l => l.host === machineId());
-  const crashed = new Set<string>();
-  for (const lease of candidates) if (!(await holderAlive(lease.pid, lease.procStarted))) crashed.add(lease.id);
+  // The dead holder as inspected. Another reaper may claim the row meanwhile; then it is no longer this holder's.
+  const crashed = new Map<string, string>();
+  const identity = (l: Lease) => `${l.state}:${l.pid}:${l.procStarted}`;
+  for (const lease of candidates) if (!(await holderAlive(lease.pid, lease.procStarted))) crashed.set(lease.id, identity(lease));
   const results: ReapResult[] = [];
-  // Recheck expiry inside the transaction: a live holder may have renewed since it was read.
-  const claimed = withDb(db => tx(db, () => listLeases(db).filter(l => l.host === machineId() && (crashed.has(l.id) || l.expiresAt < now)).flatMap(lease => {
+  // Recheck inside the transaction: a live holder may have renewed, or another reaper claimed it, since it was read.
+  const claimed = withDb(db => tx(db, () => listLeases(db).filter(l => l.host === machineId() && (crashed.get(l.id) === identity(l) || l.expiresAt < now)).flatMap(lease => {
     if (lease.state === 'waiting') {
       db.prepare("DELETE FROM resource_leases WHERE id = ? AND state = 'waiting'").run(lease.id);
       results.push({ id: lease.id, pool: lease.pool, holder: lease.holder, outcome: 'expired-waiter', detail: 'queued request stopped waiting' });

@@ -649,7 +649,7 @@ test('task details show device evidence as separate code, simulator and physical
     environment: { machineId: 'm-one', os: 'darwin 27.2', arch: 'arm64', xcode: 'Xcode 27.2' },
     device: { kind: 'simulator', name: 'ym-1', model: 'iPhone 17', modelIdentifier: 'iPhone18,3', runtime: 'iOS 26.5', runtimeIdentifier: 'rt', udid: 'U', createdByYardmaster: true },
     checks: [{ name: 'launch', runner: 'simctl', status: 'passed', durationMs: 1, detail: '', log: null }, { name: 'smoke', runner: 'maestro', status: 'passed', durationMs: 1, detail: '', log: null }],
-    files: [], lease: null, startedAt: '', completedAt: '', summary: 'Simulator passed; physical device untested. A simulator pass does not satisfy this physical-device requirement.' };
+    files: [], lease: { id: 'l-1', pool: 'simulator', queuedAt: 0, acquiredAt: 1, releasedAt: 2, waitedMs: 0, cleanup: 'released' }, startedAt: '', completedAt: '', summary: 'Simulator passed; physical device untested. A simulator pass does not satisfy this physical-device requirement.' };
   h.respond(method => method === 'task.get' ? { ...detail(), label: 'Needs you', devices: [{ evidence, receiptPath: '/home/.yardmaster/service-runs/r/result.json', recordedAt: now }],
     task: { ...detail().task, status: 'needs_human', branch: 'yardmaster/t-one', base_sha: 'b'.repeat(40), head_sha: 'c'.repeat(40) } } : method === 'registry.list' ? snapshot() : board());
   await h.api.refresh(); await h.api.showTask('t-one');
@@ -660,6 +660,11 @@ test('task details show device evidence as separate code, simulator and physical
   assert.match(view.textContent, /ArtifactSmoke\.app · sha256 a1b2c3d4e5f6 · reused from dddddddddddd/);
   assert.match(view.textContent, /Checkslaunch passed · smoke passed/);
   assert.match(view.textContent, /does not satisfy this physical-device requirement/);
+  // Creation is not removal: a failed cleanup never reads as removed.
+  h.respond(method => method === 'task.get' ? { ...detail(), devices: [{ evidence: { ...evidence, lease: { ...evidence.lease, cleanup: 'cleanup_failed' } }, receiptPath: null, recordedAt: now }],
+    task: { ...detail().task, branch: 'yardmaster/t-one' } } : method === 'registry.list' ? snapshot() : board());
+  await h.api.showTask('t-one');
+  assert.match(h.$('d-devices').textContent, /\(created by Yardmaster; removal not confirmed\)/);
   // No device evidence: nothing is shown, not an empty pass.
   h.respond(method => method === 'task.get' ? { ...detail(), task: { ...detail().task, branch: 'yardmaster/t-one' } } : method === 'registry.list' ? snapshot() : board());
   await h.api.showTask('t-one');

@@ -12,7 +12,7 @@ import { OwnedResourceSchema, type OwnedResource, type ResourceCleanup } from '.
  * the recorded unique name before touching a UDID. Existing simulators (another session's included) are read only.
  */
 export interface ToolContext { xcrun: string; cwd: string; env: NodeJS.ProcessEnv; signal?: AbortSignal; onSpawn?: OwnedRunOptions['onSpawn'] }
-export interface ExecResult { ok: boolean; clean: boolean; reaped: boolean; code: number | null; end: string; stdout: string; durationMs: number }
+export interface ExecResult { ok: boolean; clean: boolean; reaped: boolean; code: number | null; end: string; stdout: string; stderr: string; durationMs: number }
 
 export function resolveTool(name: string, cwd: string, env: NodeJS.ProcessEnv): string | null {
   const dirs = name.includes('/') ? [''] : (env.PATH ?? '').split(delimiter).filter(Boolean);
@@ -23,18 +23,25 @@ export function resolveTool(name: string, cwd: string, env: NodeJS.ProcessEnv): 
   return null;
 }
 
-/** Owned process with bounded stdout. `clean` means it exited by itself and every descendant was reaped. */
-export async function exec(ctx: Omit<ToolContext, 'xcrun'>, command: string, args: string[], opts: { timeoutMs: number; cancel?: boolean; onOutput?: (text: string) => void } ): Promise<ExecResult> {
+/**
+ * Owned process with bounded stdout and stderr, kept apart so machine-read output (JSON, fingerprints) stays clean.
+ * `clean` means it exited by itself and every descendant was reaped.
+ */
+export async function exec(ctx: Omit<ToolContext, 'xcrun'>, command: string, args: string[], opts: { timeoutMs: number; cancel?: boolean }): Promise<ExecResult> {
   const started = Date.now();
-  const decoder = new StringDecoder('utf8');
-  let stdout = '';
+  const out = new StringDecoder('utf8'), err = new StringDecoder('utf8');
+  let stdout = '', stderr = '';
   const r = await runOwnedProcess(command, args, { cwd: ctx.cwd, env: ctx.env, timeoutMs: opts.timeoutMs,
     signal: opts.cancel === false ? undefined : ctx.signal, onSpawn: ctx.onSpawn,
-    onStdout: chunk => { const text = decoder.write(chunk); opts.onOutput?.(text); stdout = (stdout + text).slice(-256 * 1024); } });
-  stdout += decoder.end();
+    onStdout: chunk => { stdout = (stdout + out.write(chunk)).slice(-256 * 1024); },
+    onStderr: chunk => { stderr = (stderr + err.write(chunk)).slice(-64 * 1024); } });
+  stdout += out.end(); stderr += err.end();
   const clean = r.end === 'exit' && r.reaped && r.code !== null;
-  return { ok: clean && r.code === 0, clean, reaped: r.reaped, code: r.code, end: r.end, stdout, durationMs: Date.now() - started };
+  return { ok: clean && r.code === 0, clean, reaped: r.reaped, code: r.code, end: r.end, stdout, stderr, durationMs: Date.now() - started };
 }
+
+/** Both streams, for saved logs and failure details. */
+export const transcript = (r: ExecResult) => r.stderr ? `${r.stdout}${r.stdout.endsWith('\n') || !r.stdout ? '' : '\n'}--- stderr ---\n${r.stderr}` : r.stdout;
 
 /**
  * simctl is not run as an owned process group: booting starts the simulator's own processes, which inherit our
@@ -44,11 +51,11 @@ function simctl(ctx: ToolContext, args: string[], timeoutMs = 60_000, cancel = t
   const started = Date.now();
   return new Promise(resolve => {
     execFile(ctx.xcrun, ['simctl', ...args], { cwd: ctx.cwd, env: ctx.env, timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024, encoding: 'utf8',
-      signal: cancel ? ctx.signal : undefined }, (error, stdout) => {
+      signal: cancel ? ctx.signal : undefined }, (error, stdout, stderr) => {
       const e = error as (Error & { code?: number | string; killed?: boolean }) | null;
       const end = !e ? 'exit' : e.name === 'AbortError' ? 'aborted' : e.killed ? 'timeout' : typeof e.code === 'number' ? 'exit' : 'spawn_failed';
       const code = !e ? 0 : typeof e.code === 'number' ? e.code : null;
-      resolve({ ok: !e, clean: end === 'exit', reaped: true, code, end, stdout: String(stdout ?? '').slice(-256 * 1024), durationMs: Date.now() - started });
+      resolve({ ok: !e, clean: end === 'exit', reaped: true, code, end, stdout: String(stdout ?? '').slice(-256 * 1024), stderr: String(stderr ?? '').slice(-64 * 1024), durationMs: Date.now() - started });
     });
   });
 }
@@ -67,14 +74,19 @@ export async function listSimulators(ctx: ToolContext): Promise<SimList> {
   return ListSchema.parse(JSON.parse(r.stdout));
 }
 
-const versionKey = (v: string) => v.split('.').map(n => Number(n) || 0).reduce((acc, n) => acc * 1000 + n, 0);
+/** Numeric, part by part; missing parts count as zero (18.6 is newer than 18.5.1). */
+export function compareVersions(a: string, b: string): number {
+  const x = a.split('.').map(n => Number(n) || 0), y = b.split('.').map(n => Number(n) || 0);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] ?? 0) !== (y[i] ?? 0)) return (x[i] ?? 0) - (y[i] ?? 0);
+  return 0;
+}
 export interface Target { runtime: { identifier: string; name: string; version: string }; deviceType: { identifier: string; name: string; modelIdentifier: string | null } }
 
 /** Explicit choice, or the newest available iOS runtime and its first iPhone. Never reuses an existing device. */
 export function chooseTarget(list: SimList, want: { runtime?: string; deviceType?: string }): Target | { error: string } {
   const ios = list.runtimes.filter(r => r.isAvailable && (r.platform ? r.platform === 'iOS' : r.name.startsWith('iOS')));
   const runtime = want.runtime ? ios.find(r => [r.identifier, r.name, r.version].includes(want.runtime!))
-    : [...ios].sort((a, b) => versionKey(b.version) - versionKey(a.version))[0];
+    : [...ios].sort((a, b) => compareVersions(b.version, a.version))[0];
   if (!runtime) return { error: want.runtime ? `no available iOS runtime matches "${want.runtime}"` : 'no iOS simulator runtime is installed (Xcode > Settings > Components)' };
   const supported = runtime.supportedDeviceTypes.length ? runtime.supportedDeviceTypes : list.devicetypes;
   const type = want.deviceType ? supported.find(d => d.identifier === want.deviceType || d.name === want.deviceType)
@@ -113,6 +125,7 @@ export class OwnedSimulator {
     return { ...r, pid: Number.isSafeInteger(pid) ? pid : null };
   }
   screenshot(file: string): Promise<ExecResult> { return simctl(this.ctx, ['io', this.udid, 'screenshot', file], 60_000); }
+  terminate(bundleId: string): Promise<ExecResult> { return simctl(this.ctx, ['terminate', this.udid, bundleId], 60_000, false); }
 }
 
 /**
@@ -131,7 +144,7 @@ export async function cleanupOwnedSimulators(ctx: ToolContext, owned: OwnedResou
     if (found.name !== resource.name || !resource.name.startsWith('ym-')) { problems.push(`${found.udid} is not named ${resource.name}; left untouched`); continue; }
     if (found.state !== 'Shutdown') await simctl(quiet, ['shutdown', found.udid], 120_000, false);
     const deleted = await simctl(quiet, ['delete', found.udid], 120_000, false);
-    if (!deleted.ok) problems.push(`could not delete ${found.udid}`);
+    if (!deleted.ok) problems.push(`could not delete ${found.udid}: ${deleted.stderr.trim().slice(0, 200)}`);
   }
   try {
     const after = Object.values((await listSimulators(quiet)).devices).flat();

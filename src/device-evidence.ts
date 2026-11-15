@@ -102,12 +102,16 @@ export function deviceEvidence(db: Db, filter: { taskId?: string | null; project
   });
 }
 
-/** Evidence a provider attached to its result (`result.data.evidence`), if it is well-formed. */
-export function evidenceOf(result: object): DeviceEvidence | null {
+/** Whether a provider result carries device evidence (`result.data.evidence`), and whether it is well-formed. */
+export function evidenceState(result: object): { kind: 'absent' } | { kind: 'invalid' } | { kind: 'valid'; evidence: DeviceEvidence } {
   const data = (result as { data?: unknown }).data;
-  if (!data || typeof data !== 'object' || !('evidence' in data)) return null;
+  if (!data || typeof data !== 'object' || !('evidence' in data)) return { kind: 'absent' };
   const parsed = DeviceEvidenceSchema.safeParse((data as { evidence: unknown }).evidence);
-  return parsed.success ? parsed.data : null;
+  return parsed.success ? { kind: 'valid', evidence: parsed.data } : { kind: 'invalid' };
+}
+export function evidenceOf(result: object): DeviceEvidence | null {
+  const state = evidenceState(result);
+  return state.kind === 'valid' ? state.evidence : null;
 }
 
 /** One line for text surfaces (CLI, MCP): the three statuses, never collapsed into one "passed". */

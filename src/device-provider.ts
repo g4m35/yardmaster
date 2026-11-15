@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { constants, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { constants, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { arch, platform, release } from 'node:os';
 import { basename, join, relative, resolve } from 'node:path';
 import * as z from 'zod/v4';
@@ -12,7 +12,7 @@ import { machineId, yardHome } from './paths.ts';
 import type { OwnedRunOptions } from './proc.ts';
 import type { ProviderResult } from './provider-contract.ts';
 import type { ServiceContext } from './service-receipts.ts';
-import { chooseTarget, cleanupOwnedSimulators, exec, listSimulators, OwnedSimulator, resolveTool, type ExecResult, type ToolContext } from './simctl.ts';
+import { chooseTarget, cleanupOwnedSimulators, exec, listSimulators, OwnedSimulator, resolveTool, transcript, type ExecResult, type ToolContext } from './simctl.ts';
 
 const Command = z.array(z.string().min(1)).min(1);
 /** Names of the built-in phases; a user test may not reuse them and hide among them. */
@@ -105,6 +105,12 @@ export async function runAppleSimulator(options: AppleSimulatorOptions, ctx: Dev
   // Declared credentials never reach saved logs or evidence text; tests and builds can echo their environment.
   const secrets = options.requiredEnv.map(name => ctx.env[name]).filter((v): v is string => !!v).sort((a, b) => b.length - a.length);
   const redact = (text: string) => secrets.reduce((out, secret) => out.split(secret).join('[redacted]'), text);
+  /** Reports and app logs written by tests can echo credentials too; rewrite text files that contain one. */
+  const scrub = (file: string) => {
+    if (!secrets.length || statSync(file).size > 8 * 1024 * 1024) return;
+    const text = readFileSync(file, 'utf8');
+    if (secrets.some(secret => text.includes(secret))) writeFileSync(file, redact(text), { mode: 0o600 });
+  };
   const saveLog = (name: string, text: string) => {
     const file = join(ctx.evidenceDir, name);
     writeFileSync(file, redact(text), { mode: 0o600 });
@@ -157,10 +163,11 @@ export async function runAppleSimulator(options: AppleSimulatorOptions, ctx: Dev
       else {
         try {
           const exe = resolveTool(options.build.command[0]!, ctx.cwd, ctx.env);
-          const r = exe ? track(await exec(tool, exe, options.build.command.slice(1), { timeoutMs: options.build.timeoutMinutes * 60_000 })) : null;
-          const log = saveLog('build.log', r?.stdout ?? `${options.build.command[0]} is not installed`);
+          // A build whose slot was reclaimed must stop: another holder may already be building.
+          const r = exe ? track(await exec({ ...tool, signal: AbortSignal.any([slot.lease.lost, ...(ctx.signal ? [ctx.signal] : [])]) }, exe, options.build.command.slice(1), { timeoutMs: options.build.timeoutMinutes * 60_000 })) : null;
+          const log = saveLog('build.log', r ? transcript(r) : `${options.build.command[0]} is not installed`);
           const status = !r ? 'unavailable' : r.clean ? (r.code === 0 ? 'passed' : 'failed') : 'unknown';
-          checks.push({ name: 'build', runner: 'command', status, durationMs: r?.durationMs ?? null, detail: status === 'passed' ? 'Build command passed.' : `Build ${status}${r?.code ? ` (exit ${r.code})` : ''}: ${tail(r?.stdout ?? '', 600)}`, log });
+          checks.push({ name: 'build', runner: 'command', status, durationMs: r?.durationMs ?? null, detail: status === 'passed' ? 'Build command passed.' : `Build ${status}${r?.code ? ` (exit ${r.code})` : ''}: ${tail(r ? transcript(r) : '', 600)}`, log });
           if (status === 'failed') failedBuild = true;
           else if (status !== 'passed') problem = 'The build did not complete cleanly.';
           // Copy while still holding the slot: the next build may overwrite this output before it is installed.
@@ -188,7 +195,7 @@ export async function runAppleSimulator(options: AppleSimulatorOptions, ctx: Dev
     } else {
       const held = slot.lease;
       leaseRecord = { id: held.id, pool: 'simulator', queuedAt: held.queuedAt, acquiredAt: held.acquiredAt, releasedAt: null, waitedMs: slot.waitedMs, cleanup: 'released' };
-      const outcome = await onSimulator(options, ctx, { ...tool, signal: AbortSignal.any([held.lost, ...(ctx.signal ? [ctx.signal] : [])]) }, held, artifact, installPath, sha, checks, files, saveLog, track);
+      const outcome = await onSimulator(options, ctx, { ...tool, signal: AbortSignal.any([held.lost, ...(ctx.signal ? [ctx.signal] : [])]) }, held, artifact, installPath, sha, checks, files, saveLog, track, scrub);
       device = outcome.device;
       problem = outcome.problem;
       const cleanup = await finishLease(held, tool, outcome.owned);
@@ -208,7 +215,8 @@ export async function runAppleSimulator(options: AppleSimulatorOptions, ctx: Dev
   const physical = 'untested' as const;
   const overall: DeviceEvidence['status']['overall'] = failedBuild || simulator === 'failed' ? 'failed'
     : canceled || !reaped || problem || requirement === 'physical' || simulator !== 'passed' ? 'unknown' : 'passed';
-  const summary = canceled ? 'Device verification was canceled. Owned simulators were cleaned up; inspect the receipt before retrying.'
+  const cleaned = !leaseRecord || leaseRecord.cleanup !== 'cleanup_failed';
+  const summary = canceled ? `Device verification was canceled. ${cleaned ? 'Its simulator was removed and its slot released' : 'Removing its simulator was not confirmed; its slot stays held'}. Inspect the receipt before retrying.`
     : failedBuild ? 'The app build failed; no device test ran.'
     : !reaped ? 'A device-test process survived cleanup. Inspect owned processes before retrying.'
     : problem ? redact(problem)
@@ -227,13 +235,14 @@ export async function runAppleSimulator(options: AppleSimulatorOptions, ctx: Dev
 }
 
 async function onSimulator(options: AppleSimulatorOptions, ctx: DeviceRunContext, tool: ToolContext, lease: LeaseHandle, artifact: NonNullable<DeviceEvidence['artifact']>,
-  installPath: string, sha: string | null, checks: Check[], files: Files, saveLog: (name: string, text: string) => string, track: (r: ExecResult) => ExecResult) {
+  installPath: string, sha: string | null, checks: Check[], files: Files, saveLog: (name: string, text: string) => string, track: (r: ExecResult) => ExecResult,
+  scrub: (file: string) => void) {
   const owned: OwnedResource[] = [];
   const result = { device: null as DeviceEvidence['device'], problem: null as string | null, owned };
   const step = (name: string, runner: string, r: ExecResult, detail: string) => {
     track(r);
     const status = r.ok ? 'passed' : r.clean && name !== 'boot' && name !== 'install' ? 'failed' : 'unknown';
-    checks.push({ name, runner, status, durationMs: r.durationMs, detail: r.ok ? detail : `${name} ${r.end}${r.code !== null ? ` (exit ${r.code})` : ''}: ${tail(r.stdout, 600)}`, log: null });
+    checks.push({ name, runner, status, durationMs: r.durationMs, detail: r.ok ? detail : `${name} ${r.end}${r.code !== null ? ` (exit ${r.code})` : ''}: ${tail(transcript(r), 600)}`, log: null });
     return r.ok;
   };
   const screenshot = async (sim: OwnedSimulator, name: string) => {
@@ -261,7 +270,6 @@ async function onSimulator(options: AppleSimulatorOptions, ctx: DeviceRunContext
       // Give the app a moment to draw its first frame before the screenshot.
       await new Promise(resolve => setTimeout(resolve, 1500));
       await screenshot(sim, 'launch');
-      for (const file of [out, err]) if (existsSync(file)) files.push({ path: file, sha256: fileSha256(file), kind: 'log' });
     }
     const values = { udid: sim.udid, app: artifact.path, bundleId: options.bundleId, sha: sha ?? '' };
     for (const test of options.tests) {
@@ -279,12 +287,23 @@ async function onSimulator(options: AppleSimulatorOptions, ctx: DeviceRunContext
       const env = { ...tool.env, YARDMASTER_DEVICE_UDID: sim.udid, YARDMASTER_DEVICE_KIND: 'simulator', YARDMASTER_APP_PATH: artifact.path,
         YARDMASTER_BUNDLE_ID: options.bundleId, YARDMASTER_ARTIFACT_DIR: dir, YARDMASTER_VERIFY_SHA: sha ?? '' };
       const r = track(await exec({ ...tool, env }, exe, argv.slice(1), { timeoutMs: test.timeoutMinutes * 60_000 }));
-      const log = saveLog(`test-${test.name}.log`, r.stdout);
+      const log = saveLog(`test-${test.name}.log`, transcript(r));
       const status = r.clean ? (r.code === 0 ? 'passed' : 'failed') : 'unknown';
-      checks.push({ name: test.name, runner: test.runner, status, durationMs: r.durationMs, detail: status === 'passed' ? 'Passed.' : `${status}${r.code !== null ? ` (exit ${r.code})` : ` (${r.end})`}: ${tail(r.stdout, 600)}`, log });
+      checks.push({ name: test.name, runner: test.runner, status, durationMs: r.durationMs, detail: status === 'passed' ? 'Passed.' : `${status}${r.code !== null ? ` (exit ${r.code})` : ` (${r.end})`}: ${tail(transcript(r), 600)}`, log });
     }
-    for (const file of walkFiles(join(ctx.evidenceDir, 'tests'))) files.push({ path: file, sha256: fileSha256(file), kind: file.endsWith('.png') ? 'screenshot' : 'report' });
     if (!tool.signal?.aborted) await screenshot(sim, 'final');
+    // Stop the app before hashing its logs, so the recorded hashes match the files kept.
+    if (options.launch) {
+      await sim.terminate(options.bundleId);
+      for (const name of ['app-stdout.log', 'app-stderr.log']) {
+        const file = join(ctx.evidenceDir, name);
+        if (existsSync(file)) { scrub(file); files.push({ path: file, sha256: fileSha256(file), kind: 'log' }); }
+      }
+    }
+    for (const file of walkFiles(join(ctx.evidenceDir, 'tests'))) {
+      if (!file.endsWith('.png')) scrub(file);
+      files.push({ path: file, sha256: fileSha256(file), kind: file.endsWith('.png') ? 'screenshot' : 'report' });
+    }
   } catch (error) {
     result.problem = `Simulator setup failed: ${(error as Error).message}.`;
   }

@@ -54,7 +54,8 @@ try {
       const stdout = rest.find(a => a.startsWith('--stdout='))?.slice(9);
       if (!d || d.state !== 'Booted' || !d.installed.length) code = 4;
       else { if (stdout) writeFileSync(stdout, 'app ready\n'); out(`${bundle}: 4242\n`); }
-    } else if (cmd === 'io') { if (!device(rest[0])) code = 5; else writeFileSync(rest[2], Buffer.from('89504e470d0a1a0a', 'hex')); }
+    } else if (cmd === 'terminate') { if (!device(rest[0])) code = 164; }
+    else if (cmd === 'io') { if (!device(rest[0])) code = 5; else writeFileSync(rest[2], Buffer.from('89504e470d0a1a0a', 'hex')); }
     else if (cmd === 'shutdown') {
       const d = device(rest[0]);
       if (!d) code = 164;

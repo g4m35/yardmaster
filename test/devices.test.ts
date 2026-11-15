@@ -10,7 +10,7 @@ import { openDb } from '../src/db.ts';
 import { AppleSimulatorOptionsSchema, runAppleSimulator, type DeviceRunContext } from '../src/device-provider.ts';
 import { artifactSha256, deviceEvidence, type DeviceEvidence } from '../src/device-evidence.ts';
 import { acquireLease, listLeases, reapLeases } from '../src/leases.ts';
-import { cleanupOwnedSimulators, hostCleanup } from '../src/simctl.ts';
+import { chooseTarget, cleanupOwnedSimulators, compareVersions, hostCleanup } from '../src/simctl.ts';
 import { memoryHold, type MemorySample } from '../src/machine-pressure.ts';
 import { builtinProviders } from '../src/provider-builtins.ts';
 import { planService } from '../src/providers.ts';
@@ -432,4 +432,49 @@ test('a project cannot raise the machine-wide simulator limit set in the global 
     assert.match(run.result.summary, /No simulator slot: waiting in queue position 1/);
     assert.equal(created(m).length, 0);
   } finally { other.lease.release(); }
+});
+
+test('malformed device evidence cannot pass acceptance', async () => {
+  const s = appRepo();
+  const services = ServicesConfigSchema.parse({ local: { 'device.test': { service: 'device', command: [process.execPath, '-e',
+    `console.log(JSON.stringify({status:'passed',summary:'ok',data:{evidence:{kind:'yardmaster.device-evidence',commit:${JSON.stringify(s.sha)}}}}))`], protocol: 'json', locality: 'local', cost: 'free' } },
+    verify: [{ capability: 'device.test' }] });
+  const gate = await verifyArtifact(s.repo, [], 1, undefined, undefined, { services });
+  assert.equal(gate.ok, false); assert.equal(gate.serviceStatus, 'unknown'); assert.match(gate.output, /malformed device evidence/);
+});
+
+test('two reapers racing over one crashed holder clean its simulator once', async () => {
+  appRepo();
+  const dead = spawn(process.execPath, ['-e', '']); await new Promise(resolve => dead.once('exit', resolve));
+  const db = openDb();
+  try {
+    db.prepare(`INSERT INTO resource_leases (id, pool, state, holder, host, pid, proc_started, queued_at, acquired_at, expires_at, owned)
+      VALUES ('l-crashed', 'simulator', 'held', 'gone', ?, ?, NULL, ?, ?, ?, ?)`).run((await import('../src/paths.ts')).machineId(), dead.pid!, Date.now(), Date.now(), Date.now() + 60_000,
+      JSON.stringify([{ kind: 'simulator', name: 'ym-crashed-0001', udid: null }]));
+  } finally { db.close(); }
+  let cleanups = 0;
+  const cleanup = async () => { cleanups++; await new Promise(resolve => setTimeout(resolve, 100)); return { ok: true, detail: 'removed' }; };
+  const results = (await Promise.all([reapLeases(cleanup), reapLeases(cleanup)])).flat();
+  assert.equal(cleanups, 1);
+  assert.deepEqual(results.map(r => r.outcome), ['released']);
+  assert.equal(leasesNow().length, 0);
+});
+
+test('the default runtime is the newest by version parts, not by string length', () => {
+  const runtime = (version: string) => ({ identifier: `rt-${version}`, name: `iOS ${version}`, version, isAvailable: true, platform: 'iOS', supportedDeviceTypes: [{ identifier: 'phone', name: 'iPhone 17', productFamily: 'iPhone' }] });
+  const target = chooseTarget({ devicetypes: [], runtimes: [runtime('18.5.1'), runtime('18.6'), runtime('9.3')], devices: {} }, {});
+  assert(!('error' in target)); assert.equal(target.runtime.version, '18.6');
+  assert.equal(compareVersions('18.6', '18.5.1') > 0, true); assert.equal(compareVersions('26.0', '26'), 0);
+});
+
+test('credentials echoed into test reports and app logs are scrubbed before they are hashed', async () => {
+  const s = appRepo(), m = fakeMachine(), secret = 'report-credential-value-1234';
+  const run = await runAppleSimulator(options({ requiredEnv: ['LAB_TOKEN'], tests: [{ name: 'report', runner: 'command',
+    command: [process.execPath, '-e', `require('node:fs').writeFileSync(process.env.YARDMASTER_ARTIFACT_DIR+'/junit.xml','<case token="'+process.env.LAB_TOKEN+'"/>')`] }] }),
+    context(s, m, { env: { PATH: m.PATH, HOME: s.home, LAB_TOKEN: secret } }));
+  assert.equal(run.result.status, 'passed', run.result.summary);
+  const report = run.result.data.evidence.files.find(f => f.path.endsWith('junit.xml'))!;
+  assert.equal(readFileSync(report.path, 'utf8'), '<case token="[redacted]"/>');
+  assert.equal(artifactSha256(report.path), report.sha256, 'the recorded hash is of the scrubbed file');
+  for (const f of run.result.data.evidence.files.filter(f => f.kind === 'log')) assert.equal(artifactSha256(f.path), f.sha256, `${f.path} hash matches the kept file`);
 });
