@@ -5,6 +5,7 @@ import { planService, runService, type ServicePlan } from './providers.ts';
 import type { ServicesConfig } from './provider-contract.ts';
 import type { ServiceContext } from './service-receipts.ts';
 import type { ServiceIntent } from './service-holds.ts';
+import { evidenceOf } from './device-evidence.ts';
 
 export type ServiceRun = Awaited<ReturnType<typeof runService>>;
 type VerificationLifecycle = {
@@ -74,7 +75,7 @@ export async function verifyArtifact(cwd: string, commands: string[], timeoutMin
       let run: ServiceRun;
       try {
         run = await runService(check.capability, check.input, services, plugins.providers, {
-          cwd, signal, onSpawn, context: { ...lifecycle.context, sha }, beforeDispatch: lifecycle.beforeService,
+          cwd, signal, onSpawn, context: { ...lifecycle.context, sha, ...(commands.length ? { codeChecks: 'passed' as const } : {}) }, beforeDispatch: lifecycle.beforeService,
         });
       } catch {
         // An exception may happen after dispatch or while saving evidence. Do not claim a clean process exit.
@@ -88,6 +89,11 @@ export async function verifyArtifact(cwd: string, commands: string[], timeoutMin
       if ((await revParse(cwd, 'HEAD')) !== sha || !(await isClean(cwd))) return { ...fail(command, `Provider verification changed the committed artifact. Preserve the changes and rerun verification. Receipt: ${run.receiptPath}`), serviceStatus: 'unknown' };
       if (signal?.aborted || run.result.status !== 'passed') return { ...fail(command, `${run.result.summary}\nReceipt: ${run.receiptPath}`),
         serviceStatus: signal?.aborted || run.result.status === 'unknown' ? 'unknown' : 'failed' };
+      // Device evidence must describe this commit and meet its own requirement; a simulator never stands in for hardware.
+      const evidence = evidenceOf(run.result);
+      if (evidence && (evidence.commit !== sha || evidence.status.overall !== 'passed' || (evidence.requirement === 'physical' && evidence.status.physical !== 'passed'))) {
+        return { ...fail(command, `Device evidence does not establish a pass for commit ${sha}: ${evidence.summary}\nReceipt: ${run.receiptPath}`), serviceStatus: 'unknown' };
+      }
     }
   }
   return { ok: true, command: [...commands, ...(lifecycle?.services?.verify ?? []).map(check => `provider:${check.capability}`)].join(' && '), output: '', sha, reaped: true };

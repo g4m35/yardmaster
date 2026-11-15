@@ -2,7 +2,11 @@ import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, writeFileSync } 
 import { join } from 'node:path';
 import { yardHome } from './paths.ts';
 
-export interface ServiceContext { sha?: string | null; projectId?: string; taskId?: string; runId?: string }
+export interface ServiceContext {
+  sha?: string | null; projectId?: string; taskId?: string; runId?: string;
+  /** Set by acceptance when the project's shell checks already passed on this commit. */
+  codeChecks?: 'passed';
+}
 
 /** Write before dispatch and replace atomically after completion. Request inputs/options/env are not added to metadata. */
 export function serviceReceipt(requestId: string, metadata: Record<string, unknown>) {
