@@ -522,7 +522,7 @@ export class Coordinator {
           (!measured || (usage.tokensIn === Number(run.tokens_in) && usage.tokensOut === Number(run.tokens_out))) &&
           usage.provenance === run.usage_provenance && cacheRead === run.cache_read_tokens && cacheWrite === run.cache_write_tokens) {
         // Advance the fence even for a no-op: an older, different snapshot must not overwrite this acknowledgment.
-        this.db.prepare('UPDATE runs SET usage_seq = ? WHERE id = ?').run(sequence, runId);
+        this.db.prepare('UPDATE runs SET usage_seq = ?, cost_estimated = ? WHERE id = ?').run(sequence, usage.provenance === 'actual' ? 0 : 1, runId);
         return;
       }
       const planning = run.role === 'plan';

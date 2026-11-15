@@ -93,6 +93,7 @@ test('unmeasured initial telemetry needs only a sequence fence; measured zero st
     f.coord.recordRunUsage('r', 't', owner, 2, emptyUsage());
     assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM usage_ledger').get()!.n, 0);
     assert.equal(f.coord.getRun('r')!.usage_seq, 2);
+    assert.equal(f.coord.getRun('r')!.cost_estimated, true, 'unknown spend is never labeled actual');
     assert.equal(kicks, 0);
     f.coord.recordRunUsage('r', 't', owner, 3, { ...emptyUsage(), provenance: 'actual' });
     assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM usage_ledger').get()!.n, 1);
