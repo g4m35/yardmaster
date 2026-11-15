@@ -149,6 +149,10 @@ For non-loopback HTTP over an already encrypted overlay, append `--private-netwo
 
 Each worker keeps its own provider logins and local configuration. `ym token` deliberately displays the full owner secret for owner administration; do not share it to onboard workers. Explicit `--token` / `YARDMASTER_TOKEN` retains the privileged legacy owner path. The owner dashboard controls connected work; native clients without a bridge/hook are not automatically discovered. See [private fleet setup, scope and recovery](docs/FLEET.md).
 
+## iPhone apps and devices
+
+Yardmaster can check an iPhone app on a simulator as part of accepting a task, with no cloud account: it builds with your existing command, takes a machine-wide simulator slot so parallel agents and projects never fight over simulators, installs and launches the app, runs your smoke test (Maestro, `xcodebuild test` or any command), records evidence tied to the commit and the app's checksum, and deletes only the simulator it created. A simulator pass never counts as a physical-device pass. Setup for Swift, Expo/React Native and Flutter: [docs/DEVICES.md](docs/DEVICES.md).
+
 ## Supervision
 
 Three layers, none of which spend tokens:
@@ -267,10 +271,11 @@ Known gaps:
 - The Cursor and Gemini adapters follow their documented stream formats but haven't been run against live sessions yet.
 - Yardmaster is not published to npm yet. Use the standalone binary or install from GitHub.
 - CI runs on macOS and Linux only. Windows is not tested.
+- Device checks run on iOS simulators. Physical iPhone testing is not implemented yet; a physical-device requirement stays "untested" until it is. Only the Swift sample is exercised in CI; the Expo/React Native and Flutter recipes in docs/DEVICES.md are documented but not run.
 
 ## Help
 
-Questions, bugs and ideas: open an issue at [github.com/g4m35/yardmaster/issues](https://github.com/g4m35/yardmaster/issues). Include the output of `ym --version` and `ym doctor`.
+Questions, bugs and ideas: open an issue at [github.com/g4m35/yardmaster/issues](https://github.com/g4m35/yardmaster/issues). Include the output of `ym --version` and `ym doctor`. Please report security problems privately, as described in [SECURITY.md](SECURITY.md). To contribute, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
