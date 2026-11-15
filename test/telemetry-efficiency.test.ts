@@ -82,3 +82,21 @@ test('the reporter deduplicates acknowledged values, retries failures and sends 
   assert.deepEqual(attempts, [1, 2, 3, 4, 5]);
   assert.deepEqual(sent, ['unknown:0:null', 'estimated:0:null', 'actual:0:0', 'actual:0.5:0']);
 });
+
+
+test('unmeasured initial telemetry needs only a sequence fence; measured zero still records provenance', () => {
+  const f = fixture();
+  try {
+    let kicks = 0; f.coord.onChange = () => { kicks++; };
+    const owner = { generation: 1, assignee: 'machine:m' };
+    f.coord.recordRunUsage('r', 't', owner, 1, emptyUsage());
+    f.coord.recordRunUsage('r', 't', owner, 2, emptyUsage());
+    assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM usage_ledger').get()!.n, 0);
+    assert.equal(f.coord.getRun('r')!.usage_seq, 2);
+    assert.equal(kicks, 0);
+    f.coord.recordRunUsage('r', 't', owner, 3, { ...emptyUsage(), provenance: 'actual' });
+    assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM usage_ledger').get()!.n, 1);
+    assert.equal(f.coord.getRun('r')!.usage_provenance, 'actual');
+    assert.equal(kicks, 1);
+  } finally { f.db.close(); }
+});

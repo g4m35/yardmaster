@@ -518,7 +518,7 @@ export class Coordinator {
       const cost = measured ? Math.round(usage.costUsd * 1_000_000) / 1_000_000 : Number(run.cost_usd);
       const cacheRead = measured ? usage.cacheReadTokens : run.cache_read_tokens;
       const cacheWrite = measured ? usage.cacheWriteTokens : run.cache_write_tokens;
-      if (Number(run.usage_seq) > 0 && cost === Number(run.cost_usd) &&
+      if (cost === Number(run.cost_usd) &&
           (!measured || (usage.tokensIn === Number(run.tokens_in) && usage.tokensOut === Number(run.tokens_out))) &&
           usage.provenance === run.usage_provenance && cacheRead === run.cache_read_tokens && cacheWrite === run.cache_write_tokens) {
         // Advance the fence even for a no-op: an older, different snapshot must not overwrite this acknowledgment.
