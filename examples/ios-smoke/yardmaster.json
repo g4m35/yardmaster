@@ -1,0 +1,23 @@
+{
+  "verify": ["xcrun swiftc -parse Smoke/SmokeApp.swift"],
+  "services": {
+    "providers": {
+      "apple-simulator": {
+        "options": {
+          "bundleId": "dev.yardmaster.smoke",
+          "build": {
+            "command": ["xcodebuild", "-project", "Smoke.xcodeproj", "-scheme", "Smoke", "-sdk", "iphonesimulator", "-configuration", "Debug",
+              "-derivedDataPath", "build/DerivedData", "CODE_SIGNING_ALLOWED=NO", "build"],
+            "app": "build/DerivedData/Build/Products/Debug-iphonesimulator/Smoke.app",
+            "reuse": "fingerprint",
+            "fingerprint": ["sh", "scripts/fingerprint.sh"]
+          },
+          "simulator": { "bootTimeoutMinutes": 10 },
+          "tests": [{ "name": "smoke", "runner": "command", "command": ["sh", "scripts/smoke-test.sh"] }]
+        }
+      }
+    },
+    "routes": { "device.test": { "prefer": ["apple-simulator"] } },
+    "verify": [{ "capability": "device.test" }]
+  }
+}

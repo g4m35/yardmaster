@@ -13,6 +13,8 @@ import { WorkerLoop } from './worker.ts';
 import { Semaphore } from './runner.ts';
 import { recover, planCleanup, runCleanup } from './janitor.ts';
 import { Supervisor } from './supervisor.ts';
+import { reapLeases } from './leases.ts';
+import { hostCleanup } from './simctl.ts';
 import { inSea, readAsset } from './assets.ts';
 import { planService } from './providers.ts';
 import { importGraph } from './imports.ts';
@@ -177,6 +179,10 @@ export class Hub {
     await recover(this.coord, this.machineId, new Set(this.nativeCaptures.keys()), { startup: true });
     // Deletes a previous run didn't get to finish (it was killed, or the machine slept).
     purgeTrash(join(worktreeRootOf(cfg), '.trash'));
+    // Device leases left by a crashed holder (this hub's predecessor included); live holders keep theirs. A failure
+    // here (no way to read process identity, say) is reported and retried later; it never keeps the hub from starting.
+    await this.reapDeviceLeases().catch((err: Error) => this.coord.event(null, null, 'warn', 'device.lease_reap_failed',
+      `Device lease cleanup could not run: ${err.message}. Leases stay as they are; it is retried periodically.`));
     this.coord.onChange = () => this.kick();
     const addr = this.server.address();
     const actualPort = typeof addr === 'object' && addr ? addr.port : port;
@@ -196,6 +202,15 @@ export class Hub {
     );
     if (!this.opts.quiet) this.coord.event(null, null, 'info', 'hub.started', `Hub started on ${this.url} (${this.worker.machineId})`);
     return this.url;
+  }
+
+  private async reapDeviceLeases(): Promise<void> {
+    for (const r of await reapLeases(hostCleanup())) {
+      if (r.outcome === 'expired-waiter') continue;
+      this.coord.event(null, null, r.outcome === 'cleanup_failed' ? 'warn' : 'info', 'device.lease_reaped',
+        r.outcome === 'cleanup_failed' ? `Could not clean up ${r.pool} lease ${r.id} (${r.holder}): ${r.detail}. Its slot stays held; run "ym devices status".`
+          : `Freed ${r.pool} lease ${r.id} from ${r.holder}, which stopped without releasing it: ${r.detail}.`, r);
+    }
   }
 
   private async heartbeat() {
@@ -290,6 +305,7 @@ export class Hub {
       if (n % 4 === 0) await recover(this.coord, this.machineId, new Set([...this.worker.active.keys(), ...this.nativeCaptures.keys()]));
       if (this.captureAbort.signal.aborted) return;
       if (n % 7 === 0) this.supervisor.check();
+      if (n % 40 === 0) this.trackBackground(this.reapDeviceLeases(), 'Device lease cleanup error');
       if (n % 20 === 1) this.trackBackground(this.refreshGraphs());
       if (n % 400 === 0 && loadConfig().cleanup.auto) this.cleanInBackground();
       this.dispatchNotifications();

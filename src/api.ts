@@ -24,6 +24,8 @@ import { noteControllerActivity } from './controller-activity.ts';
 import { loadPlugins } from './plugins.ts';
 import { planService, providerInventory } from './providers.ts';
 import { beginService, finishService, resolveService, serviceHolds } from './service-holds.ts';
+import { DeviceEvidenceSchema, bindingProblem, deviceEvidence, recordDeviceEvidence } from './device-evidence.ts';
+import { listLeases, queuePosition } from './leases.ts';
 
 /**
  * The single API surface. The hub serves it over HTTP, the CLI and MCP server call it locally or
@@ -163,17 +165,29 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
     'run.service': method(z.object({ runId: RunId, taskId: TaskId, owner: Owner,
       action: z.discriminatedUnion('kind', [
         z.object({ kind: z.literal('begin'), requestId: z.uuid(), capability: Id.max(300), provider: Id.max(100), receiptPath: Id.max(4096) }),
-        z.object({ kind: z.literal('finish'), requestId: z.uuid(), status: z.enum(['passed', 'failed', 'unknown']), reaped: z.boolean() }),
+        z.object({ kind: z.literal('finish'), requestId: z.uuid(), status: z.enum(['passed', 'failed', 'unknown']), reaped: z.boolean(),
+          evidence: DeviceEvidenceSchema.optional(), receiptPath: z.string().max(4096).optional() }),
       ]) }), p => coord.withRunOwner(p.runId, { ...p.owner, statuses: p.action.kind === 'begin' ? WORKER_ACTIVE_STATUSES : WORKER_FINALIZE_STATUSES }, () => {
       const task = coord.getTask(p.taskId)!, run = coord.getRun(p.runId)!;
       if (p.action.kind === 'begin') {
         if (task.control) throw new Error('Task control pending; service dispatch denied');
         beginService(coord.db, `task:${task.id}`, p.action, { projectId: task.project_id, taskIds: [task.id], runId: run.id, machineId: run.machine_id });
         coord.event(task.project_id, task.id, 'info', 'service.started', `Starting ${p.action.capability} via ${p.action.provider}; request ${p.action.requestId}`, p.action);
-      } else finishService(coord.db, `task:${task.id}`, p.action.requestId, p.action.status, p.action.reaped);
+      } else {
+        const evidence = p.action.evidence;
+        if (evidence && bindingProblem(evidence, { requestId: p.action.requestId, projectId: task.project_id, taskId: task.id })) throw new Error('Device evidence does not belong to this task request');
+        finishService(coord.db, `task:${task.id}`, p.action.requestId, p.action.status, p.action.reaped);
+        if (evidence) recordDeviceEvidence(coord.db, evidence, p.action.receiptPath ?? null);
+      }
       if (hooks.externalWorker) noteControllerActivity(coord.db, task.id, run.machine_id, p.owner.generation!);
     }, p.taskId)),
     'providers.pending': method(z.object({}), () => serviceHolds(coord.db)),
+    // Leases are the hub machine's own; a remote worker's simulators are coordinated in that machine's database.
+    'devices.status': method(z.object({ projectId: Id.optional(), taskId: TaskId.optional(), limit: z.number().int().min(1).max(100).default(10) }), p => {
+      const leases = listLeases(coord.db);
+      return { machineId: hooks.machineId, leases: leases.map(lease => ({ ...lease, position: queuePosition(leases, lease) })),
+        evidence: deviceEvidence(coord.db, { projectId: p.projectId, taskId: p.taskId, limit: p.limit }) };
+    }),
     'providers.resolve': method(z.object({ requestId: z.uuid(), note: z.string().min(12).max(4000) }), p => tx(coord.db, () => {
       const held = serviceHolds(coord.db).find(hold => hold.requestId === p.requestId);
       if (!held) throw new Error('No unresolved service request with that ID');
@@ -254,6 +268,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
         dependents: coord.dependentsOf(task.id).map((d) => ({ id: d.id, title: d.title, status: d.status })),
         runs: coord.runsFor(task.id),
         events: coord.eventsSince(0, null, 40, task.id),
+        devices: deviceEvidence(coord.db, { taskId: task.id, limit: 3 }),
       };
     }),
     'task.peek': method(z.object({ id: Id }), (p) => {

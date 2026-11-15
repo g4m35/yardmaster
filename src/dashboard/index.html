@@ -286,6 +286,12 @@
   .callout.amber { background: var(--need-wash); border-left: 3px solid var(--need); color: #FFE2A8; }
   .callout.red { background: var(--bad-wash); border-left: 3px solid var(--bad); color: var(--del-ink); }
   .callout.plain { background: var(--pane); border: 1px solid var(--line); color: var(--ink-2); }
+  .device { border: 1px solid var(--line); border-radius: var(--r-md); padding: 10px 12px; margin-top: 10px; display: grid; gap: 8px; }
+  .device-status { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+  .device-status li { font: 600 11px/1 var(--mono); padding: 5px 7px; border-radius: 4px; border: 1px solid var(--line-2); color: var(--ink-2); }
+  .device-status li[data-s="passed"] { color: var(--go-text); border-color: rgba(61, 220, 132, .35); background: var(--add-wash); }
+  .device-status li[data-s="failed"] { color: var(--del-ink); border-color: rgba(255, 122, 122, .4); background: var(--bad-wash); }
+  .device-status li[data-s="unknown"], .device-status li[data-s="untested"] { color: #FFE2A8; border-color: var(--need-line); background: var(--need-wash); }
   .files { margin: 0; padding-left: 18px; font: 12px/1.6 var(--mono); overflow-wrap: anywhere; color: var(--ink-2); }
   .history { list-style: none; margin: 0; padding: 0; font-size: 13px; }
   .history li { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; padding: 6px 0; border-top: 1px solid var(--line); }
@@ -1194,7 +1200,7 @@
       ['history', 'History', history.length || null, [history.length ? el('ol', { class: 'history' }, history.map((e) => el('li', {}, el('time', { datetime: new Date(e.ts).toISOString() }, clock(e.ts)), el('span', {}, shortQuoted(e.message))))) : el('p', { class: 'change-note' }, 'Nothing recorded yet.')]],
       ['details', 'Details', null, t.branch ? [el('dl', { class: 'facts' }, technical.flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])),
         t.branch && t.base_sha ? el('p', { class: 'muted' }, 'To read the exact change in your repository:') : null,
-        t.branch && t.base_sha ? el('code', { class: 'cmd' }, `git diff ${t.base_sha.slice(0, 12)}...${t.branch}`) : null] : [el('dl', { class: 'facts' }, technical.flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])), el('p', { class: 'change-note' }, 'No branch yet. It gets one when an agent starts.')]],
+        t.branch && t.base_sha ? el('code', { class: 'cmd' }, `git diff ${t.base_sha.slice(0, 12)}...${t.branch}`) : null, deviceView(d.devices)] : [el('dl', { class: 'facts' }, technical.flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])), el('p', { class: 'change-note' }, 'No branch yet. It gets one when an agent starts.')]],
     ];
     // Open where the owner left it; otherwise where the task's state makes the answer: the change once it
     // exists or was stopped, live activity while it runs, the request while it waits.
@@ -1227,6 +1233,27 @@
     loadLog();
     clearInterval(logTimer);
     logTimer = setInterval(loadLog, 2000);
+  }
+  // Device evidence: three separate answers. A simulator pass is never shown as a physical-device pass.
+  function deviceView(items) {
+    if (!items || !items.length) return null;
+    const word = { passed: 'passed', failed: 'failed', unknown: 'unknown', 'not-run': 'not run', untested: 'untested' };
+    return el('div', { id: 'd-devices' }, el('h4', {}, 'Device evidence'), items.map(({ evidence: e, receiptPath }) => {
+      const status = [['Code', e.status.code === 'passed' ? 'passed' : 'not-run'], ['Simulator', e.status.simulator], ['Physical device', e.status.physical]];
+      const facts = [
+        e.device ? ['Device', `${e.device.model} · ${e.device.runtime} · ${e.device.kind}${!e.device.createdByYardmaster ? '' : e.lease && e.lease.cleanup === 'released' ? ' (created and removed by Yardmaster)' : ' (created by Yardmaster; removal not confirmed)'}`] : null,
+        ['Requirement', e.requirement === 'physical' ? 'Physical device' : 'Simulator'],
+        ['Commit', e.commit ? e.commit.slice(0, 12) : 'uncommitted'],
+        e.artifact ? ['Artifact', `${e.artifact.path.split('/').pop()} · sha256 ${e.artifact.sha256.slice(0, 12)}` + (e.artifact.source === 'reused' ? ` · reused from ${(e.artifact.builtFromCommit || '').slice(0, 12) || 'an earlier build'}` : '')] : null,
+        e.checks.length ? ['Checks', e.checks.map((c) => `${c.name} ${word[c.status] || c.status}`).join(' · ')] : null,
+        e.omitted && e.omitted.length ? ['Omitted', e.omitted.map((o) => `${o.path.split('/').pop()} (${o.reason})`).join(' · ')] : null,
+        receiptPath ? ['Receipt', receiptPath] : null,
+      ].filter(Boolean);
+      return el('div', { class: 'device', 'data-overall': e.status.overall },
+        el('ul', { class: 'device-status', 'aria-label': 'Verification levels' }, status.map(([k, v]) => el('li', { 'data-s': v }, `${k} ${word[v] || v}`))),
+        el('dl', { class: 'facts' }, facts.flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)])),
+        el('p', { class: 'muted' }, e.summary));
+    }));
   }
   // Allowed files: the owner's answer when work was stopped for touching files outside its list.
   // Same matching as globToRegExp in src/scope.ts, so the page agrees with the hub about what a list allows.

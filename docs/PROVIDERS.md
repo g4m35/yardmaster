@@ -31,6 +31,9 @@ can offer the same job.
 | Notification | `notification.send` | Local output/file | Existing notifier, webhook or messaging |
 
 A missing browser/device provider is unavailable, not a simulated test pass.
+For iPhone apps, the built-in `apple-simulator` provider runs `device.test` on a
+simulator it creates under a machine-wide lease and records device evidence; see
+[DEVICES.md](DEVICES.md).
 Adapters must follow the user's session rules. In T3, use its bound device
 commands; generic command execution is not permission to launch another
 browser or take a different session's device.
@@ -235,8 +238,9 @@ permission to accept a stale artifact.
 Provider plans and completed checks appear in the existing dashboard activity
 feed and task details. Availability is scoped to the machine that reported it;
 the hub's prerequisites do not establish a remote worker's availability.
-Resource leases, vendor connectors beyond Browserbase and dashboard configuration
-controls remain separate extensions.
+Simulator, physical-device and build-slot leases are described in
+[DEVICES.md](DEVICES.md). Vendor connectors beyond Browserbase and dashboard
+configuration controls remain separate extensions.
 The current router makes no measured cost/speed savings claim and creates no
 subscription, remote session or infrastructure during discovery.
 
