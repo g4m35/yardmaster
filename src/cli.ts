@@ -147,7 +147,7 @@ async function getClient(a: Args, opts: { needHub?: boolean } = {}): Promise<Cli
     url = await startHubInBackground();
     console.log(dim(`Started the Yardmaster hub in the background (${url}).`));
   }
-  if (url) return remoteClient(url, hubToken());
+  if (url) return remoteClient(url, hubToken(), { ownerLocal: true });
   const coord = new Coordinator(openDb());
   return localClient(buildMethods(coord, { machineId: machineId(), cleanPlan: (p) => planCleanup(coord, p), cleanRun: async (p) => runCleanup(coord, await planCleanup(coord, p)) }));
 }
@@ -807,7 +807,7 @@ async function cmdMcp(a: Args) {
     // no local hub, and the agent's tools then just say so).
     if (process.env.YARDMASTER_TASK_ID && !(await runningHubUrl())) die('No Yardmaster hub on this machine for this background task.');
     const url = (await runningHubUrl()) ?? (await startHubInBackground());
-    client = remoteClient(url, hubToken());
+    client = remoteClient(url, hubToken(), { ownerLocal: true });
   }
   // Loaded only for this command: the MCP SDK is the slowest import, and every other command skips it.
   const { runMcp } = await import('./mcp.ts');

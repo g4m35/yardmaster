@@ -9,7 +9,7 @@ import { chooseAgent, inferTier, isSmallCheckedTask, type AgentStats, type Route
 import { applyPolicies } from './policies.ts';
 import { coupling, type ImportGraph } from './imports.ts';
 import { addLesson, widenScope } from './lessons.ts';
-import { inferScope, normalizePattern, scopesOverlap, validPatterns } from './scope.ts';
+import { fromLiteralPattern, inferScope, literalPattern, normalizePattern, scopesOverlap, validPatterns } from './scope.ts';
 import { clip, sha1, shortId, taskFingerprint } from './text.ts';
 import {
   ACTIVE_STATUSES,
@@ -674,7 +674,7 @@ export class Coordinator {
         .prepare(`SELECT id, task_id, touched FROM runs WHERE role = 'implement' AND task_id IN (${active.map(() => '?').join(',')}) ORDER BY started_at, rowid`)
         .all(...active.map((t) => t.id)) as { id: string; task_id: string; touched: string }[];
       for (const r of rows) touched.set(r.task_id, this.decodeRunJson(r, 'touched', TouchedSchema, []));
-      return active.map((task) => ({ task, scope: [...new Set([...this.effectiveScope(task), ...(touched.get(task.id) ?? [])])] }));
+      return active.map((task) => ({ task, scope: [...new Set([...this.effectiveScope(task), ...(touched.get(task.id) ?? []).map(literalPattern)])] }));
     });
     if (!excludeId) return all;
     // Members of the same race intentionally work on the same files in separate worktrees.
@@ -1282,12 +1282,12 @@ export class Coordinator {
 
   whoHas(projectId: string, filePaths: string[]): { path: string; holder: string; detail: string }[] {
     const out: { path: string; holder: string; detail: string }[] = [];
-    for (const path of filePaths.map(normalizePattern)) {
+    for (const path of filePaths.map(p => literalPattern(normalizePattern(p)))) {
       for (const lock of this.activeLocks(projectId)) {
-        if (scopesOverlap([path], [lock.pattern]).length) out.push({ path, holder: lock.holder, detail: `reserved ${lock.pattern}${lock.reason ? `: ${lock.reason}` : ''}` });
+        if (scopesOverlap([path], [lock.pattern]).length) out.push({ path: fromLiteralPattern(path), holder: lock.holder, detail: `reserved ${lock.pattern}${lock.reason ? `: ${lock.reason}` : ''}` });
       }
       for (const { task, scope } of this.activeScopes(projectId)) {
-        if (scopesOverlap([path], scope).length) out.push({ path, holder: task.assignee?.startsWith('session:') ? task.assignee : task.id, detail: `task "${clip(task.title, 50)}" (${task.status})` });
+        if (scopesOverlap([path], scope).length) out.push({ path: fromLiteralPattern(path), holder: task.assignee?.startsWith('session:') ? task.assignee : task.id, detail: `task "${clip(task.title, 50)}" (${task.status})` });
       }
     }
     return out;
@@ -1494,10 +1494,10 @@ export function checkLiveOverlap(coord: Coordinator, taskId: string, runId: stri
     const me = coord.getTask(taskId);
     if (!me || !touched.length || !coord.configFor(me.project_id).liveOverlapCheck) return null;
     for (const { task: other, scope } of coord.activeScopes(me.project_id, me.id)) {
-      const hits = scopesOverlap(touched, scope);
+      const hits = scopesOverlap(touched.map(literalPattern), scope);
       if (!hits.length) continue;
       const otherFirst = ['ready', 'merging', 'verifying'].includes(other.status) || (other.started_at ?? 0) <= (me.started_at ?? 0);
-      if (otherFirst) return { otherId: other.id, otherTitle: other.title, file: hits[0]!.split(' ~ ')[0]! };
+      if (otherFirst) return { otherId: other.id, otherTitle: other.title, file: fromLiteralPattern(hits[0]!.split(' ~ ')[0]!) };
     }
     return null;
   }, taskId);

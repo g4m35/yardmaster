@@ -58,6 +58,8 @@ The filter removes token/secret/key names, password/credential names, `AWS_*`, `
 
 Authentication exceptions belong to the selected adapter: Claude gets `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN`; Codex gets `OPENAI_API_KEY`, `OPENAI_ORG_ID`, `OPENAI_PROJECT_ID` and `CODEX_*`; Cursor gets `CURSOR_API_KEY`; Gemini gets `GEMINI_API_KEY`, `GOOGLE_API_KEY` and `GOOGLE_APPLICATION_CREDENTIALS`; OpenCode gets `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY` and `OPENCODE_*`. Other provider credentials, custom adapters and authenticated proxy URLs need an explicit exception.
 
+Region, profile and endpoint names (`AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_PROFILE`, `AZURE_OPENAI_ENDPOINT` and similar) are not treated as secrets, and neither is a URL that names only a user (`ssh://git@github.com/...`). Cloud sign-in for an agent passes through when that agent is set up to use it: Claude Code keeps `AWS_*` when `CLAUDE_CODE_USE_BEDROCK` is set, and keeps `GOOGLE_APPLICATION_CREDENTIALS`, `ANTHROPIC_VERTEX_PROJECT_ID` and `CLOUD_ML_REGION` when `CLAUDE_CODE_USE_VERTEX` is set. Codex keeps `AZURE_OPENAI_API_KEY`.
+
 Set named exceptions in global configuration or the project's `yardmaster.json`. `env.pass` applies to agents (including plans/reviews); `env.checks.pass` applies to setup and verification commands. Entries are exact, case-sensitive variable names, without values or wildcard expansion. Lists default to empty. A hub administrator token cannot be passed through either list.
 
 ```json

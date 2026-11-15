@@ -23,9 +23,15 @@ export function hubCredential(input: string, explicit?: string, opts: PrivateTra
 export function hookClient(): Client | null {
   const remote = process.env.YARDMASTER_HUB;
   if (!remote && !existsSync(paths.hubInfo())) return null;
-  const input = remote ?? (JSON.parse(readFileSync(paths.hubInfo(), 'utf8')) as { url: string }).url;
+  if (!remote) {
+    // The hub on this machine published its own address; its token is the owner's, whatever address it is bound to.
+    const local = (JSON.parse(readFileSync(paths.hubInfo(), 'utf8')) as { url: string }).url;
+    const tokenFile = join(yardHome(), 'token');
+    const token = process.env.YARDMASTER_TOKEN || (existsSync(tokenFile) ? readFileSync(tokenFile, 'utf8').trim() : '');
+    return token ? remoteClient(local, token, { ownerLocal: true, timeoutMs: 1500 }) : null;
+  }
   const opts = { privateNetwork: process.env.YARDMASTER_PRIVATE_NETWORK === '1', projectId: process.env.YARDMASTER_PROJECT_ID,
     machineId: process.env.YARDMASTER_PROJECT_ID ? machineId() : undefined };
-  const { hub, token } = hubCredential(input, process.env.YARDMASTER_TOKEN, opts);
+  const { hub, token } = hubCredential(remote, process.env.YARDMASTER_TOKEN, opts);
   return token ? remoteClient(hub, token, { ...opts, timeoutMs: 1500 }) : null;
 }

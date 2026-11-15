@@ -19,8 +19,13 @@ export function rpcDeadline(name: string, params: unknown, override?: number): n
   return RPC_TIMEOUT_MS;
 }
 
-export function remoteClient(baseUrl: string, token: string, opts: { timeoutMs?: number } & PrivateTransport = {}): Client {
-  const url = normalizeHubUrl(baseUrl, opts);
+/**
+ * `ownerLocal` marks the URL this machine's own hub wrote to hub.info in the owner-only home. That hub may be bound to
+ * a private overlay address (`ym hub run --host 100.x`), which is still this owner's hub: the remote-endpoint gate
+ * exists for URLs a user or environment supplies, not for the one the local hub published.
+ */
+export function remoteClient(baseUrl: string, token: string, opts: { timeoutMs?: number; ownerLocal?: boolean } & PrivateTransport = {}): Client {
+  const url = normalizeHubUrl(baseUrl, opts.ownerLocal ? { privateNetwork: true } : opts);
   return new Proxy({} as Client, {
     get: (_t, name: string) =>
       name === 'then'

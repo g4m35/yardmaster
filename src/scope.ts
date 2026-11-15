@@ -104,6 +104,19 @@ export function patternsOverlap(a: string, b: string): boolean {
   return sa.startsWith(sb) || sb.startsWith(sa);
 }
 
+/**
+ * A reported file path as a pattern that names exactly that file. The glob syntax has no escape, so each glob
+ * character is swapped for a private-use stand-in: `{{cookiecutter.slug}}/app.py` then overlaps itself, `**` and
+ * `*` followed by `/app.py`, but not unrelated paths, the way any other literal file name would.
+ */
+export function literalPattern(path: string): string {
+  return path.replace(/[*?{}]/g, c => String.fromCharCode(0xe000 + c.charCodeAt(0)));
+}
+
+export function fromLiteralPattern(pattern: string): string {
+  return pattern.replace(/[\ue02a\ue03f\ue07b\ue07d]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xe000));
+}
+
 export function scopesOverlap(a: string[], b: string[]): string[] {
   // Legacy declarations above today's limits must conservatively overlap, never stall the shared scheduler.
   if (!validPatterns(a) || !validPatterns(b)) return ['scope exceeds safe matching limits'];

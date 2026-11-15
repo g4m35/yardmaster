@@ -94,6 +94,50 @@ test('hook credentials are exact-URL scoped and authenticated RPCs refuse redire
   } finally { server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())); }
 });
 
+test('the hub this machine published on an overlay address stays owner-local for CLI clients and hooks', async () => {
+  const box = sandbox(); chmodSync(box.home, 0o700);
+  writeFileSync(join(box.home, 'token'), 'fixture-owner');
+  // `ym hub run --host 100.64.0.5` publishes its own overlay address; local commands and hooks must keep working.
+  writeFileSync(paths.hubInfo(), JSON.stringify({ url: 'http://100.64.0.5:7777', pid: process.pid, startedAt: Date.now() }));
+  const restore = envFixture({ YARDMASTER_HUB: undefined, YARDMASTER_TOKEN: undefined, YARDMASTER_PROJECT_ID: undefined, YARDMASTER_PRIVATE_NETWORK: undefined });
+  const original = globalThis.fetch;
+  const requests: { url: string; init?: RequestInit }[] = [];
+  globalThis.fetch = async (input, init) => { requests.push({ url: String(input), init }); return Response.json({ ok: true, result: {} }); };
+  try {
+    await hookClient()!['board.status']({});
+    assert.equal(requests[0]!.url, 'http://100.64.0.5:7777/api/rpc/board.status');
+    assert.equal((requests[0]!.init!.headers as Record<string, string>).authorization, 'Bearer fixture-owner');
+    await remoteClient('http://100.64.0.5:7777', 'fixture-owner', { ownerLocal: true })['board.status']({});
+    assert.equal(requests[1]!.init!.redirect, 'error');
+    // The same address supplied by the environment is a remote endpoint again: no owner token, overlay acknowledgment required.
+    assert.throws(() => remoteClient('http://100.64.0.5:7777', 'x'), /Non-loopback HTTP requires/);
+    process.env.YARDMASTER_HUB = 'http://100.64.0.5:7777'; process.env.YARDMASTER_PRIVATE_NETWORK = '1';
+    assert.throws(() => hookClient(), /Remote hubs require an explicit credential/);
+  } finally { globalThis.fetch = original; restore(); }
+});
+
+test('agents keep cloud-provider sign-in, and region, profile and user-only URLs are not treated as secrets', () => {
+  const restore = envFixture({ CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_USE_VERTEX: undefined, AWS_PROFILE: 'dev', AWS_REGION: 'us-east-1',
+    AWS_BEARER_TOKEN_BEDROCK: 'bedrock-fixture', AWS_SECRET_ACCESS_KEY: 'aws-fixture', AZURE_OPENAI_API_KEY: 'azure-fixture',
+    GOOGLE_APPLICATION_CREDENTIALS: '/fixture/adc.json', REPO_URL: 'ssh://git@github.com/acme/app.git', DB_URL: 'postgres://app:hunter2@db/app' });
+  try {
+    const claude = cleanEnv({}, { agent: 'claude' });
+    // Bedrock is switched on, so AWS credentials are Claude Code's own sign-in.
+    assert.equal(claude.AWS_BEARER_TOKEN_BEDROCK, 'bedrock-fixture'); assert.equal(claude.AWS_SECRET_ACCESS_KEY, 'aws-fixture');
+    assert.equal(claude.AZURE_OPENAI_API_KEY, undefined);
+    const codex = cleanEnv({}, { agent: 'codex' });
+    assert.equal(codex.AZURE_OPENAI_API_KEY, 'azure-fixture');
+    assert.equal(codex.AWS_SECRET_ACCESS_KEY, undefined); assert.equal(codex.AWS_BEARER_TOKEN_BEDROCK, undefined);
+    const check = cleanEnv();
+    assert.equal(check.AWS_PROFILE, 'dev'); assert.equal(check.AWS_REGION, 'us-east-1');
+    assert.equal(check.REPO_URL, 'ssh://git@github.com/acme/app.git');
+    assert.equal(check.DB_URL, undefined); assert.equal(check.AWS_SECRET_ACCESS_KEY, undefined);
+    process.env.CLAUDE_CODE_USE_BEDROCK = ''; process.env.CLAUDE_CODE_USE_VERTEX = '1';
+    const vertex = cleanEnv({}, { agent: 'claude' });
+    assert.equal(vertex.GOOGLE_APPLICATION_CREDENTIALS, '/fixture/adc.json'); assert.equal(vertex.AWS_SECRET_ACCESS_KEY, undefined);
+  } finally { restore(); }
+});
+
 async function runFixture() {
   const box = sandbox();
   const coord = new Coordinator(openDb(join(box.home, 'security.db')));
@@ -110,7 +154,7 @@ test('run.update validates every telemetry value atomically before persistence',
   const f = await runFixture();
   try {
     for (const patch of [
-      { touched: '[' }, { touched: [1] }, { touched: ['*a*a*a*a*a*a*a*a*a*a*b'] }, { touched: Array(2001).fill('x') },
+      { touched: '[' }, { touched: [1] }, { touched: ['a\0b'] }, { touched: Array(2001).fill('x') },
       { touched: ['a'.repeat(1025)] }, { phases: [] }, { phases: { agent: -1 } }, { phases: { agent: Infinity } },
       { lessons: {} }, { lessons: ['x'.repeat(201)] }, { verdict: '[' }, { verdict: '{"verdict":"approve","issues":5}' },
       { pid: '123' }, { ended_at: -1 }, { tokens_in: NaN }, { cost_usd: Infinity }, { resumed: 'yes' }, { phase: {} },
@@ -160,16 +204,23 @@ test('glob matching stays bounded for repeated stars and preserves scope semanti
   assert.deepEqual(scopesOverlap(Array(4097).fill('a'), ['b']), ['scope exceeds safe matching limits']);
 });
 
-test('worker paths are literal and scope RPCs reject oversized or wildcard-heavy input', async () => {
+test('worker paths are literal: glob characters in real file names are matched as themselves, oversized input is refused', async () => {
   const f = await runFixture();
   try {
-    for (const files of [['**'], ['*a'.repeat(10) + 'b'], ['x'.repeat(1025)]]) {
+    for (const files of [['x'.repeat(1025)], ['a\0b']]) {
       await assert.rejects(dispatch(f.methods, 'task.touched', { taskId: f.task.id, runId: f.run.id, owner: f.owner, files }));
       await assert.rejects(dispatch(f.methods, 'lock.check', { projectId: f.project.id, paths: files }));
     }
     await assert.rejects(dispatch(f.methods, 'lock.claim', { projectId: f.project.id, holder: 'test', patterns: ['*'.repeat(65)] }));
     await assert.rejects(dispatch(f.methods, 'task.setScope', { id: f.task.id, scope: Array(201).fill('a') }));
     assert.deepEqual(f.coord.getRun(f.run.id)!.touched, []);
+    // A template repository's real file name keeps live overlap telemetry and pre-edit locking working.
+    const template = '{{cookiecutter.slug}}/app.py';
+    await dispatch(f.methods, 'task.touched', { taskId: f.task.id, runId: f.run.id, owner: f.owner, files: [template, '*literally*.md'] });
+    assert.deepEqual(f.coord.getRun(f.run.id)!.touched, [template, '*literally*.md']);
+    const held = await dispatch(f.methods, 'lock.check', { projectId: f.project.id, paths: [template] }) as { holder: string }[];
+    assert.deepEqual(held.map(h => h.holder), [f.task.id]);
+    assert.deepEqual(await dispatch(f.methods, 'lock.check', { projectId: f.project.id, paths: ['docs/app.py'] }), []);
   } finally { f.coord.db.close(); }
 });
 
