@@ -1369,16 +1369,18 @@
   }
   function closeDrawer() {
     if ($('drawer').open) $('drawer').close();
-    else { openTask = null; openEntry = null; ++detailSequence; clearInterval(logTimer); }
+    // Closing while a re-presentation is queued cancels it, so the queued close event cannot reopen old details.
+    else { representing = false; openTask = null; openEntry = null; ++detailSequence; clearInterval(logTimer); }
   }
   $('drawer').addEventListener('close', () => {
-    if (representing) {
+    if (representing && (openTask || openEntry)) {
       representing = false;
       const origin = drawerOrigin;
       presentDrawer();
       drawerOrigin = origin;
       return;
     }
+    representing = false;
     saveDraft(); openTask = null; openEntry = null; ++detailSequence; clearInterval(logTimer);
     $('overview').hidden = false; drawerModal = false; markSelected();
     restoreFocus(drawerOrigin);

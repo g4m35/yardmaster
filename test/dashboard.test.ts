@@ -578,6 +578,18 @@ test('a held A key never approves, and resizing across the breakpoint keeps the 
   // Keys now belong to the full-screen task, not the list behind it.
   await press('a'); await press('a');
   assert.equal(h.calls.filter(c => c.method === 'task.control').length, 0);
+  // A browser delivers the close event later. Closing in between (a project change) cancels the re-presentation.
+  const drawer = h.$('drawer');
+  const deliver = drawer.close.bind(drawer);
+  let queued: (() => void) | null = null;
+  drawer.close = () => { drawer.open = false; queued = () => void drawer.dispatch('close'); };
+  media.matches = true;
+  for (const fn of media.listeners) fn();
+  h.api.closeDrawer();
+  queued!();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(drawer.open, false); assert.equal(h.api.state().openTask, null); assert.equal(h.$('overview').hidden, false);
+  drawer.close = deliver;
 });
 
 test('a change read for an earlier version of a task is never shown next to a newer one', async () => {
