@@ -64,7 +64,7 @@ export function globToRegExp(glob: string): { test(path: string): boolean } {
         for (let i = 0; i < path.length + 1; i++) {
           if (!previous[i]) continue;
           if (token.kind === 'one') { if (i < path.length && path[i] !== '/') next[i + 1] = 1; }
-          else for (const choice of token.choices) if (path.startsWith(choice, i)) next[i + choice.length] = 1;
+          else if (token.kind === 'literal') for (const choice of token.choices) if (path.startsWith(choice, i)) next[i + choice.length] = 1;
         }
       }
       previous = next;
