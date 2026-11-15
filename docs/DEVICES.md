@@ -78,7 +78,7 @@ make it an acceptance check:
 | `simulator.deviceType`, `simulator.runtime` | Name or identifier. Default: newest installed iOS runtime and its first iPhone. |
 | `simulator.bootTimeoutMinutes` | Default 5. |
 | `launch` | Launch the app and screenshot it (default `true`): the minimal smoke check. |
-| `tests` | Up to 10 checks, each `{ name, runner, command?, flow?, timeoutMinutes? }`. |
+| `tests` | Up to 10 checks, each `{ name, runner, command?, flow?, timeoutMinutes? }`. `build`, `boot`, `install` and `launch` are reserved names. |
 | `requiredEnv` | Extra environment variables your build or tests need. Other variables are not inherited. |
 
 `runner` is `command`, `maestro`, `xcodebuild` or `agent-device`. Commands can use
@@ -180,8 +180,9 @@ Where to read it:
 
 ## Leases and admission
 
-Pools are `build`, `simulator` and `physical`. Put limits in the global config
-(`YARDMASTER_HOME/config.json`) so every project on the machine shares them:
+Pools are `build`, `simulator` and `physical`. Limits come from the global config
+(`YARDMASTER_HOME/config.json`) and are shared by every project on the machine. A
+project's `yardmaster.json` can lower them for its own requests, never raise them:
 
 ```json
 {
@@ -210,6 +211,9 @@ Pools are `build`, `simulator` and `physical`. Put limits in the global config
   handed out again.
 - Cancelling a task or `ym verify` stops its processes, deletes its simulator and
   releases its slot.
+- The built app is copied while the build slot is still held. That copy is what
+  gets hashed, installed and cached, so a later build writing the same output
+  path cannot change what a waiting run tests.
 
 ```sh
 ym devices status            # limits, memory admission, held and queued leases
