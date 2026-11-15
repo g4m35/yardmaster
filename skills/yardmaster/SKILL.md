@@ -35,7 +35,7 @@ trap), record it with `yard_learn` and the files it applies to. Future agents ge
 
 ## Steering
 `yard_control` with `redirect` and a `note` restarts a background agent with new guidance and keeps its work.
-`retry`, `cancel`, `stop`, and `approve` do what they say.
+`retry`, `cancel`, `stop`, `approve` and `prioritize` do what they say.
 
 ## Pushing and CI
 Every push to a pull request runs the repo's whole CI suite, and on private repos that costs the user money.
