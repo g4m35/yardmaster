@@ -74,6 +74,29 @@ export function bootId(): Promise<string | null> {
   return boot;
 }
 
+/**
+ * Linux process start from /proc (no ps needed, so minimal containers work): field 22 of /proc/<pid>/stat is the
+ * start in clock ticks after boot, and /proc/stat's btime is the boot in epoch seconds. The kernel reports /proc
+ * times in USER_HZ, which is 100 on every Linux architecture.
+ */
+export function procStartMs(stat: string, bootSeconds: number): number | null {
+  // The command name (field 2) is parenthesized and may itself contain spaces or parentheses.
+  const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+  const ticks = Number(fields[19]);
+  return Number.isFinite(ticks) && Number.isFinite(bootSeconds) ? Math.round(bootSeconds * 1000 + ticks * 10) : null;
+}
+
+async function startTime(pid: number): Promise<number | null> {
+  if (process.platform === 'linux') {
+    try {
+      const boot = Number(readFileSync('/proc/stat', 'utf8').match(/^btime (\d+)$/m)?.[1]);
+      const fromProc = procStartMs(readFileSync(`/proc/${pid}/stat`, 'utf8'), boot);
+      if (fromProc !== null) return fromProc;
+    } catch { /* fall back to ps */ }
+  }
+  return processStartTime(pid).catch(() => null);
+}
+
 let self: ProcessId | null = null;
 /**
  * This process's identity as a lease holder. A lease is never granted without a readable start time: a row with no
@@ -82,7 +105,7 @@ let self: ProcessId | null = null;
 export async function selfIdentity(): Promise<ProcessId> {
   if (self) return self;
   for (let attempt = 0; attempt < 3; attempt++) {
-    const startedAt = await processStartTime(process.pid).catch(() => null);
+    const startedAt = await startTime(process.pid);
     if (startedAt !== null) return self = { pid: process.pid, startedAt, bootId: await bootId() };
     await new Promise(resolve => setTimeout(resolve, 200 * (attempt + 1)));
   }
@@ -94,12 +117,11 @@ export async function holderAlive(lease: Pick<Lease, 'pid' | 'procStarted' | 'bo
   const currentBoot = await bootId();
   if (lease.bootId && currentBoot && lease.bootId !== currentBoot) return false;
   if (!isAlive(lease.pid)) return false;
-  // This process is alive by definition; skip the ps call (waiters poll this often).
-  const me = await selfIdentity();
-  if (lease.pid === me.pid && lease.procStarted === me.startedAt) return true;
+  // This process is alive by definition; skip the start-time lookup (waiters poll this often).
+  if (lease.pid === self?.pid && lease.procStarted === self.startedAt) return true;
   // Unverifiable (rows from before start identity was required): never presumed dead; see recoverStaleLease.
   if (lease.procStarted === null) return true;
-  const now = await processStartTime(lease.pid).catch(() => null);
+  const now = await startTime(lease.pid);
   return now === null || Math.abs(now - lease.procStarted) <= 2000;
 }
 
@@ -111,13 +133,15 @@ export interface ReapResult { id: string; pool: LeasePool; holder: string; outco
  * cleanup keeps the slot occupied and visible (`cleanup_failed`) rather than letting new work double-book it.
  */
 export async function reapLeases(cleanup: ResourceCleanup, now = Date.now()): Promise<ReapResult[]> {
-  const me = await selfIdentity();
   const candidates = withDb(db => listLeases(db)).filter(l => l.host === machineId());
+  // Nothing to reap needs no identity: a machine that cannot read process start times can still run without leases.
+  if (!candidates.length) return [];
   // The dead holder as inspected. Another reaper may claim the row meanwhile; then it is no longer this holder's.
   const crashed = new Map<string, string>();
   const identity = (l: Lease) => `${l.state}:${l.pid}:${l.procStarted}`;
   for (const lease of candidates) if (!(await holderAlive(lease))) crashed.set(lease.id, identity(lease));
   const results: ReapResult[] = [];
+  const me = await selfIdentity();
   // Expiry alone never frees capacity a live process holds: a stalled holder may still be building or testing.
   // Only a dead holder's slot is reclaimed. A queued waiter holds nothing and may expire; a live holder's
   // failed cleanup is retried after its expiry because that holder already gave the slot up.

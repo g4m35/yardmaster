@@ -8,7 +8,7 @@ import { sandbox, sh, tempDir, until } from './helpers.ts';
 import { resolveConfig, loadConfig } from '../src/config.ts';
 import { openDb } from '../src/db.ts';
 import { AppleSimulatorOptionsSchema, runAppleSimulator, type DeviceRunContext } from '../src/device-provider.ts';
-import { artifactSha256, deviceEvidence, type DeviceEvidence } from '../src/device-evidence.ts';
+import { artifactSha256, deviceEvidence, fileSha256, type DeviceEvidence } from '../src/device-evidence.ts';
 import { acquireLease, listLeases, reapLeases } from '../src/leases.ts';
 import { chooseTarget, cleanupOwnedSimulators, compareVersions, exec, hostCleanup } from '../src/simctl.ts';
 import { linuxAvailableMb, meminfoAvailableMb, memoryHold, type MemorySample } from '../src/machine-pressure.ts';
@@ -557,7 +557,7 @@ test('scrubbing streams any file size and catches secrets split across chunk bou
   for (const chunk of [1, 3, 5, 7, 16, 1 << 20]) {
     writeFileSync(file, body);
     assert.equal(scrubFile(file, [other, secret], chunk), true);
-    assert.equal(readFileSync(file, 'utf8'), 'head [redacted] middle [redacted][redacted]tail [redacted]', `chunk ${chunk}`);
+    assert.equal(readFileSync(file, 'utf8'), 'head [redacted] middle [redacted]tail [redacted]', `chunk ${chunk}`);
   }
   writeFileSync(file, 'nothing to hide');
   assert.equal(scrubFile(file, [secret], 4), false);
@@ -636,7 +636,7 @@ function insertLease(over: { pid: number; procStarted: number | null; bootId: st
   return leasesNow().at(-1)!;
 }
 
-test('no lease is granted without a readable holder start time', async () => {
+test('no lease is granted without a readable holder start time', { skip: process.platform === 'linux' && 'Linux reads start times from /proc, without ps' }, async () => {
   const s = appRepo();
   const bin = tempDir('ym-no-lstart-');
   writeFileSync(join(bin, 'ps'), '#!/bin/sh\nif [ "$1" = "-o" ] && [ "$2" = "lstart=" ]; then exit 1; fi\nexec /bin/ps "$@"\n', { mode: 0o755 });
@@ -717,4 +717,43 @@ fs.writeFileSync(d+'/leaky.png',Buffer.concat([png,Buffer.from([0]),Buffer.from(
   assert.equal(leaky.reason, 'omitted: contains a declared credential');
   assert.equal(existsSync(leaky.path), false);
   assert(e.files.some(f => f.path.endsWith('launch.png')), 'simulator screenshots stay');
+});
+
+test('reaping an empty lease table needs no process identity, so Yardmaster runs where ps is unavailable', async () => {
+  const s = appRepo();
+  const bin = tempDir('ym-no-ps-');
+  writeFileSync(join(bin, 'ps'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+  const r = await runCli(s.repo, ['devices', 'reap', '--json'], { ...process.env, PATH: `${bin}:${process.env.PATH}`, YARDMASTER_HOME: s.home });
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(JSON.parse(r.out), []);
+});
+
+test('Linux start times come from /proc/<pid>/stat, even with spaces and parentheses in the command name', async () => {
+  const { procStartMs } = await import('../src/leases.ts');
+  // pid (comm) state ppid ... field 22 (starttime) = 123456 ticks after boot.
+  const fields = ['S', '1', ...Array.from({ length: 17 }, (_, i) => String(i + 10)), '123456', '0', '0'];
+  const stat = `4242 (node (worker) x) ${fields.join(' ')}`;
+  assert.equal(procStartMs(stat, 1_794_700_000), 1_794_700_000_000 + 1_234_560);
+  assert.equal(procStartMs('4242 (broken)', 1_794_700_000), null);
+  if (process.platform === 'linux') {
+    const { selfIdentity } = await import('../src/leases.ts');
+    const me = await selfIdentity();
+    assert.ok(Math.abs(me.startedAt! - (Date.now() - process.uptime() * 1000)) < 5000, 'this process started about when Node says it did');
+  }
+});
+
+test('a long run of overlapping matches streams in bounded memory and time', () => {
+  const dir = tempDir('ym-run-'), file = join(dir, 'run.log');
+  // 16 MiB of "a" with the declared value "aa": every position starts a match, so the whole run is one span.
+  const size = 16 * 1024 * 1024;
+  writeFileSync(file, Buffer.concat([Buffer.from('start '), Buffer.alloc(size, 'a'), Buffer.from(' end')]));
+  const before = process.memoryUsage().arrayBuffers;
+  const started = Date.now();
+  assert.equal(scrubFile(file, ['aa', 'aaa'], 64 * 1024), true);
+  const elapsed = Date.now() - started;
+  assert.equal(readFileSync(file, 'utf8'), 'start [redacted] end');
+  assert(elapsed < 10_000, `streamed in ${elapsed} ms`);
+  // Nothing proportional to the file stays allocated: buffers in use stay far below its size.
+  assert(process.memoryUsage().arrayBuffers - before < size / 4, 'no file-sized buffer was retained');
+  assert.equal(artifactSha256(file), fileSha256(file));
 });

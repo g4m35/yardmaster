@@ -157,7 +157,7 @@ export function evidenceProblem(e: DeviceEvidence, sha: string | null, required:
 const REDACTED = Buffer.from('[redacted]');
 const needlesOf = (secrets: string[]) => [...new Set(secrets.filter(Boolean))].map(secret => Buffer.from(secret));
 
-/** Every occurrence of every secret (overlaps included), merged into disjoint spans: union, longest coverage. */
+/** Every occurrence of every secret, overlapping and adjacent ones merged: the union scrubFile redacts too. */
 function secretSpans(buf: Buffer, needles: Buffer[]): [number, number][] {
   const spans: [number, number][] = [];
   for (const needle of needles) for (let at = buf.indexOf(needle); at >= 0; at = buf.indexOf(needle, at + 1)) spans.push([at, at + needle.length]);
@@ -165,7 +165,7 @@ function secretSpans(buf: Buffer, needles: Buffer[]): [number, number][] {
   const merged: [number, number][] = [];
   for (const span of spans) {
     const last = merged.at(-1);
-    if (last && span[0] < last[1]) last[1] = Math.max(last[1], span[1]);
+    if (last && span[0] <= last[1]) last[1] = Math.max(last[1], span[1]);
     else merged.push([span[0], span[1]]);
   }
   return merged;
@@ -184,10 +184,11 @@ export function redactText(text: string, secrets: string[]): string {
 }
 
 /**
- * Replace every occurrence of the given secrets in a file of any size, streaming in chunks. Matches are merged
- * into spans first, so overlapping secrets are redacted as one. Bytes after `limit` (the last longest-secret - 1
- * bytes) may start a match that continues in the next chunk, and a span that crosses `limit` may still grow, so
- * both are carried into the next round. Returns whether anything was replaced.
+ * Replace every occurrence of the given secrets in a file of any size, streaming in chunks. Overlapping and adjacent
+ * matches form one redacted run (union of all matches). Memory is one chunk plus the longest secret, and a coverage
+ * mask of the same size: only the last (longest - 1) bytes are carried, since a match starting there may continue
+ * in the next chunk. A run still open at that point is kept as a position (`coveredUntil`), not as bytes, so a long
+ * stretch of overlapping matches is redacted as it streams. Returns whether anything was replaced.
  */
 export function scrubFile(file: string, secrets: string[], chunkBytes = 1024 * 1024): boolean {
   const needles = needlesOf(secrets);
@@ -199,22 +200,39 @@ export function scrubFile(file: string, secrets: string[], chunkBytes = 1024 * 1
   try {
     const chunk = Buffer.alloc(Math.max(1, chunkBytes));
     let carry = Buffer.alloc(0);
+    let base = 0;            // stream offset of buf[0]
+    let coveredUntil = 0;    // end of the furthest match seen (stream offset); may reach into the carried tail
+    let inRun = false;       // the byte before `base` was redacted, so the current run's marker is already written
     for (;;) {
       const n = readSync(input, chunk, 0, chunk.length, null);
       const buf = Buffer.concat([carry, chunk.subarray(0, n)]);
       const last = n === 0;
-      const limit = last ? buf.length : Math.max(0, buf.length - keep);
-      let at = 0, emitTo = limit;
-      for (const [start, end] of secretSpans(buf, needles)) {
-        // Unsettled: it starts in the carried tail, or it reaches past it and might still overlap the next match.
-        if (!last && (start >= limit || end > limit)) { emitTo = Math.min(start, limit); break; }
-        writeSync(output, buf.subarray(at, start)); writeSync(output, REDACTED);
-        at = end; changed = true;
+      const settled = last ? buf.length : Math.max(0, buf.length - keep);
+      const mask = new Uint8Array(buf.length);
+      if (coveredUntil > base) mask.fill(1, 0, Math.min(buf.length, coveredUntil - base));
+      // Matches starting in the settled part lie wholly in `buf`; later ones are found again from the carried tail.
+      for (const needle of needles) {
+        let filled = 0;
+        for (let at = buf.indexOf(needle); at >= 0 && at < settled; at = buf.indexOf(needle, at + 1)) {
+          const end = at + needle.length;
+          mask.fill(1, Math.max(at, filled), end);
+          filled = end;
+          coveredUntil = Math.max(coveredUntil, base + end);
+        }
       }
-      emitTo = Math.max(at, emitTo);
-      writeSync(output, buf.subarray(at, emitTo));
+      for (let i = 0; i < settled;) {
+        const run = mask.indexOf(1, i);
+        const plainEnd = run < 0 || run > settled ? settled : run;
+        if (plainEnd > i) { writeSync(output, buf.subarray(i, plainEnd)); inRun = false; i = plainEnd; continue; }
+        const stop = mask.indexOf(0, i);
+        const runEnd = stop < 0 || stop > settled ? settled : stop;
+        if (!inRun) { writeSync(output, REDACTED); changed = true; }
+        inRun = true;
+        i = runEnd;
+      }
       if (last) break;
-      carry = Buffer.from(buf.subarray(emitTo));
+      carry = Buffer.from(buf.subarray(settled));
+      base += settled;
     }
   } finally { closeSync(input); closeSync(output); }
   if (changed) renameSync(temp, file); else rmSync(temp, { force: true });
