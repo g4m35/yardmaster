@@ -487,6 +487,7 @@ export class Hub {
     } finally {
       try { if (file) rmSync(file, { force: true }); }
       finally {
+        // Failed file removal must not retain either download admission slot.
         this.baseBundles--;
         if (workerId) {
           const remaining = (this.workerBaseBundles.get(workerId) ?? 1) - 1;

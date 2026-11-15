@@ -682,8 +682,15 @@ export class Coordinator {
     return all.filter((a) => a.task.id !== excludeId && (!group || a.task.race_group !== group));
   }
 
+  private warnLegacyScope(task: Task): void {
+    const key = `scope:legacy:${task.id}`;
+    if (this.getMeta(key)) return;
+    this.setMeta(key, '1');
+    this.event(task.project_id, task.id, 'warn', 'task.scope_legacy', 'Stored scope exceeds safe matching limits. This task requires scope editing; active work conservatively covers the repository.');
+  }
+
   effectiveScope(task: Task): string[] {
-    if (!validPatterns(task.scope, 200)) return ['**'];
+    if (!validPatterns(task.scope, 200)) { this.warnLegacyScope(task); return ['**']; }
     if (task.scope.length) return task.scope;
     return this.configFor(task.project_id).unknownScope === 'exclusive' ? ['**'] : [];
   }
@@ -767,7 +774,10 @@ export class Coordinator {
 
   /** Why a queued task is not running yet, in plain language. Null means it can start now. */
   blocker(task: Task, now = Date.now(), reservationHolder?: string): string | null {
-    if (!validPatterns(task.scope, 200)) return 'Stored scope exceeds safe matching limits. Edit this task to at most 200 patterns of 1024 characters and 64 wildcards each.';
+    if (!validPatterns(task.scope, 200)) {
+      this.warnLegacyScope(task);
+      return 'Stored scope exceeds safe matching limits. Edit this task to at most 200 patterns of 1024 characters and 64 wildcards each.';
+    }
     const service = serviceHold(this.db, `task:${task.id}`);
     if (service) return `Provider request ${service.requestId} needs inspection. Use ym providers pending/resolve before retrying.`;
     const hold = this.processHold(task.id);

@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { availableParallelism } from 'node:os';
 import * as z from 'zod/v4';
 import { expandHome, paths, yardHome } from './paths.ts';
+import { ScopePattern } from './run-schema.ts';
 import { ServicesConfigSchema } from './provider-contract.ts';
 
 export const TIERS = ['cheap', 'standard', 'strong'] as const;
@@ -104,7 +105,7 @@ export const PolicySchema = z.object({
   name: z.string().optional(),
   when: z
     .object({
-      files: z.array(z.string()).optional().describe('Matches if the task scope overlaps any of these globs.'),
+      files: z.array(ScopePattern).max(200).optional().describe('Matches if the task scope overlaps any of these globs.'),
       text: z.string().optional().describe('Case-insensitive regex tested against title and prompt.'),
       tier: TierSchema.optional(),
       createdBy: z.string().optional(),
@@ -191,7 +192,7 @@ export const ConfigSchema = z.object({
       backoffSeconds: z.number().default(20),
     })
     .default({ maxAttempts: 3, escalate: true, sameFailureLimit: 2, backoffSeconds: 20 }),
-  hotFiles: z.array(z.string()).default([
+  hotFiles: z.array(ScopePattern).max(200).default([
     'yardmaster.json',
     'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb', 'Cargo.lock', 'poetry.lock', 'uv.lock', 'go.sum',
     '**/migrations/**', '.github/workflows/**',

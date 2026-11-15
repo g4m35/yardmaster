@@ -22,17 +22,11 @@ export function validPatterns(patterns: string[], limit = MAX_SCOPE_PATTERNS): b
   return Array.isArray(patterns) && patterns.length <= limit && patterns.every(validatePattern);
 }
 
-function boundedPatterns(patterns: string[]): void {
-  if (!validPatterns(patterns)) {
-    throw new Error('Scope exceeds limits: 4096 patterns, 1024 characters and 64 wildcards per pattern.');
-  }
-}
-
 type GlobToken = { kind: 'literal'; choices: string[] } | { kind: 'star' | 'globstar' | 'directory' | 'one' };
 
 /** Retains the old test interface, but uses dynamic programming instead of a backtracking RegExp. */
 export function globToRegExp(glob: string): { test(path: string): boolean } {
-  boundedPatterns([glob]);
+  if (!validatePattern(glob)) return { test: () => true };
   const g = normalizePattern(glob);
   const tokens: GlobToken[] = [];
   for (let i = 0; i < g.length; i++) {
@@ -119,7 +113,7 @@ export function scopesOverlap(a: string[], b: string[]): string[] {
 }
 
 export function inScope(path: string, scope: string[]): boolean {
-  boundedPatterns(scope);
+  if (!validPatterns(scope)) return true;
   return scope.some((p) => matches(path, p));
 }
 

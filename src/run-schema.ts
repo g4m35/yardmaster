@@ -7,12 +7,13 @@ export const TouchedSchema = z.array(LiteralPath).max(2000);
 export const LessonsSchema = z.array(z.string().min(1).max(200)).max(20);
 const NonNegative = z.number().finite().nonnegative();
 export const PhasesSchema = z.record(z.string().min(1).max(100), NonNegative).refine(p => Object.keys(p).length <= 100, 'Too many phases.');
+export const MAX_VERDICT_LENGTH = 100000;
 export const ReviewSchema = z.object({
   verdict: z.enum(['approve', 'request_changes']),
   issues: z.array(z.object({ severity: z.enum(['blocker', 'major', 'minor']).default('minor'), file: z.string().max(4096).optional(), note: z.string().min(3).max(20000) })).max(200).default([]),
   summary: z.string().max(20000).optional(),
-}).refine(value => JSON.stringify(value).length <= 100000, 'Review exceeds the stored verdict limit.');
-export const VerdictSchema = z.string().max(100000).refine(value => {
+}).refine(value => JSON.stringify(value).length <= MAX_VERDICT_LENGTH, 'Review exceeds the stored verdict limit.');
+export const VerdictSchema = z.string().max(MAX_VERDICT_LENGTH).refine(value => {
   try { return ReviewSchema.safeParse(JSON.parse(value)).success; } catch { return false; }
 }, 'Invalid review verdict JSON.').nullable();
 const Text = z.string().max(20000).nullable();
