@@ -85,7 +85,7 @@ export class Hub {
   constructor(opts: HubOptions = {}) {
     this.opts = opts;
     this.coord = new Coordinator(opts.db ?? openDb());
-    this.eventStream = new EventStream(this.coord);
+    this.eventStream = new EventStream(this.coord.db);
     this.pairing = new PairingStore(this.coord.db, { ownerId: 'personal' });
     this.token = opts.token ?? hubToken();
     this.machineId = opts.machineId ?? machineId();

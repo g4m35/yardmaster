@@ -1,5 +1,7 @@
 import type { ServerResponse } from 'node:http';
 import type { YardEvent } from './types.ts';
+import type { StatementSync } from 'node:sqlite';
+import type { Db } from './db.ts';
 
 interface Client {
   res: ServerResponse;
@@ -14,15 +16,20 @@ export class EventStream {
   private timer: NodeJS.Timeout | null = null;
   private stopped = false;
 
-  private readonly source: { lastEventId(): number; eventsSince(after: number, projectId: null, limit: number): YardEvent[] };
+  private readonly events: StatementSync;
+  private readonly latest: StatementSync;
 
-  constructor(source: EventStream['source']) { this.source = source; }
+  constructor(db: Db) {
+    // eventsSince returns the newest page for the feed; stream replay needs the oldest unread page.
+    this.events = db.prepare('SELECT * FROM events WHERE id > ? ORDER BY id ASC LIMIT 200');
+    this.latest = db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM events');
+  }
 
   connect(res: ServerResponse, after: number): void {
     if (this.stopped) { res.writeHead(503); res.end(); return; }
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
     const drain = () => { client.blocked = false; };
-    const client: Client = { res, last: after || this.source.lastEventId(), blocked: false, refreshedAt: Date.now(), close: () => {
+    const client: Client = { res, last: after || Number(this.latest.get()!.id), blocked: false, refreshedAt: Date.now(), close: () => {
       this.clients.delete(client);
       res.off('drain', drain);
       res.off('close', client.close);
@@ -40,7 +47,8 @@ export class EventStream {
     if (!ready.length) return;
     // One bounded read serves every writable client, including replay after a slow client drains.
     const after = ready.reduce((last, client) => Math.min(last, client.last), Infinity);
-    const events = this.source.eventsSince(after, null, 200);
+    const rows = this.events.all(after) as unknown as (Omit<YardEvent, 'data'> & { data: string | null })[];
+    const events = rows.map(row => ({ ...row, data: row.data ? JSON.parse(row.data) : null }));
     for (const client of ready) {
       const pending = events.filter(event => event.id > client.last);
       if (pending.length) client.last = pending[pending.length - 1]!.id;

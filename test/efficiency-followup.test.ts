@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, existsSync, chmodSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, chmodSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadConfig } from '../src/config.ts';
 import { openDb } from '../src/db.ts';
 import { warmStart, lockHash, refreshDeps, clonesAreFree } from '../src/warmstart.ts';
 import { WorkerLoop } from '../src/worker.ts';
+import { scanDeps } from '../src/devdeps.ts';
 import { Semaphore } from '../src/runner.ts';
 import type { Client } from '../src/api.ts';
 import { invalidateSize } from '../src/disk.ts';
@@ -123,4 +124,36 @@ test('migration 14 upgrades a v13 database without data loss and removes the glo
     assert.match(JSON.stringify(plan), /tasks_status_finished/);
     assert.doesNotMatch(JSON.stringify(plan), /TEMP B-TREE/);
   } finally { db.close(); }
+});
+
+test('nested symlink lockfiles participate in compatibility checks', async () => {
+  const box = dependencyFixture(true);
+  for (const root of [box.repo, box.worktree]) {
+    rmSync(join(root, 'packages/tool/package-lock.json'));
+    writeFileSync(join(root, 'lock-snapshot'), root === box.repo ? 'old' : 'new');
+    symlinkSync('../../lock-snapshot', join(root, 'packages/tool/package-lock.json'));
+  }
+  assert.notEqual(lockHash(box.repo), lockHash(box.worktree));
+  const result = await warmStart(box.repo, box.worktree, loadConfig());
+  assert.equal(result.source, null);
+  assert.deepEqual(result.cloned, []);
+});
+
+test('an unreadable candidate never yields a partial matching fingerprint or aborts disk scanning', async t => {
+  if (process.getuid?.() === 0) { t.skip('root bypasses directory permissions'); return; }
+  const box = dependencyFixture();
+  const unreadable = join(box.repo, 'unrelated-output');
+  mkdirSync(unreadable);
+  chmodSync(unreadable, 0);
+  try {
+    assert.equal(lockHash(box.repo), '');
+    assert.notEqual(lockHash(box.repo), lockHash(box.worktree));
+    const result = await warmStart(box.repo, box.worktree, loadConfig());
+    assert.equal(result.source, null);
+    assert.deepEqual(result.cloned, []);
+    const scan = await scanDeps([box.repo]);
+    assert.equal(scan.dirs.length, 1);
+    assert.equal(scan.dirs[0]!.lock, '');
+    assert.deepEqual(scan.identical, []);
+  } finally { chmodSync(unreadable, 0o755); }
 });

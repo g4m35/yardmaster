@@ -48,13 +48,13 @@ export function lockHash(dir: string): string {
       const path = join(root, entry.name);
       const key = rel ? `${rel}/${entry.name}` : entry.name;
       if (entry.isDirectory() && !excluded.has(entry.name)) walk(path, key);
-      else if (entry.isFile() && LOCKFILES.includes(entry.name)) {
+      else if ((entry.isFile() || entry.isSymbolicLink()) && LOCKFILES.includes(entry.name)) {
         found = true;
         h.update(key).update('\0').update(readFileSync(path)).update('\0');
       }
     }
   };
-  walk(dir, '');
+  try { walk(dir, ''); } catch { return ''; }
   return found ? h.digest('hex').slice(0, 16) : '';
 }
 
@@ -106,7 +106,7 @@ export async function warmStart(repoRoot: string, worktree: string, config: Conf
   if (cfg.warmStart === 'clone') {
     const picked = await pickSource(worktree, [repoRoot, ...(opts.candidates ?? [])], cfg.shareDirs);
     out.stale = picked.stale;
-    if (picked.stale) out.skipped.push({ rel: '*', why: 'No checkout has matching root and nested lockfiles; dependencies were not reused. Run the project setup to install them.' });
+    if (picked.stale) out.skipped.push({ rel: '*', why: 'No checkout has verifiable matching root and nested lockfiles; dependencies were not reused. Run the project setup to install them.' });
     if (picked.source) {
       out.source = picked.source;
       const dirs = await findArtifacts(picked.source, cfg.shareDirs, 3, { sizes: false });
@@ -156,7 +156,7 @@ export async function refreshDeps(repoRoot: string, worktree: string, config: Co
   return warmStart(repoRoot, worktree, config, { candidates });
 }
 
-/** Whether folders cloned into worktrees under `dir` share disk blocks with the originals (so don't count them). */
+/** Clone capability alone cannot establish how many blocks an existing dependency tree still shares. */
 export async function clonesAreFree(dir: string): Promise<boolean> {
   return supportsCow(dir).catch((err) => { if (err instanceof UtilityProcessError) throw err; return false; });
 }
