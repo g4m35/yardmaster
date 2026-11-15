@@ -75,9 +75,28 @@ jobs:
       - run: npm ci
       - run: node scripts/build-binary.mjs
       - run: sh scripts/smoke-binary.sh release/yardmaster-linux-x64
+  # The device workflow on a real Mac: builds examples/ios-smoke, leases a simulator it creates, smoke-tests it,
+  # records evidence, and proves contention, cancellation and crashed-holder cleanup. No account or secret.
+  devices:
+    needs: guard
+    if: needs.guard.outputs.skip != 'true'
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci
+      - name: Simulator lease, smoke test and evidence (examples/ios-smoke)
+        env:
+          YARDMASTER_HOME_OUT: ${{ runner.temp }}/ym-device-home
+        run: node scripts/device-live.mjs
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: device-evidence, path: '${{ runner.temp }}/ym-device-home/service-runs', if-no-files-found: ignore, retention-days: 14 }
   # One final job: the check to require, and the one that records a real pass.
   done:
-    needs: [guard, test, binary, performance]
+    needs: [guard, test, binary, performance, devices]
     if: always()
     runs-on: ubuntu-slim
     timeout-minutes: 5

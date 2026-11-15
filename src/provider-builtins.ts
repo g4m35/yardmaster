@@ -10,5 +10,12 @@ export function builtinProviders(): ProviderPlugin[] {
       service: 'browser', command: [...selfCommand(), '__browserbase-provider'],
       locality: 'remote', cost: 'unknown', requiredEnv: ['BROWSERBASE_API_KEY'], timeoutMs: 330_000,
     } },
+  }), ProviderPluginSchema.parse({
+    kind: 'provider', apiVersion: 1, name: 'apple-simulator', label: 'Apple simulator (local Xcode)',
+    setupHint: 'Enable apple-simulator with options.bundleId and options.build.app, and route device.test to it. Needs macOS with Xcode; no account. Creates, uses and deletes its own simulator under a machine-wide lease. See docs/DEVICES.md.',
+    capabilities: { 'device.test': {
+      service: 'device', command: [...selfCommand(), '__apple-simulator-provider'],
+      locality: 'local', cost: 'free', timeoutMs: 86_400_000,
+    } },
   })];
 }

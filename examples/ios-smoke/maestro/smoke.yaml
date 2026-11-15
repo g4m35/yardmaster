@@ -1,0 +1,6 @@
+# Optional: use with a working Maestro install (Java required). See README.md.
+appId: dev.yardmaster.smoke
+---
+- launchApp
+- assertVisible: "Yardmaster smoke"
+- takeScreenshot: smoke

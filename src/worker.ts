@@ -1,8 +1,9 @@
-import { cpus, freemem, hostname, loadavg, platform } from 'node:os';
+import { cpus, hostname, loadavg, platform } from 'node:os';
 import type { Client } from './api.ts';
 import { agentSettings, deepMerge, resolveConfig, type Config, worktreeRootOf } from './config.ts';
 import { runAttempt, Semaphore, type StopReason } from './runner.ts';
-import { currentProcessScopeSignal, run, withProcessScope } from './proc.ts';
+import { currentProcessScopeSignal, withProcessScope } from './proc.ts';
+import { memoryHold, sampleMemory, type MemorySampler } from './machine-pressure.ts';
 import { WorkerJournal, type JournalArtifact } from './worker-journal.ts';
 import { git, isClean, isLinkedWorktreeOf, listWorktrees, revParse } from './git.ts';
 import { dirBytes, freeGb, gb } from './disk.ts';
@@ -25,22 +26,6 @@ interface Active {
   task: Task;
   agent: string;
   stop?: (reason: StopReason, message: string) => void;
-}
-
-let memCache = { at: 0, mb: Infinity };
-
-/** Free memory that the OS would actually hand out. macOS reports cache as "used", so ask vm_stat there. */
-async function availableMemMb(): Promise<number> {
-  if (Date.now() - memCache.at < 10_000) return memCache.mb;
-  let mb = freemem() / 1048576;
-  if (platform() === 'darwin') {
-    const r = await run('vm_stat', [], { timeoutMs: 3000 }).catch(() => null);
-    const page = Number(r?.stdout.match(/page size of (\d+)/)?.[1] ?? 16384);
-    const pages = (name: string) => Number(r?.stdout.match(new RegExp(`${name}:\\s+(\\d+)`))?.[1] ?? 0);
-    if (r) mb = ((pages('Pages free') + pages('Pages inactive') + pages('Pages speculative') + pages('Pages purgeable')) * page) / 1048576;
-  }
-  memCache = { at: Date.now(), mb };
-  return mb;
 }
 
 /**
@@ -70,6 +55,8 @@ export class WorkerLoop {
   private lastResourceWarn = 0;
   private lastDiskWarn = 0;
   private readonly onDiskPressure: (() => Promise<void>) | null;
+  private readonly sampleMemory: MemorySampler;
+  private readonly loadPerCpu: () => number;
 
   constructor(opts: {
     client: Client;
@@ -84,8 +71,12 @@ export class WorkerLoop {
     verifySlots: Semaphore;
     /** Called when worktrees exceed their disk quota; the hub uses it to run cleanup. */
     onDiskPressure?: () => Promise<void>;
+    sampleMemory?: MemorySampler;
+    loadPerCpu?: () => number;
   }) {
     this.onDiskPressure = opts.onDiskPressure ?? null;
+    this.sampleMemory = opts.sampleMemory ?? sampleMemory;
+    this.loadPerCpu = opts.loadPerCpu ?? (() => loadavg()[0]! / Math.max(1, cpus().length));
     this.client = opts.client;
     this.machineId = opts.machineId;
     this.name = opts.name ?? hostname();
@@ -123,8 +114,8 @@ export class WorkerLoop {
       repos: this.repos(),
       maxParallel: this.local().maxParallel,
       running: this.active.size,
-      loadPerCpu: loadavg()[0]! / Math.max(1, cpus().length),
-      freeMemMb: Math.round(await availableMemMb()),
+      loadPerCpu: this.loadPerCpu(),
+      freeMemMb: Math.round((await this.sampleMemory()).availableMb),
       platform: platform(),
       version: VERSION,
     };
@@ -153,16 +144,16 @@ export class WorkerLoop {
     const cfg = this.local();
     if (this.active.size >= cfg.maxParallel) return false;
     if (!(await this.diskOk())) return false;
-    const load = loadavg()[0]! / Math.max(1, cpus().length);
-    const mem = await availableMemMb();
-    if (this.active.size > 0 && (load > cfg.resources.maxLoadPerCpu || mem < cfg.resources.minFreeMemMb)) {
-      if (Date.now() - this.lastResourceWarn > 5 * 60_000) {
-        this.lastResourceWarn = Date.now();
-        await this.client['task.event']({ projectId: null, taskId: null, level: 'info', kind: 'machine.busy', message: `${this.name} is busy (load ${load.toFixed(2)}/cpu, ${Math.round(mem)} MB free); holding new work until it frees up.` }).catch(() => undefined);
-      }
-      return false;
+    // The first task is admitted the same way: other programs on this machine use it too.
+    const load = this.loadPerCpu();
+    const memory = await this.sampleMemory();
+    const why = load > cfg.resources.maxLoadPerCpu ? `load ${load.toFixed(2)}/cpu` : memoryHold(memory, cfg.resources);
+    if (!why) return true;
+    if (Date.now() - this.lastResourceWarn > 5 * 60_000) {
+      this.lastResourceWarn = Date.now();
+      await this.client['task.event']({ projectId: null, taskId: null, level: 'info', kind: 'machine.busy', message: `${this.name} is busy (${why}); holding new work until it frees up.` }).catch(() => undefined);
     }
-    return true;
+    return false;
   }
 
   /** New worktrees need room: hold work when the disk is nearly full or Yardmaster's quota is used up. */
