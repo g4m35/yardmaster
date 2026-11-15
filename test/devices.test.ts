@@ -770,9 +770,14 @@ function failingCensus(flag: string, failures: number) {
 
 test('fix 1: a build not confirmed stopped keeps its build slot until the reaper confirms it gone', async () => {
   const s = appRepo(), m = fakeMachine(), flag = join(s.home, 'census-failures');
-  const previous = process.env.PATH; process.env.PATH = `${failingCensus(flag, 1_000_000)}:${previous}`;
+  // The census fake goes in front of the fake Xcode: ownership inspection reads ps -U (both Linux and macOS).
+  const census = failingCensus(flag, 1_000_000);
+  const previous = process.env.PATH; process.env.PATH = `${census}:${m.PATH}`;
   try {
     const run = await runAppleSimulator(options(), context(s, m, { reinspectDelayMs: 10, env: { PATH: process.env.PATH, HOME: s.home } }));
+    // The build really ran (it needs the fake xcrun), and only its cleanup is unconfirmed.
+    assert.equal(run.result.data.evidence.checks.find(c => c.name === 'build')?.status, 'unknown');
+    assert.match(run.result.data.evidence.checks.find(c => c.name === 'build')!.detail, /process cleanup unverified/);
     assert.equal(run.result.status, 'unknown'); assert.equal(run.execution.reaped, false);
     const held = leasesNow().find(l => l.pool === 'build')!;
     assert.equal(held.state, 'cleanup_failed', 'the slot is not released');
