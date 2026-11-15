@@ -1,11 +1,5 @@
 # Changelog
 
-## Unreleased
-- Optional service-provider plugins and project-local commands share capability routing across research, builds, CI, browsers, devices, deployment, data, observability and notifications. Existing coding-agent adapters and notifier plugins remain compatible.
-- `ym providers list|plan|run` exposes provider prerequisites, ordered preferences, locality and cost policies. Fallback is pre-dispatch only; failed, interrupted or malformed service results never trigger automatic replay through another provider.
-- `services.verify` and `ym verify` run providers through committed-artifact acceptance and integration checks. Private pending/completed receipts survive restarts; dashboard activity/task details report real plans and results. Unknown results stop automatic repair/replay, including merge trains.
-- Optional built-in Browserbase support connects an existing test command to one bounded cloud session and confirms release. Local commands remain account-free; discovery checks prerequisites without claiming account/quota access. Public JavaScript provider APIs and checksum-validated hosted receipt collection are included.
-
 ## 0.9.2
 - Dashboard rebuilt as a three-pane console after the owner rejected the first redesign as looking the same: a left rail with the stage counts, machines and today's spend; the work list in the middle with a filter; and on the right either an overview (what needs you, what just happened, cleanup, connections) or the selected task beside the list. Dark scheme. On narrow screens it becomes one column with what needs you first, and a task opens full screen. See [docs/DASHBOARD.md](docs/DASHBOARD.md).
 - The selected task has tabs: Changes, Activity, Request, History and Details. Changes shows the actual diff, file by file, read from the hub with the new owner-only `task.diff` method: the saved commit once it exists (what approval merges), or the live working copy while the attempt runs. Large changes are cut at a line and say so.
@@ -16,8 +10,12 @@
 - Task names are the first sentence of the request instead of its first 200 characters, from `ym add` and the dashboard. Activity lines drop the worktree path and the "cd there first" prefix before clipping.
 - Fixed: the first changed file reported by a running task lost its first character when it was an unstaged edit (`rc/app.ts` for `src/app.ts`), so edit-time overlap checks could miss it.
 - `board.status` rows add `budget`, `attempt`, `maxAttempts`, `phase`, `createdAt`, `startedAt`, `readyAt` and `needsApproval`.
+- Optional service-provider plugins and project-local commands share capability routing across research, builds, CI, browsers, devices, deployment, data, observability and notifications. Existing coding-agent adapters and notifier plugins remain compatible.
+- `ym providers list|plan|run` exposes provider prerequisites, ordered preferences, locality and cost policies. Fallback is pre-dispatch only; failed, interrupted or malformed service results never trigger automatic replay through another provider.
+- `services.verify` and `ym verify` run providers through committed-artifact acceptance and integration checks. Private pending/completed receipts survive restarts; dashboard activity/task details report real plans and results. Unknown results stop automatic repair/replay, including merge trains.
+- Optional built-in Browserbase support connects an existing test command to one bounded cloud session and confirms release. Local commands remain account-free; discovery checks prerequisites without claiming account/quota access. Public JavaScript provider APIs and checksum-validated hosted receipt collection are included.
 
-No database migration. Upgrade the hub to get the new dashboard; workers are unaffected.
+No database migration. Upgrade the hub to get the new dashboard and the provider commands; workers that run service checks need 0.9.2 too.
 
 ## 0.9.1
 - Malformed unauthenticated request targets return400; rejected asynchronous handlers no longer terminate the hub.
