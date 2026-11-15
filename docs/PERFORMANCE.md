@@ -102,7 +102,7 @@ gets them like task worktrees, and refreshes them when a merge changes a lockfil
 **Dependency reuse is lockfile-aware.** A new worktree prefers dependencies from a checkout whose lockfiles match
 it exactly: your checkout, or another Yardmaster worktree (often the one that just installed a new package). When
 none match, it can reuse dependencies from the first usable checkout anyway. With root lockfiles present,
-the reuse result is marked stale and a managed run logs a warning when it brings those dependencies over.
+the reuse result is marked stale, and a managed run records an info event when it clones those dependencies (a plain copy records nothing).
 Setup commands remain necessary when reuse is skipped or the install does not match.
 
 `ym report` shows the result for your own work: spend per merged task, money spent on work that never merged,
