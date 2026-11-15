@@ -577,6 +577,10 @@ test('a held A key never approves, and resizing across the breakpoint keeps the 
   for (const fn of media.listeners) fn();
   assert.equal(drawer.open, true); assert.equal(h.api.state().openTask, 't-one'); assert.equal(closes, 0);
   assert.equal(h.$('overview').hidden, false); assert.equal(drawer.getAttribute('aria-modal'), 'true');
+  assert.equal(h.$('overview').hasAttribute('inert'), true);
+  // Escape while composing text in an input method cancels the composition, not the task.
+  for (const fn of h.doc.listeners.get('keydown') || []) await fn({ key: 'Escape', isComposing: true, target: h.doc.body, preventDefault() {} });
+  assert.equal(drawer.open, true);
   // Focus stays inside the task that now covers the page.
   assert.equal(drawer.contains(h.doc.activeElement), true);
   // Keys now belong to the full-screen task, not the list behind it.
@@ -588,6 +592,7 @@ test('a held A key never approves, and resizing across the breakpoint keeps the 
   // Escape dismisses it in either presentation, and the dismissal is final.
   await press('Escape');
   assert.equal(drawer.open, false); assert.equal(h.api.state().openTask, null); assert.equal(h.$('overview').hidden, false); assert.equal(closes, 1);
+  assert.equal(h.$('overview').hasAttribute('inert'), false);
   media.matches = false;
   for (const fn of media.listeners) fn();
   assert.equal(drawer.open, false);

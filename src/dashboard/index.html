@@ -924,7 +924,7 @@
       if (cover) node.setAttribute('inert', ''); else node.removeAttribute?.('inert');
     }
     $('drawer')?.setAttribute('aria-modal', cover ? 'true' : 'false');
-    if (cover && !$('drawer').contains(document.activeElement)) $('d-close').focus();
+    if (cover && !$('add-dialog')?.open && !$('drawer').contains(document.activeElement)) $('d-close').focus();
   }
   function presentDrawer() {
     const drawer = $('drawer');
@@ -1391,7 +1391,8 @@
   // the document body, and a snapshot can remove the focused node; both would let Tab leave the dialog.
   document.addEventListener('keydown', event => {
     if (event.key !== 'Tab') return;
-    const dialog = [fullScreen() ? $('drawer') : null, $('add-dialog')].find(node => node && node.open);
+    // The add-work dialog sits above everything, so it owns Tab whenever it is open.
+    const dialog = [$('add-dialog'), fullScreen() ? $('drawer') : null].find(node => node && node.open);
     if (!dialog) return;
     const controls = [...dialog.querySelectorAll('button, input, select, textarea, summary, a[href], [tabindex]')]
       .filter(node => !node.disabled && node.tabIndex >= 0 && node.getClientRects().length);
@@ -1409,7 +1410,8 @@
   // modal dialog leaves keys alone.
   let approveArmed = null;
   document.addEventListener('keydown', event => {
-    if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || authFailed) return;
+    // A key that is part of an input method composition (Escape cancels the candidate text) is not a shortcut.
+    if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || event.metaKey || event.ctrlKey || event.altKey || authFailed) return;
     const target = event.target || document.activeElement;
     const typing = target && (['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.isContentEditable);
     if (event.key === 'Escape' && target?.id === 'find' && $('find').value) { $('find').value = ''; renderBoard(); return; }
