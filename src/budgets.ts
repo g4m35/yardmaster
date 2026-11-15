@@ -474,7 +474,8 @@ export function listHeld(db: Db): Reservation[] {
  *   daily admission a downward correction only offsets the same run's spend already counted that day, so an old
  *   estimate corrected after midnight never inflates the new day's allowance.
  */
-export function recordUsageDelta(db: Db, obs: UsageObservation): UsageDelta {
+export function recordUsageDelta(db: Db, obs: UsageObservation,
+  previous?: { sequence: number; costUsd: number; tokensIn: number; tokensOut: number }): UsageDelta {
   const runId = id('runId', obs.runId);
   if (!Number.isSafeInteger(obs.sequence) || obs.sequence < 1) throw new BudgetError('sequence must be a positive safe integer.');
   const taskId = optId('taskId', obs.taskId);
@@ -485,7 +486,9 @@ export function recordUsageDelta(db: Db, obs: UsageObservation): UsageDelta {
   const provenance = oneOf('provenance', obs.provenance, ['actual', 'estimated', 'mixed', 'unknown'] as const);
   const at = clock(obs.at);
   return tx(db, () => {
-    const prior = db.prepare(`SELECT MAX(sequence) AS seq, COALESCE(SUM(cost_delta_micros), 0) AS cost,
+    // The coordinator reads this run under the same write transaction; its persisted totals avoid a history scan.
+    const prior = previous ? { seq: previous.sequence, cost: toMicros(previous.costUsd), tin: previous.tokensIn, tout: previous.tokensOut,
+      t1: taskId ?? '', t2: taskId ?? '' } : db.prepare(`SELECT MAX(sequence) AS seq, COALESCE(SUM(cost_delta_micros), 0) AS cost,
         COALESCE(SUM(tokens_in_delta), 0) AS tin, COALESCE(SUM(tokens_out_delta), 0) AS tout,
         MIN(COALESCE(task_id, '')) AS t1, MAX(COALESCE(task_id, '')) AS t2
       FROM usage_ledger WHERE run_id = ?`).get(runId) as { seq: number | null; cost: number; tin: number; tout: number; t1: string | null; t2: string | null };
@@ -500,7 +503,7 @@ export function recordUsageDelta(db: Db, obs: UsageObservation): UsageDelta {
     const dCost = measured ? cost - totals.cost : 0;
     const dIn = measured ? tokensIn - totals.tin : 0;
     const dOut = measured ? tokensOut - totals.tout : 0;
-    const countedToday = Number((db.prepare('SELECT COALESCE(SUM(day_cost_micros), 0) AS s FROM usage_ledger WHERE run_id = ? AND day = ?').get(runId, day) as { s: number }).s);
+    const countedToday = dCost < 0 ? Number((db.prepare('SELECT COALESCE(SUM(day_cost_micros), 0) AS s FROM usage_ledger WHERE run_id = ? AND day = ?').get(runId, day) as { s: number }).s) : 0;
     const dayCost = Math.max(-countedToday, dCost);
     db.prepare(`INSERT INTO usage_ledger (run_id, sequence, task_id, project_id, day, cost_delta_micros, day_cost_micros,
         tokens_in_delta, tokens_out_delta, provenance, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
