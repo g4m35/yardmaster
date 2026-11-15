@@ -11,6 +11,8 @@ on:
         required: true
 permissions:
   contents: read
+# Release builds never restore or save a cache, so a poisoned cache entry cannot reach a published artifact.
+cache-mode: none
 jobs:
   # Release tags are permanent (a protected tag can't be deleted or moved), so a wrong one would burn its version
   # number. Nothing is built or published unless the tag names the version in the code and sits on main.
@@ -23,6 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 0
       - id: check
@@ -55,11 +58,11 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           ref: ${{ inputs.tag || github.ref }}
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
-          cache: npm
       - run: npm ci
       - run: node scripts/build-binary.mjs
       - name: Smoke test the binary
@@ -76,6 +79,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           ref: ${{ inputs.tag || github.ref }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -117,6 +121,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           ref: ${{ inputs.tag || github.ref }}
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
