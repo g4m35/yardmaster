@@ -1,10 +1,10 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { constants, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { constants, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { arch, platform, release } from 'node:os';
 import { basename, join, relative, resolve } from 'node:path';
 import * as z from 'zod/v4';
 import { loadConfig, type Config } from './config.ts';
-import { artifactSha256, fileSha256, type DeviceEvidence } from './device-evidence.ts';
+import { artifactSha256, fileSha256, scrubFile, type DeviceEvidence } from './device-evidence.ts';
 import { mainRepoRoot, projectIdFor } from './git.ts';
 import { acquireLease, type LeaseHandle, type LeaseOutcome, type OwnedResource } from './leases.ts';
 import { memoryHold, sampleMemory, type MemorySampler } from './machine-pressure.ts';
@@ -105,12 +105,8 @@ export async function runAppleSimulator(options: AppleSimulatorOptions, ctx: Dev
   // Declared credentials never reach saved logs or evidence text; tests and builds can echo their environment.
   const secrets = options.requiredEnv.map(name => ctx.env[name]).filter((v): v is string => !!v).sort((a, b) => b.length - a.length);
   const redact = (text: string) => secrets.reduce((out, secret) => out.split(secret).join('[redacted]'), text);
-  /** Reports and app logs written by tests can echo credentials too; rewrite text files that contain one. */
-  const scrub = (file: string) => {
-    if (!secrets.length || statSync(file).size > 8 * 1024 * 1024) return;
-    const text = readFileSync(file, 'utf8');
-    if (secrets.some(secret => text.includes(secret))) writeFileSync(file, redact(text), { mode: 0o600 });
-  };
+  /** Reports, screenshots and app logs written during tests can echo credentials too; no size is exempt. */
+  const scrub = (file: string) => { scrubFile(file, secrets); };
   const saveLog = (name: string, text: string) => {
     const file = join(ctx.evidenceDir, name);
     writeFileSync(file, redact(text), { mode: 0o600 });
@@ -302,7 +298,7 @@ async function onSimulator(options: AppleSimulatorOptions, ctx: DeviceRunContext
       }
     }
     for (const file of walkFiles(join(ctx.evidenceDir, 'tests'))) {
-      if (!file.endsWith('.png')) scrub(file);
+      scrub(file);
       files.push({ path: file, sha256: fileSha256(file), kind: file.endsWith('.png') ? 'screenshot' : 'report' });
     }
   } catch (error) {

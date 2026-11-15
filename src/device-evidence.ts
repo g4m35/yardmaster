@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { lstatSync, readFileSync, readdirSync, readlinkSync } from 'node:fs';
+import { closeSync, lstatSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, renameSync, rmSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import * as z from 'zod/v4';
 import type { Db } from './db.ts';
@@ -122,4 +122,76 @@ export function evidenceLine(e: DeviceEvidence): string {
   const physical = `physical device ${e.status.physical}`;
   const artifact = e.artifact ? ` artifact sha256 ${e.artifact.sha256.slice(0, 12)}${e.artifact.source === 'reused' ? ' (reused)' : ''}` : '';
   return `${e.status.overall.toUpperCase()} ${e.commit?.slice(0, 12) ?? 'uncommitted'}: ${code}, ${sim}, ${physical} [${device}]${artifact}`;
+}
+
+const LEVELS = { simulator: 0, physical: 1 } as const;
+export type DeviceLevel = keyof typeof LEVELS;
+const LevelSchema = z.object({ requires: z.enum(['simulator', 'physical']) });
+
+/** The level the request (per-check input) or project configuration asks for, never what the provider reports. */
+export function requiredDeviceLevel(input: unknown, providerOptions: unknown): DeviceLevel | null {
+  for (const source of [input, providerOptions]) {
+    const parsed = LevelSchema.safeParse(source);
+    if (parsed.success) return parsed.data.requires;
+  }
+  return null;
+}
+
+/**
+ * Why evidence does not establish a pass of `required` on commit `sha`, or null when it does. A pass must be
+ * consistent with the device it names: a physical pass needs a physical device, and a simulator never stands in.
+ */
+export function evidenceProblem(e: DeviceEvidence, sha: string | null, required: DeviceLevel): string | null {
+  if (e.commit !== sha) return `it is bound to ${e.commit ?? 'no commit'}, not ${sha}`;
+  if (LEVELS[e.requirement] < LEVELS[required]) return `it answers a ${e.requirement} requirement, but this check requires ${required}`;
+  if (e.status.physical === 'passed' && e.device?.kind !== 'physical') return `it claims a physical-device pass on ${e.device ? `a ${e.device.kind}` : 'no device'}`;
+  if (e.status.simulator === 'passed' && !e.device) return 'it claims a simulator pass without naming a device';
+  if (e.status.overall !== 'passed') return e.summary;
+  if (required === 'physical' && e.status.physical !== 'passed') return `physical device ${e.status.physical}; a simulator pass does not satisfy a physical-device requirement`;
+  if (required === 'simulator' && e.status.simulator !== 'passed' && e.status.physical !== 'passed') return 'no device check passed';
+  return null;
+}
+
+const REDACTED = Buffer.from('[redacted]');
+
+/**
+ * Replace every occurrence of the given secrets in a file of any size, streaming in chunks. The last
+ * (longest secret - 1) bytes of each chunk are carried into the next, so a secret split across a chunk boundary is
+ * still found. Byte-level, so binary files are covered too. Returns whether anything was replaced.
+ */
+export function scrubFile(file: string, secrets: string[], chunkBytes = 1024 * 1024): boolean {
+  const needles = [...new Set(secrets.filter(Boolean))].map(secret => Buffer.from(secret)).sort((a, b) => b.length - a.length);
+  if (!needles.length) return false;
+  const keep = needles[0]!.length - 1;
+  const temp = `${file}.scrub-${process.pid}`;
+  const input = openSync(file, 'r'), output = openSync(temp, 'w', 0o600);
+  let changed = false;
+  try {
+    const chunk = Buffer.alloc(Math.max(1, chunkBytes));
+    let carry = Buffer.alloc(0);
+    for (;;) {
+      const n = readSync(input, chunk, 0, chunk.length, null);
+      const buf = Buffer.concat([carry, chunk.subarray(0, n)]);
+      const last = n === 0;
+      // A match starting before `limit` lies wholly inside `buf`; anything later may continue in the next chunk.
+      const limit = last ? buf.length : Math.max(0, buf.length - keep);
+      let at = 0;
+      for (;;) {
+        let start = -1, length = 0;
+        for (const needle of needles) {
+          const found = buf.indexOf(needle, at);
+          if (found >= 0 && (start < 0 || found < start)) { start = found; length = needle.length; }
+        }
+        if (start < 0 || start >= limit) break;
+        writeSync(output, buf.subarray(at, start)); writeSync(output, REDACTED);
+        at = start + length; changed = true;
+      }
+      if (last) { writeSync(output, buf.subarray(at)); break; }
+      const emit = Math.max(at, limit);
+      writeSync(output, buf.subarray(at, emit));
+      carry = Buffer.from(buf.subarray(emit));
+    }
+  } finally { closeSync(input); closeSync(output); }
+  if (changed) renameSync(temp, file); else rmSync(temp, { force: true });
+  return changed;
 }

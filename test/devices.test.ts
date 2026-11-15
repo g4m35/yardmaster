@@ -11,10 +11,11 @@ import { AppleSimulatorOptionsSchema, runAppleSimulator, type DeviceRunContext }
 import { artifactSha256, deviceEvidence, type DeviceEvidence } from '../src/device-evidence.ts';
 import { acquireLease, listLeases, reapLeases } from '../src/leases.ts';
 import { chooseTarget, cleanupOwnedSimulators, compareVersions, hostCleanup } from '../src/simctl.ts';
-import { memoryHold, type MemorySample } from '../src/machine-pressure.ts';
+import { linuxAvailableMb, meminfoAvailableMb, memoryHold, type MemorySample } from '../src/machine-pressure.ts';
 import { builtinProviders } from '../src/provider-builtins.ts';
 import { planService } from '../src/providers.ts';
 import { ServicesConfigSchema } from '../src/provider-contract.ts';
+import { DeviceEvidenceSchema, scrubFile } from '../src/device-evidence.ts';
 import { verifyArtifact } from '../src/verification.ts';
 import { WorkerLoop } from '../src/worker.ts';
 import { runAttempt, Semaphore } from '../src/runner.ts';
@@ -227,19 +228,28 @@ test('a crashed holder is detected by PID and start identity; reaping cleans onl
   } finally { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); }
 });
 
-test('an expired lease is reclaimed: its holder loses it and the reaper removes only the simulator it recorded', async () => {
+test('an expired lease of a live holder keeps its slot; only a dead holder identity frees it and its simulator', async () => {
   const s = appRepo(), m = fakeMachine();
   const cleanup = hostCleanup({ PATH: m.PATH });
-  const outcome = await acquireLease({ pool: 'simulator', capacity: 1, holder: 'test', ttlMs: 60_000, waitMs: 0, cleanup });
-  assert(outcome.lease);
+  const build = await acquireLease({ pool: 'build', capacity: 1, holder: 'stalled-build', ttlMs: 60_000, waitMs: 0, cleanup });
+  const sim = await acquireLease({ pool: 'simulator', capacity: 1, holder: 'stalled-test', ttlMs: 60_000, waitMs: 0, cleanup });
+  assert(build.lease && sim.lease);
   const name = 'ym-expired-0001';
-  outcome.lease.own({ kind: 'simulator', name, udid: null });
-  // Simulate a holder that created its simulator and then hung without renewing.
+  sim.lease.own({ kind: 'simulator', name, udid: null });
   sh(s.repo, join(m.bin, 'xcrun'), ['simctl', 'create', name, 'com.apple.CoreSimulator.SimDeviceType.iPhone-17', 'com.apple.CoreSimulator.SimRuntime.iOS-26-5']);
-  const db = openDb(); try { db.prepare('UPDATE resource_leases SET expires_at = ?').run(Date.now() - 1000); } finally { db.close(); }
+  // A stalled or suspended controller stops renewing, but its process (and its xcodebuild) is still alive.
+  const expire = () => { const db = openDb(); try { db.prepare('UPDATE resource_leases SET expires_at = ?').run(Date.now() - 1000); } finally { db.close(); } };
+  expire();
+  assert.deepEqual(await reapLeases(cleanup), [], 'expiry alone is not proof of death');
+  assert.equal(build.lease.holds(), true); assert.equal(sim.lease.holds(), true);
+  const contender = await acquireLease({ pool: 'build', capacity: 1, holder: 'next', ttlMs: 60_000, waitMs: 100, pollMs: 20, cleanup });
+  assert.equal(contender.lease, null, 'nobody else gets the build slot while its holder lives');
+  assert.equal(m.state().devices.length, 2, 'the live holder keeps its simulator');
+  // Once the recorded holder identity is dead, the slot is reclaimed and only its recorded simulator removed.
+  const dead = spawn(process.execPath, ['-e', '']); await new Promise(resolve => dead.once('exit', resolve));
+  const db = openDb(); try { db.prepare('UPDATE resource_leases SET pid = ?, proc_started = NULL').run(dead.pid!); } finally { db.close(); }
   const results = await reapLeases(cleanup);
-  assert.deepEqual(results.map(r => r.outcome), ['released']);
-  assert.equal(outcome.lease.holds(), false);
+  assert.deepEqual(results.map(r => `${r.pool}:${r.outcome}`).sort(), ['build:released', 'simulator:released']);
   assert.deepEqual(m.state().devices.map(d => d.udid), [FOREIGN.udid]);
   assertForeignUntouched(m);
 });
@@ -481,4 +491,85 @@ test('credentials echoed into test reports and app logs are scrubbed before they
   assert.equal(readFileSync(report.path, 'utf8'), '<case token="[redacted]"/>');
   assert.equal(artifactSha256(report.path), report.sha256, 'the recorded hash is of the scrubbed file');
   for (const f of run.result.data.evidence.files.filter(f => f.kind === 'log')) assert.equal(artifactSha256(f.path), f.sha256, `${f.path} hash matches the kept file`);
+});
+
+function claimed(sha: string, over: { requirement?: string; status?: Record<string, string>; device?: Record<string, unknown> | null }) {
+  return { kind: 'yardmaster.device-evidence', version: 1, requestId: null, projectId: null, taskId: null, commit: sha, requirement: over.requirement ?? 'simulator',
+    status: { code: 'not-run', simulator: 'passed', physical: 'untested', overall: 'passed', ...over.status },
+    artifact: null, environment: { machineId: 'm', os: 'darwin', arch: 'arm64', xcode: null },
+    device: over.device === undefined ? { kind: 'simulator', name: 'n', model: 'iPhone 17', modelIdentifier: null, runtime: 'iOS 26.5', runtimeIdentifier: 'rt', udid: 'U', createdByYardmaster: false } : over.device,
+    checks: [], files: [], lease: null, startedAt: '', completedAt: '', summary: 'provider says ok' };
+}
+function deviceProvider(payload: unknown, input: unknown) {
+  const script = `let s='';process.stdin.on('data',c=>s+=c).on('end',()=>console.log(JSON.stringify(${JSON.stringify(payload)})))`;
+  return ServicesConfigSchema.parse({ local: { 'device.test': { service: 'device', command: [process.execPath, '-e', script], protocol: 'json', locality: 'local', cost: 'free' } },
+    verify: [{ capability: 'device.test', input }] });
+}
+
+test('acceptance enforces the requested device level and device consistency, not the provider\'s own claim', async () => {
+  const s = appRepo();
+  const { runService } = await import('../src/providers.ts');
+  const { evidenceProblem, requiredDeviceLevel } = await import('../src/device-evidence.ts');
+  const physicalDevice = { kind: 'physical', name: 'Phone', model: 'iPhone 16', modelIdentifier: 'iPhone17,3', runtime: 'iOS 26.5', runtimeIdentifier: 'rt', udid: 'D', createdByYardmaster: false };
+  // The level comes from the check input, then the project's provider options; the provider's report never sets it.
+  assert.equal(requiredDeviceLevel({ requires: 'physical' }, { requires: 'simulator' }), 'physical');
+  assert.equal(requiredDeviceLevel({}, { requires: 'physical' }), 'physical');
+  assert.equal(requiredDeviceLevel({}, {}), null);
+  const parse = (o: unknown) => DeviceEvidenceSchema.parse(o);
+  // Asked for physical; a provider answering with simulator evidence for a simulator requirement does not pass.
+  assert.match(evidenceProblem(parse(claimed(s.sha, {})), s.sha, 'physical')!, /answers a simulator requirement, but this check requires physical/);
+  // Simulator evidence claiming a physical pass is inconsistent.
+  assert.match(evidenceProblem(parse(claimed(s.sha, { requirement: 'physical', status: { physical: 'passed' } })), s.sha, 'physical')!, /physical-device pass on a simulator/);
+  // A real physical pass satisfies physical, and also a simulator-level requirement.
+  const real = parse(claimed(s.sha, { requirement: 'physical', status: { simulator: 'not-run', physical: 'passed' }, device: physicalDevice }));
+  assert.equal(evidenceProblem(real, s.sha, 'physical'), null);
+  assert.equal(evidenceProblem(real, s.sha, 'simulator'), null);
+  // End to end through acceptance, with a provider plugin that reports whatever it likes.
+  for (const [payload, input, expect] of [
+    [{ status: 'passed', summary: 'ok', data: { evidence: claimed(s.sha, {}) } }, { requires: 'physical' }, /requires physical/],
+    [{ status: 'passed', summary: 'ok', data: { evidence: claimed(s.sha, { requirement: 'physical', status: { physical: 'passed' } }) } }, { requires: 'physical' }, /physical-device pass on a simulator/],
+    [{ status: 'passed', summary: 'ok' }, { requires: 'physical' }, /needs device evidence/],
+    [{ status: 'passed', summary: 'ok', data: { evidence: claimed(s.sha, { requirement: 'physical', status: { simulator: 'not-run', physical: 'passed' }, device: physicalDevice }) } }, { requires: 'physical' }, null],
+  ] as const) {
+    const services = deviceProvider(payload, input);
+    const run = await runService('device.test', input, services, [], { cwd: s.repo, context: { sha: s.sha } });
+    assert.equal(run.result.status, 'passed', 'the provider itself reports a pass every time');
+    const gate = await verifyArtifact(s.repo, [], 1, undefined, undefined, { services });
+    if (expect) { assert.equal(gate.ok, false, JSON.stringify(payload)); assert.equal(gate.serviceStatus, 'unknown'); assert.match(gate.output, expect); }
+    else assert.equal(gate.ok, true, gate.output);
+  }
+});
+
+test('Linux admission counts reclaimable cache through MemAvailable, not only free pages', () => {
+  // A healthy machine whose RAM is mostly page cache: about 403 MB "free" but 11.3 GB available.
+  const available = linuxAvailableMb(join(import.meta.dirname, 'fixtures/meminfo-cache-heavy.txt'))!;
+  assert.equal(Math.round(available), 11596);
+  assert.equal(memoryHold({ availableMb: available, pressure: null, sampledAt: 0 }, { minFreeMemMb: 1024, holdAtPressure: 'critical' }), null);
+  assert.notEqual(memoryHold({ availableMb: 412880 / 1024, pressure: null, sampledAt: 0 }, { minFreeMemMb: 1024, holdAtPressure: 'critical' }), null, 'free pages alone would hold all work');
+  assert.equal(meminfoAvailableMb('MemTotal: 1 kB\nMemFree: 1 kB\n'), null, 'old kernels without MemAvailable fall back to freemem');
+  assert.equal(linuxAvailableMb(join(import.meta.dirname, 'fixtures/no-such-meminfo')), null);
+});
+
+test('scrubbing streams any file size and catches secrets split across chunk boundaries', async () => {
+  const dir = tempDir('ym-scrub-'), file = join(dir, 'report.bin'), secret = 'chunk-split-secret', other = 'short-key';
+  const body = `head ${secret} middle ${other}${secret}tail ${secret}`;
+  for (const chunk of [1, 3, 5, 7, 16, 1 << 20]) {
+    writeFileSync(file, body);
+    assert.equal(scrubFile(file, [other, secret], chunk), true);
+    assert.equal(readFileSync(file, 'utf8'), 'head [redacted] middle [redacted][redacted]tail [redacted]', `chunk ${chunk}`);
+  }
+  writeFileSync(file, 'nothing to hide');
+  assert.equal(scrubFile(file, [secret], 4), false);
+  assert.equal(readFileSync(file, 'utf8'), 'nothing to hide');
+  // Through the device run: a 9 MiB report with the credential right at the 1 MiB read boundary is kept only scrubbed.
+  const s = appRepo(), m = fakeMachine(), big = 'large-report-credential-0000';
+  const write = `const fs=require('node:fs');const b=Buffer.alloc(9*1024*1024,'x');b.write(process.env.LAB_TOKEN,1024*1024-5);b.write(process.env.LAB_TOKEN,b.length-40);fs.writeFileSync(process.env.YARDMASTER_ARTIFACT_DIR+'/huge.log',b)`;
+  const run = await runAppleSimulator(options({ requiredEnv: ['LAB_TOKEN'], tests: [{ name: 'report', runner: 'command', command: [process.execPath, '-e', write] }] }),
+    context(s, m, { env: { PATH: m.PATH, HOME: s.home, LAB_TOKEN: big } }));
+  assert.equal(run.result.status, 'passed', run.result.summary);
+  const kept = run.result.data.evidence.files.find(f => f.path.endsWith('huge.log'))!;
+  const content = readFileSync(kept.path);
+  assert.equal(content.includes(big), false, 'no unsanitized file is kept as evidence');
+  assert.equal(content.indexOf('[redacted]'), 1024 * 1024 - 5);
+  assert.equal(artifactSha256(kept.path), kept.sha256);
 });

@@ -220,7 +220,7 @@ export const ConfigSchema = z.object({
       /** Heavy device work waits at or above this pressure level: stricter than ordinary task admission. */
       holdAtPressure: z.enum(['warn', 'critical', 'off']).default('warn'),
       minFreeMemMb: z.number().min(0).default(2048),
-      /** A holder renews its lease well within this; a crashed holder's slot frees after it at the latest. */
+      /** Holders renew within this. A holder that stops renewing is shown as stale but keeps its slot while its process lives. */
       leaseMinutes: z.number().min(1).max(240).default(5),
       /** How long a request waits in the queue for a slot or for memory before reporting unknown. */
       waitMinutes: z.number().min(0).max(24 * 60).default(30),

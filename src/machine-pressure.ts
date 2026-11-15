@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { freemem, platform } from 'node:os';
 import { run } from './proc.ts';
 
@@ -29,11 +30,21 @@ async function darwinPressure(): Promise<PressureLevel | null> {
   return r && r.code === 0 ? LEVELS[r.stdout.trim()] ?? null : null;
 }
 
+/** MemAvailable counts reclaimable page cache; os.freemem() does not, and would hold work on a healthy machine. */
+export function meminfoAvailableMb(text: string): number | null {
+  const kb = Number(text.match(/^MemAvailable:\s+(\d+)\s*kB$/m)?.[1] ?? NaN);
+  return Number.isFinite(kb) ? kb / 1024 : null;
+}
+
+export function linuxAvailableMb(file = '/proc/meminfo'): number | null {
+  try { return meminfoAvailableMb(readFileSync(file, 'utf8')); } catch { return null; }
+}
+
 /** Cached briefly: admission checks run on every scheduling tick. */
 export const sampleMemory: MemorySampler = async () => {
   if (cache && Date.now() - cache.sampledAt < 10_000) return cache;
-  const darwin = platform() === 'darwin';
-  const [available, pressure] = darwin ? await Promise.all([vmStatMb(), darwinPressure()]) : [null, null];
+  const os = platform();
+  const [available, pressure] = os === 'darwin' ? await Promise.all([vmStatMb(), darwinPressure()]) : [os === 'linux' ? linuxAvailableMb() : null, null];
   cache = { availableMb: available ?? freemem() / 1048576, pressure, sampledAt: Date.now() };
   return cache;
 };

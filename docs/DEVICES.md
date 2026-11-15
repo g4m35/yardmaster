@@ -169,6 +169,13 @@ slot within `waitMinutes`, or an untested physical requirement) stops for you
 without an automatic retry. Evidence that names a different commit than the one
 being accepted never passes, whichever provider produced it.
 
+The required level comes from the check's input (`{"requires": "physical"}`) or
+the project's provider options, never from what a provider reports. A pass must
+match its device: a physical pass needs evidence naming a physical device with
+`physical: passed`, and a physical requirement with no evidence at all is
+unknown. Saved logs, reports and screenshots are scrubbed of declared
+`requiredEnv` values before they are hashed, whatever their size.
+
 Where to read it:
 
 - `ym devices evidence [--task t-...] [--json]` on the machine that ran it.
@@ -203,9 +210,10 @@ project's `yardmaster.json` can lower them for its own requests, never raise the
   OS can actually hand out. Swap is not a signal: it records the past.
 - `resources.holdAtPressure` (default `critical`) and the existing load and memory
   limits now apply before the first task as well as later ones.
-- Holders renew their lease. A lease is freed when its holder's process is gone
-  (PID plus process start time, so a reused PID does not count) or it stopped
-  renewing for `leaseMinutes`. Freeing first deletes the simulators that lease
+- Holders renew their lease. A lease is freed only when its holder's process is
+  gone (PID plus process start time, so a reused PID does not count). A live
+  holder that stopped renewing keeps its slot: it may still be building or
+  testing, and `ym devices status` marks it stale. Freeing first deletes the simulators that lease
   recorded, after checking each still has the unique `ym-...` name it was given.
   If that cleanup fails, the slot stays occupied and visible rather than being
   handed out again.
@@ -217,7 +225,7 @@ project's `yardmaster.json` can lower them for its own requests, never raise the
 
 ```sh
 ym devices status            # limits, memory admission, held and queued leases
-ym devices reap              # free leases of crashed or expired holders now (the hub also does this)
+ym devices reap              # free leases whose holder process is gone (the hub also does this)
 ym devices release <id> --note "deleted the leftover simulator by hand"   # after a failed cleanup
 ym devices lease simulator -- maestro --device <udid> test flow.yaml       # any tool, any project
 ```

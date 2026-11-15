@@ -69,7 +69,7 @@ export type ResourceCleanup = (owned: OwnedResource[]) => Promise<{ ok: boolean;
 export interface ReapResult { id: string; pool: LeasePool; holder: string; outcome: 'expired-waiter' | 'released' | 'cleanup_failed'; detail: string }
 
 /**
- * Frees leases whose holder crashed or stopped renewing. Their recorded resources are cleaned first; a failed
+ * Frees leases whose holder process is gone. Their recorded resources are cleaned first; a failed
  * cleanup keeps the slot occupied and visible (`cleanup_failed`) rather than letting new work double-book it.
  */
 export async function reapLeases(cleanup: ResourceCleanup, now = Date.now()): Promise<ReapResult[]> {
@@ -80,14 +80,18 @@ export async function reapLeases(cleanup: ResourceCleanup, now = Date.now()): Pr
   const identity = (l: Lease) => `${l.state}:${l.pid}:${l.procStarted}`;
   for (const lease of candidates) if (!(await holderAlive(lease.pid, lease.procStarted))) crashed.set(lease.id, identity(lease));
   const results: ReapResult[] = [];
-  // Recheck inside the transaction: a live holder may have renewed, or another reaper claimed it, since it was read.
-  const claimed = withDb(db => tx(db, () => listLeases(db).filter(l => l.host === machineId() && (crashed.get(l.id) === identity(l) || l.expiresAt < now)).flatMap(lease => {
+  // Expiry alone never frees capacity a live process holds: a stalled holder may still be building or testing.
+  // Only a dead holder's slot is reclaimed. A queued waiter holds nothing and may expire; a live holder's
+  // failed cleanup is retried after its expiry because that holder already gave the slot up.
+  const reapable = (l: Lease) => crashed.get(l.id) === identity(l) || (l.expiresAt < now && (l.state === 'waiting' || l.state === 'cleanup_failed'));
+  // Recheck inside the transaction: a holder may have renewed, or another reaper claimed it, since it was read.
+  const claimed = withDb(db => tx(db, () => listLeases(db).filter(l => l.host === machineId() && reapable(l)).flatMap(lease => {
     if (lease.state === 'waiting') {
       db.prepare("DELETE FROM resource_leases WHERE id = ? AND state = 'waiting'").run(lease.id);
       results.push({ id: lease.id, pool: lease.pool, holder: lease.holder, outcome: 'expired-waiter', detail: 'queued request stopped waiting' });
       return [];
     }
-    // Claim before cleaning so two reapers never clean the same resources; a crashed reaper's claim expires too.
+    // Claim before cleaning so two reapers never clean the same resources; a crashed reaper is detected like any holder.
     db.prepare("UPDATE resource_leases SET state = 'reaping', pid = ?, proc_started = ?, expires_at = ? WHERE id = ?")
       .run(me.pid, me.startedAt, now + 5 * 60_000, lease.id);
     return [lease];
@@ -130,7 +134,7 @@ export interface LeaseHandle {
   readonly id: string;
   readonly queuedAt: number;
   readonly acquiredAt: number;
-  /** Aborts when this process no longer holds the lease (expired and reaped). Owned resources then belong to the reaper. */
+  /** Aborts if this lease is reclaimed from this process (its identity was judged dead). Owned resources then belong to the reaper. */
   readonly lost: AbortSignal;
   holds(): boolean;
   /** Record a resource before creating it. */

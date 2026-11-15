@@ -992,7 +992,8 @@ async function cmdDevices(a: Args) {
     for (const lease of report.leases) {
       const where = [lease.projectId, lease.taskId].filter(Boolean).join(' ');
       const owned = lease.owned.map(o => `${o.name}${o.udid ? ` ${o.udid}` : ''}`).join(', ');
-      console.log(`${lease.id} ${lease.pool} ${lease.state}${lease.position ? ` #${lease.position}` : ''} ${lease.holder}${where ? ` (${where})` : ''} pid ${lease.pid}${owned ? ` owns ${owned}` : ''}${lease.note ? ` - ${lease.note}` : ''}`);
+      const stale = lease.state === 'held' && lease.expiresAt < Date.now() ? ' stale (not renewing; kept until its holder process exits)' : '';
+      console.log(`${lease.id} ${lease.pool} ${lease.state}${stale}${lease.position ? ` #${lease.position}` : ''} ${lease.holder}${where ? ` (${where})` : ''} pid ${lease.pid}${owned ? ` owns ${owned}` : ''}${lease.note ? ` - ${lease.note}` : ''}`);
     }
     return;
   }
