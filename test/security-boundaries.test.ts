@@ -298,12 +298,12 @@ test('agent and check config pass lists reach real subprocesses independently', 
 });
 
 type BundleSender = { sendBaseBundle(res: ServerResponse, project: string, have: string | null, guard?: () => void, workerId?: string): Promise<void> };
-async function bundleFixture(bytes = 2 * 1024 * 1024) {
+async function bundleFixture(bytes = 2 * 1024 * 1024, hubOpts: { bundleIdleMs?: number } = {}) {
   const box = sandbox();
   writeFileSync(join(box.repo, 'large.bin'), randomBytes(bytes));
   sh(box.repo, 'git', ['add', '.']); sh(box.repo, 'git', ['commit', '-qm', 'bundle fixture']);
   sh(box.repo, 'git', ['branch', 'yardmaster/integration']);
-  const hub = new Hub({ db: openDb(join(box.home, 'bundles.db')), token: 'fixture', machineId: 'm-hub' });
+  const hub = new Hub({ db: openDb(join(box.home, 'bundles.db')), token: 'fixture', machineId: 'm-hub', ...hubOpts });
   const project = await hub.coord.registerProject(box.repo);
   hub.integrator.head = async () => sh(box.repo, 'git', ['rev-parse', 'HEAD']);
   const raw = hub as unknown as BundleSender;
@@ -342,6 +342,37 @@ test('base-bundle authorization failures and aborted streams always remove tempo
     assert.equal(error, true); assert.equal(failed, true);
     assert.deepEqual(readdirSync(paths.tmp()).filter(n => n.endsWith('.bundle')), []);
   } finally { await f.done(); server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())); f.hub.coord.db.close(); }
+});
+
+test('a reader that stops reading without closing loses its download slot', async () => {
+  // Bigger than socket buffers, so the transfer really stalls when the client stops reading.
+  const f = await bundleFixture(24 * 1024 * 1024, { bundleIdleMs: 300 });
+  let settled = false;
+  const server = createServer((_req, res) => {
+    void f.sender.sendBaseBundle(res, f.project.id, null, undefined, 'm-worker').catch(() => { res.destroy(); }).finally(() => { settled = true; });
+  }).listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address(); assert.ok(address && typeof address !== 'string');
+  const stalled = get(`http://127.0.0.1:${address.port}`, res => res.pause());
+  stalled.on('error', () => undefined);
+  try {
+    const deadline = Date.now() + 15000;
+    while (!settled && Date.now() < deadline) await new Promise(r => setTimeout(r, 25));
+    assert.equal(settled, true, 'the hub ended the stalled transfer');
+    const counters = f.hub as unknown as { baseBundles: number; workerBaseBundles: Map<string, number> };
+    assert.equal(counters.baseBundles, 0); assert.equal(counters.workerBaseBundles.size, 0);
+    assert.deepEqual(readdirSync(paths.tmp()).filter(n => n.endsWith('.bundle')), []);
+  } finally { stalled.destroy(); await f.done(); server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())); f.hub.coord.db.close(); }
+});
+
+test('lock checks decide mismatched literal paths without running the full matcher', () => {
+  const tail = 'x'.repeat(990);
+  const started = performance.now();
+  // A worker's long touched paths against long patterns that differ early: this used to take seconds.
+  for (let i = 0; i < 40_000; i++) assert.equal(matches(`a${i % 7}/${tail}`, `b${i % 5}/*/${tail}`), false);
+  assert.ok(performance.now() - started < 2000, `took ${Math.round(performance.now() - started)} ms`);
+  assert.equal(matches('src/app/x.ts', 'src/**'), true); assert.equal(matches('docs/a.md', 'src/**'), false);
+  assert.equal(matches('src/a.ts', '{src,lib}/*.ts'), true); assert.equal(matches('lib/a.ts', '**/a.ts'), true);
 });
 
 test('base-bundle creation failure releases its temporary file and concurrency slot', async () => {

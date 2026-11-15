@@ -42,7 +42,14 @@ export interface HubOptions {
   includeMock?: boolean;
   tickMs?: number;
   quiet?: boolean;
+  /** Base-bundle stream limits (tests shorten them). */
+  bundleIdleMs?: number;
+  bundleDeadlineMs?: number;
 }
+
+/** Server-side limits for streaming a base bundle to a worker. */
+export const BUNDLE_IDLE_MS = 60_000;
+export const BUNDLE_DEADLINE_MS = 10 * 60_000;
 
 export class Hub {
   readonly coord: Coordinator;
@@ -487,7 +494,12 @@ export class Hub {
       guard();
       if (res.destroyed) throw new Error('Base-bundle download disconnected.');
       res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': statSync(bundleFile).size, 'x-yardmaster-branch': branch });
-      await pipeline(createReadStream(bundleFile), res);
+      // A client that stops reading without closing would hold an admission slot forever: end stalled transfers here.
+      // The deadline matches the client's ten-minute transfer limit; the idle limit catches a reader that went quiet.
+      const stalled = () => res.destroy(new Error('Base-bundle download stalled.'));
+      res.setTimeout(this.opts.bundleIdleMs ?? BUNDLE_IDLE_MS, stalled);
+      const deadline = setTimeout(stalled, this.opts.bundleDeadlineMs ?? BUNDLE_DEADLINE_MS);
+      try { await pipeline(createReadStream(bundleFile), res); } finally { clearTimeout(deadline); }
     } finally {
       try { if (file) rmSync(file, { force: true }); }
       finally {

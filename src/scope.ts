@@ -75,7 +75,11 @@ export function globToRegExp(glob: string): { test(path: string): boolean } {
 }
 
 export function matches(path: string, pattern: string): boolean {
-  return globToRegExp(pattern).test(normalizePattern(path));
+  const subject = normalizePattern(path);
+  // Most pairs differ in their literal start; decide those without building the matcher. Patterns are normalized
+  // (folders become folder/**), so a pattern's literal start must also start every path it can match.
+  if (validatePattern(pattern) && !subject.startsWith(staticPrefix(pattern))) return false;
+  return globToRegExp(pattern).test(subject);
 }
 
 function staticPrefix(pattern: string): string {

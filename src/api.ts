@@ -424,7 +424,8 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       (p) => coord.claimLocks(p.projectId, p.holder, p.patterns, p.reason ?? null, p.ttlMinutes),
     ),
     'lock.release': method(z.object({ projectId: Id, holder: Id, patterns: z.array(ScopePattern).max(200).optional() }), (p) => coord.releaseLocks(p.projectId, p.holder, p.patterns)),
-    'lock.check': method(z.object({ projectId: Id, paths: z.array(ScopePattern).min(1).max(200) }), (p) => coord.whoHas(p.projectId, p.paths)),
+    // Each path is compared with every reservation and active scope on the shared event loop; keep a request small.
+    'lock.check': method(z.object({ projectId: Id, paths: z.array(ScopePattern).min(1).max(50) }), (p) => coord.whoHas(p.projectId, p.paths)),
 
     'session.register': method(z.object({ name: Id, agent: z.string().nullish(), projectId: z.string().nullish(), cwd: z.string().nullish(), machineId: z.string().nullish() }), (p) =>
       coord.registerSession(p.name, p.agent ?? null, p.projectId ?? null, p.cwd ?? null, p.machineId ?? null),
