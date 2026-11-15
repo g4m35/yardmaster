@@ -16,18 +16,66 @@ const execFileP = promisify(execFile);
  */
 const LEAKY_GIT_VARS = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_COMMON_DIR', 'GIT_PREFIX', 'GIT_NAMESPACE', 'GIT_ALTERNATE_OBJECT_DIRECTORIES'];
 
-export function cleanEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env };
+const AGENT_AUTH: Record<string, readonly string[]> = {
+  claude: ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN'],
+  codex: ['OPENAI_API_KEY', 'OPENAI_ORG_ID', 'OPENAI_PROJECT_ID', 'AZURE_OPENAI_API_KEY'],
+  cursor: ['CURSOR_API_KEY'],
+  gemini: ['GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GOOGLE_APPLICATION_CREDENTIALS'],
+  opencode: ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY'],
+};
+
+/** Names that look like credentials by prefix but only select a region, profile or endpoint. */
+const NOT_SECRET = new Set(['AWS_REGION', 'AWS_DEFAULT_REGION', 'AWS_PROFILE', 'AWS_SDK_LOAD_CONFIG', 'AWS_CONFIG_FILE',
+  'AZURE_OPENAI_ENDPOINT', 'AZURE_OPENAI_API_VERSION']);
+
+/**
+ * Claude Code can authenticate through a cloud provider instead of an Anthropic key. When the user has switched it
+ * on, that provider's credentials are this agent's own authentication, not unrelated secrets.
+ */
+function cloudAuth(agent: string, name: string, env: NodeJS.ProcessEnv): boolean {
+  if (agent !== 'claude') return false;
+  if (env.CLAUDE_CODE_USE_BEDROCK && /^AWS_/.test(name)) return true;
+  return !!env.CLAUDE_CODE_USE_VERTEX && ['GOOGLE_APPLICATION_CREDENTIALS', 'ANTHROPIC_VERTEX_PROJECT_ID', 'CLOUD_ML_REGION'].includes(name);
+}
+
+function secretEnv(name: string, value: string): boolean {
+  // The name says region/profile/endpoint, but the value can still carry a password (https://user:pass@gateway).
+  if (NOT_SECRET.has(name)) return secretUrl(value);
+  return /(?:^|_)(?:TOKEN|SECRET|KEY)(?:_|$)|PASSWORD|CREDENTIAL|^(?:AWS|AZURE)_|^(?:GH|GITHUB|NPM)_TOKEN$/i.test(name) ||
+    secretUrl(value);
+}
+
+/**
+ * A URL carries a secret when it has a password (user:pass@host), or when the "user" is really a token
+ * (https://ghp_...@github.com). A short plain user name (git@, deploy@) or an ssh URL names an account, not a secret.
+ */
+function secretUrl(value: string): boolean {
+  for (const m of value.matchAll(/([a-z][a-z0-9+.-]*):\/\/([^/\s@]*)@/gi)) {
+    const [, scheme, userinfo] = m as unknown as [string, string, string];
+    if (userinfo.includes(':')) return true;
+    if (/^(?:ssh|git\+ssh|ssh\+git)$/i.test(scheme)) continue;
+    if (!/^[a-z][a-z0-9_-]{0,31}$/.test(userinfo) || /^(?:gh[pousr]|github_pat|glpat|xox[a-z])[_-]/i.test(userinfo)) return true;
+    // Long or hex-looking user parts are keys (Datadog, Mailgun style), not account names.
+    if ((userinfo.length >= 20 && /\d/.test(userinfo)) || /^[0-9a-f]{16,}$/i.test(userinfo)) return true;
+  }
+  return false;
+}
+
+export function cleanEnv(extra: NodeJS.ProcessEnv = {}, opts: { agent?: string; pass?: readonly string[] } = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
+  const pass = new Set(opts.pass ?? []);
+  for (const [name, value] of Object.entries(env)) {
+    const auth = opts.agent && (AGENT_AUTH[opts.agent]?.includes(name) || cloudAuth(opts.agent, name, env) ||
+      (opts.agent === 'codex' && name.startsWith('CODEX_')) || (opts.agent === 'opencode' && name.startsWith('OPENCODE_')));
+    if (value !== undefined && (secretEnv(name, value) || name.startsWith('CODEX_')) && !auth && !pass.has(name)) delete env[name];
+  }
   for (const k of LEAKY_GIT_VARS) delete env[k];
-  // Nested Claude Code sessions refuse to start when they think they are inside another session.
   delete env.CLAUDECODE;
   delete env.CLAUDE_CODE_ENTRYPOINT;
-  // The hub's admin token never reaches agents or check commands. The hub address goes too: a child that finds a hub
-  // address but no token would call that hub with this machine's own token, so children find the hub (and its token)
-  // through the owner-only files in the Yardmaster home instead.
+  // A configured pass list cannot delegate the hub's administrator identity to children.
   delete env.YARDMASTER_TOKEN;
   delete env.YARDMASTER_HUB;
-  return { ...env, ...extra };
+  return env;
 }
 
 export interface RunResult {

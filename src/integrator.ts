@@ -9,7 +9,7 @@ import { rememberChecked } from './ci/verified.ts';
 import { Semaphore, verifyCommands } from './runner.ts';
 import { verifyArtifact, hasVerification, serviceVerificationHooks } from './verification.ts';
 import { evidenceOf, recordDeviceEvidence } from './device-evidence.ts';
-import { runShell, terminateRecordedProcess, withProcessScope, UtilityProcessError, type OwnedRunOptions } from './proc.ts';
+import { cleanEnv, runShell, terminateRecordedProcess, withProcessScope, UtilityProcessError, type OwnedRunOptions } from './proc.ts';
 import { integrationUtilityKey, utilityHooks, recoverUtilities, forgetStoppedUtilities, taskHasPendingUtilities, utilitiesStopped } from './utility-records.ts';
 import { lockHash, refreshDeps, siblingWorktrees } from './warmstart.ts';
 import { clip, errorFingerprint, tail } from './text.ts';
@@ -255,6 +255,7 @@ export class Integrator {
       const config = this.coord.configFor(projectId);
       if (serviceHold(this.coord.db, `integration:${projectId}`)) throw new Error('Resolve the pending provider request after inspecting its remote state before adopting integration.');
       const checked = await this.verifySlots.use(() => verifyArtifact(path, config.verify, config.verifyTimeoutMinutes, this.lifetime.signal, this.processGuard(project, 'verify', false), {
+        envPass: config.env.checks.pass,
         ...this.serviceHooks(project, config, this.coord.listTasks(projectId, ['merging'])),
         beforeSpawn: () => { this.processGuard(project, 'verify'); }, onExit: reaped => this.processFinished(project, reaped),
       }), this.lifetime.signal);
@@ -283,7 +284,7 @@ export class Integrator {
       if (!r) return;
       this.coord.setMeta(key, lockHash(path));
       for (const command of config.worktree.setup) {
-        const s = await runShell(command, { cwd: path, timeoutMs: config.verifyTimeoutMinutes * 60_000, signal: this.lifetime.signal, onSpawn: this.processGuard(project, 'setup') });
+        const s = await runShell(command, { cwd: path, env: cleanEnv({ CI: '1' }, { pass: config.env.checks.pass }), timeoutMs: config.verifyTimeoutMinutes * 60_000, signal: this.lifetime.signal, onSpawn: this.processGuard(project, 'setup') });
         this.processFinished(project, s.reaped);
         if (s.code !== 0) this.coord.event(project.id, null, 'warn', 'integration.setup_failed', `Setup \`${command}\` failed in the merge worktree: ${clip(s.stdout.trim().split('\n').slice(-3).join(' '), 200)}`);
       }
@@ -424,6 +425,7 @@ export class Integrator {
       this.coord.event(project.id, task.id, 'info', 'integration.reverify', `Re-checking "${task.title}" combined with work merged since it started`);
       await this.prepareDeps(project, path, config, task.worktree ? [task.worktree] : []);
       const result = await this.verifySlots.use(() => verifyArtifact(path, commands, config.verifyTimeoutMinutes, this.lifetime.signal, this.processGuard(project, 'verify', false), {
+        envPass: config.env.checks.pass,
         ...this.serviceHooks(project, config, [task]),
         beforeSpawn: () => { this.processGuard(project, 'verify'); },
         onExit: reaped => this.processFinished(project, reaped),
@@ -499,6 +501,7 @@ export class Integrator {
     this.coord.event(project.id, null, 'info', 'integration.train', `Checking ${merged.length} finished tasks together in one run: ${merged.map((t) => `"${clip(t.title, 40)}"`).join(', ')}`);
     await this.prepareDeps(project, path, config, merged.flatMap((t) => (t.worktree ? [t.worktree] : [])));
     const result = await this.verifySlots.use(() => verifyArtifact(path, config.verify, config.verifyTimeoutMinutes, this.lifetime.signal, this.processGuard(project, 'verify', false), {
+      envPass: config.env.checks.pass,
       ...this.serviceHooks(project, config, merged),
       beforeSpawn: () => { this.processGuard(project, 'verify'); },
       onExit: reaped => this.processFinished(project, reaped),

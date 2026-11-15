@@ -8,7 +8,7 @@
   ┌──────────────────────────── Hub (one per user, any machine) ─────────────────────────────┐
   │  API (one method table: HTTP, local, MCP and workers all call the same functions)        │
   │  Coordinator  ── SQLite (WAL) ── tasks, deps, locks, runs, events, messages, machines    │
-  │  Scheduler: claimNext()  — deps, file scopes, locks, budgets, agent routing (atomic)     │
+  │  Scheduler: claimNext(): deps, file scopes, locks, budgets, agent routing (atomic)       │
   │  Integrator: merge queue → yardmaster/integration (own worktree), re-verify if base moved│
   │  Janitor: leases, orphan processes, blocked deps, safe cleanup                           │
   │  WorkerLoop (local machine)                                                              │
@@ -33,10 +33,10 @@ queued ──claim──▶ running ──agent exits──▶ verifying ──c
 
 1. **Create.** `task.add` dedupes exact requests against open tasks (ordered instructions, case, scope, dependencies and acceptance options; similar wording is not automatically discarded), validates `after` links, rejects dependency cycles, infers a file scope from paths mentioned in the request, and infers a tier (cheap/standard/strong) from the wording.
 2. **Claim.** `claimNext` runs inside `BEGIN IMMEDIATE`, so any number of processes and machines can call it. A task is skipped if a dependency isn't done, its retry backoff hasn't passed, it is paused behind another task (`wait_for`), its scope overlaps an active task's declared scope *or files that task has actually touched*, a reservation (lock) overlaps it, or today's budget is spent. The router then picks the first installed agent with a free slot from the tier's preference list, skipping agents that keep failing on this project.
-3. **Run.** `runAttempt` creates `~/.yardmaster/worktrees/<repo>/<task>` on branch `yardmaster/<task>` from the integration head, builds a short brief (task, owned files, files others are editing, summaries of finished prerequisites, notes, previous failure), and spawns the agent CLI in its own process group with leaky git variables removed. Output is normalized by the adapter into events: tool calls, results, text, usage, final result.
+3. **Run.** `runAttempt` creates `~/.yardmaster/worktrees/<repo>-<id>/<task>` (or under `worktreeRoot`) on branch `yardmaster/<task>` from the integration head, builds a short brief (task, owned files, files others are editing, summaries of finished prerequisites, notes, previous failure), and spawns the agent CLI in its own process group with leaky git variables removed. Output is normalized by the adapter into events: tool calls, results, text, usage, final result.
 4. **Watch.** Every event goes through the watchdog and budget meter; a timer checks for silence, questions, runtime limits, cancel/stop requests, and polls the worktree diff to catch two agents editing the same file (the later one is paused and resumes after the first merges).
 5. **Collect.** Commit (repo hooks still run), compute the real diff, reject "done but nothing changed", conflict markers, and (in `careful`) out-of-scope edits.
-6. **Verify.** Run the repo's `verify` commands with a separate concurrency limit.
+6. **Verify.** Run the repo's `verify` commands (plus any the task adds) with a separate concurrency limit.
 7. **Integrate.** The integrator merges ready branches one at a time into `yardmaster/integration` inside its own worktree, re-runs checks only if the integration head moved since the task started, and sends conflicts back to the agent (the newer work is merged into its worktree first). `ym land` fast-forwards your branch when you want the results.
 8. **Tidy.** Merged worktrees and branches are removed immediately; `ym clean` handles the rest with a dry-run plan by default.
 
@@ -70,7 +70,7 @@ queued ──claim──▶ running ──agent exits──▶ verifying ──c
 - **Scopes are conservative.** A false overlap only costs parallelism; a missed one costs a merge conflict and tokens.
 - **Leases, not locks forever.** Session reservations expire. Expired task leases detect missing owners; uncertain process exit retains a recovery hold until identity-checked exit or audited owner confirmation.
 - **Plain-language state.** Every status, wait reason, and failure is written for a person who doesn't read stack traces.
-- **Zero native dependencies.** Node ≥ 22.16 (`node:sqlite`), git, and whatever agents you already have. Runtime deps: `zod` and the official MCP server SDK.
+- **Zero native dependencies.** Node ≥ 22.16 (`node:sqlite`), git, and whatever agents you already have. Runtime deps: `zod`, `yaml` and the official MCP server SDK.
 
 ## Safety rules for cleanup
 
@@ -84,8 +84,8 @@ Everything else (user worktrees, unknown branches, dirty or unmerged work, locke
 ## Extending
 
 - **Adapters** (`src/adapters/`): `build(ctx) → { command, args, stdin }` and `parse(line) → events`. Built in: Claude Code, Codex, OpenCode, Cursor Agent, Gemini CLI, any plain-text CLI via `agents.<name>.command`, and a mock for tests.
-- **Plugins** (`~/.yardmaster/plugins`): adapters and notifiers in plain ESM. `ym plugin new <name> --describe "..." --with claude` has an agent write one and then contract-tests it.
-- **MCP tools** (`src/mcp.ts`): `yard_status`, `yard_add_tasks`, `yard_wait`, `yard_task`, `yard_claim_files`, `yard_release_files`, `yard_who`, `yard_take_task`, `yard_finish_task`, `yard_send`, `yard_inbox`, `yard_control`. Short text replies to keep agents' context small.
+- **Plugins** (`~/.yardmaster/plugins`): adapters, notifiers and service providers in plain ESM. `ym plugin new <name> --describe "..." --with claude` has an agent write one and then contract-tests it.
+- **MCP tools** (`src/mcp.ts`): `yard_status`, `yard_add_tasks`, `yard_wait`, `yard_task`, `yard_claim_files`, `yard_release_files`, `yard_who`, `yard_take_task`, `yard_finish_task`, `yard_send`, `yard_inbox`, `yard_control`, `yard_learn`. `YARDMASTER_MCP_PROFILE=minimal` exposes one `yard` tool instead. Short text replies keep agents' context small.
 
 ## Process ownership and recovery
 

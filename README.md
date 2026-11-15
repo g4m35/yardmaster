@@ -1,14 +1,18 @@
 # Yardmaster
 
-Run several coding agents at once (Claude Code, Codex, Cursor, OpenCode, Gemini CLI, or anything with a CLI) without them colliding, looping, or leaving a mess. It works from inside the agent you already use, on as many machines as you have, and shows connected work on one dashboard. It is one owner’s private hub, with project-scoped worker credentials.
+Yardmaster runs several coding agents at once (Claude Code, Codex, Cursor, OpenCode, Gemini CLI, or any agent with a CLI) on one repository, without them colliding, looping, or leaving a mess. Each task runs in its own git worktree, has to pass your checks, and lands on an integration branch that you bring into your branch when you choose. The command is `ym`.
+
+It is for developers who already use a coding agent and want to give it parallel work. You drive it from inside your agent or from the terminal, and see everything on one local dashboard. One person runs one private hub; other machines can join it as workers with project-scoped credentials.
+
+**Try it in a few minutes:** [install](#install), then run `ym demo`. It starts a sandbox with a fake agent and spends no tokens. Yardmaster is early software (0.9.3); see [Status](#status) for what is and isn't tested.
 
 - **Stay where you work.** Yardmaster adds a few tools to your agent over MCP. In Claude Code, Codex, Cursor, OpenCode, Gemini CLI, or T3 Code, say *"split this into parallel tasks with yardmaster"* and keep working.
 - **Coordinate file ownership.** Declared overlapping tasks wait; live checks pause conflicting managed work. Native edit hooks respect each session's reservations. Hooks fail open when the hub is unavailable, and unbridged clients are outside this coordination. Your own branch and checkout are preserved.
 - **No runaway agents.** Repeated actions, back-and-forth loops, repeated errors, silence, questions nobody will answer, and budget overruns are caught by plain code (no AI babysitter burning tokens) and stopped with an explanation.
 - **Code work requires configured checks.** Code changes without verification commands wait for your attention. Explicit report-only tasks that change no files can finish without code checks or integration. Requested reviews block acceptance when they fail or remain unresolved by default. The same failure twice stops early instead of using every retry.
-- **Cheaper by default.** Small jobs go to small models, retries escalate only when needed, and per-task and per-day budgets guide admission and reactive stops. CLI-provided caps are passed when supported; missing usage remains unknown.
+- **Cheaper by default.** Small jobs go to small models, retries escalate only when needed, and per-task and per-day budgets decide what may start and stop runs that go over. Claude Code also gets its native spending cap. Missing usage is shown as unknown, not as free.
 - **Cleans up after itself.** Finished worktrees, merged branches, stale reservations and orphaned processes are removed. Anything unmerged or yours is kept and listed.
-- **You stay in charge.** Pause new work (or park running agents with their work saved), redirect a running agent with one sentence, and see "heads up" notes when something is slow, stuck in the queue, or about to blow the budget.
+- **You stay in charge.** Pause new work (or park running agents with their work saved), redirect a running agent with one sentence, and see "heads up" notes when something is slow, stuck in the queue, or about to run past the budget.
 - **Disk-aware.** New worktrees wait when the disk is low or Yardmaster's quota is used. Finished worktrees, old logs, and rebuildable build output (`node_modules`, `dist`, `target`, ...) in kept worktrees are cleaned automatically.
 - **Agents get better here over time.** A second model from a different family reviews risky changes before they merge. Fixed failures, review findings and your redirects become lessons that brief future agents on related files. The router learns which agent and configured model pass checks on this repo, and at what cost.
 - **Smarter scheduling.** Work on the critical path starts first. Tasks editing files that import each other are warned (or kept apart). Several verified tasks merge together with one check run. Hard tasks can be raced by two agents, and the first verified result wins.
@@ -18,41 +22,42 @@ Run several coding agents at once (Claude Code, Codex, Cursor, OpenCode, Gemini 
 
 ## Install
 
-Needs git and at least one coding agent you are signed in to.
+Needs git and at least one coding agent CLI you are signed in to.
 
-**No Node needed** (macOS on Apple Silicon, Linux):
+**Standalone binary, no Node needed** (macOS on Apple Silicon, Linux x64 and arm64):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/g4m35/yardmaster/main/install.sh | sh
 ```
 
-**With Node 22.16+** (everyone else, and Intel Macs):
+It installs `ym` to `~/.local/bin` and checks the download's SHA-256 checksum.
+
+**From GitHub with Node 22.16+** (Intel Macs and other platforms; Windows is not tested):
 
 ```sh
-npm install -g yardmaster                    # once it's on npm (see docs/PUBLISHING.md)
-npm install -g github:g4m35/yardmaster       # straight from GitHub (builds on install)
+npm install -g github:g4m35/yardmaster       # builds on install
 ```
 
-Then try it with a fake agent, spending no tokens: `ym demo`.
+Yardmaster is not on the npm registry yet, so `npm install -g yardmaster` does not work. See [docs/PUBLISHING.md](docs/PUBLISHING.md).
+
+Then try it with a fake agent, spending no tokens: `ym demo`. Check your setup with `ym doctor`.
 
 ## Five-minute start
 
 ```sh
-cd your-project
+cd your-project         # a git repository with at least one commit
 ym setup --dry-run      # preview repo setup; no native config changes
-ym setup --agent codex  # initialize this repo and explicitly connect your chosen client
+ym setup --agent codex  # initialize this repo and connect the client you choose
 ym add "Fix the typo in README.md"
 ym add "Add CSV export to the reports page with tests" --files "src/reports/**"
 ym dashboard            # live view in your browser
 ```
 
-`ym setup` without an agent choice in a noninteractive shell initializes the repo and prints explicit connection commands; it does not edit native client settings. Use `--agent claude`, `cursor`, `opencode`, `gemini`, or explicitly `all` instead. Restart the selected native client to load its tools. `ym init` and `ym connect AGENT` remain available separately.
+In an interactive terminal, `ym setup` asks which client to connect. In a noninteractive shell without `--agent`, it only initializes the repo and prints the connect commands; it does not change native client settings. The choices are `claude`, `codex`, `cursor`, `opencode`, `gemini`, `all` and `none`. Restart the client afterwards so it loads the new tools. `ym init` and `ym connect AGENT` also work on their own.
 
 Or let an agent plan it: `ym plan "add dark mode across the app" --yes`.
 
-When work is done, it waits on the `yardmaster/integration` branch. Bring it into your branch with `ym land`.
-
-Want to see it first without spending tokens? `ym demo` starts an isolated sandbox with a fake agent.
+When work is done, it waits on the `yardmaster/integration` branch. Bring it into your branch with `ym land`. It only fast-forwards, and you need to be on the project's base branch with no uncommitted changes to tracked files.
 
 ## Everyday commands
 
@@ -69,7 +74,8 @@ Want to see it first without spending tokens? `ym demo` starts an isolated sandb
 | `ym clean` | Show what can be cleaned up; `--yes` to do it |
 | `ym doctor` | Check your setup |
 | `ym verify` | Run committed-artifact checks and optional provider checks; save service receipts |
-| `ym presets` | `frugal`, `balanced`, `fast`, `careful` |
+| `ym presets` | List the presets: `frugal`, `balanced`, `fast`, `careful` |
+| `ym help` | Command reference |
 
 `ym add` options: `--files a,b` (what it will change), `--after t-123`, `--agent codex`, `--tier cheap|standard|strong`, `--verify "npm run e2e"` (extra checks, on top of the project's), `--budget 1.5`, `--best-of 2`, `--review always|never`, `--no-changes-ok` (for reviews and research). The first sentence of the request becomes the task's name; the whole request goes to the agent.
 
@@ -109,10 +115,12 @@ After `ym connect`, your agent has these tools:
 | `yard_claim_files`, `yard_release_files`, `yard_who` | Reserve files you are editing by hand so background agents stay away |
 | `yard_take_task`, `yard_finish_task` | Do a queued task yourself in this session |
 | `yard_send`, `yard_inbox` | Short handoff notes between agents |
-| `yard_control` | Retry, cancel, stop, approve, or redirect with a note |
+| `yard_control` | Retry, cancel, stop, approve, prioritize, or redirect with a note |
 | `yard_learn` | Save repo knowledge for future agents |
 
-`ym connect` also installs a short skill that teaches agents when and how to fan out. For Claude Code and Codex it also installs hooks that coordinate with zero tool calls (skip them with `--no-hooks`): a briefing at session start, board changes before a prompt (only when something changed), automatic reservation of files the agent edits, and a guard on edits to files another agent holds. Hooks fail open: if the hub isn't running, nothing is blocked. Why this layering beats MCP alone: [docs/INTEGRATION.md](docs/INTEGRATION.md).
+Clients that load every tool definition up front can set `YARDMASTER_MCP_PROFILE=minimal` to get a single `yard` tool instead.
+
+`ym connect` also installs a short skill that teaches agents when and how to fan out. For Claude Code and Codex it also installs hooks that coordinate with zero tool calls (skip them with `--no-hooks`): a briefing at session start, board changes before a prompt (only when something changed), automatic reservation of files the agent edits, and a guard on edits to files another agent holds. Codex asks you to approve the hooks once with `/hooks`. Hooks fail open: if the hub isn't running, nothing is blocked. Why Yardmaster uses hooks and a skill as well as MCP: [docs/INTEGRATION.md](docs/INTEGRATION.md).
 
 Each MCP connection and native hook session has its own project- and machine-scoped identity. Sharing a folder does not grant access to another session's reservations. To deliberately link one native session with its MCP tools, launch that client with a unique `YARDMASTER_SESSION` value inherited by both hooks and MCP; use a different value for every independently editing client. If your client filters the MCP environment, configure it to forward that value as well. Without that explicit link, a reservation created through MCP may block the native hook until it is released.
 
@@ -167,7 +175,7 @@ ym ci budget             # this month's spend against your allowance
 ym ci ship               # finished agent work as one pull request: one CI run for the batch
 ```
 
-On agent-heavy private repos, 15 to 20% of billed minutes typically go to re-testing an identical file tree after a pull request merges, and another 10 to 25% to failed runs that local checks would have caught. None of this needs the hub, and it works the same for agents and people. Details, the guard's safety rules, and alternatives: [docs/CI.md](docs/CI.md).
+In the agent-heavy private repos we audited, 15 to 20% of billed minutes went to re-testing an identical file tree after a pull request merged, and another 10 to 25% to failed runs that local checks would have caught. None of this needs the hub, and it works the same for agents and people. Details, the guard's safety rules, and alternatives: [docs/CI.md](docs/CI.md).
 
 ## Configuration
 
@@ -191,11 +199,11 @@ On agent-heavy private repos, 15 to 20% of billed minutes typically go to re-tes
 }
 ```
 
-Claude Code background agents use lean context by default: your CLAUDE.md, AGENTS.md, hooks and permission rules apply, while optional MCP servers, skills and tools are omitted. Historical Claude measurements do not establish equivalent savings for other adapters (`agents.claude.context: "full"` restores full context; `mcpConfig` keeps chosen MCP servers). `autonomy: "workspace"` (default) keeps unattended agents inside their task. Claude Code runs in its sandbox: shell commands can write only inside the task's worktree and temp folders (not your checkout, the repo's `.git` folder or `~/.yardmaster`) and reach only common package registries and GitHub; any other host is refused. Add hosts or writable folders with `agents.claude.sandbox.allowedDomains` / `allowWrite` (the list replaces the defaults), or turn it off with `"sandbox": { "enabled": false }`. On Linux the sandbox needs bubblewrap; without it commands run unsandboxed. Codex uses its workspace-write sandbox. `"full"` uses each agent's bypass mode, with no sandbox.
+Claude Code background agents use lean context by default: your CLAUDE.md, AGENTS.md, hooks and permission rules apply, while optional MCP servers, skills and tools are omitted. Set `agents.claude.context` to `"full"` to load everything, or use `mcpConfig` to keep chosen MCP servers. The token savings were measured on Claude Code only; other adapters are not claimed to save the same. `autonomy: "workspace"` (default) keeps unattended agents inside their task. Claude Code runs in its sandbox: shell commands can write only inside the task's worktree and temp folders (not your checkout, the repo's `.git` folder or `~/.yardmaster`) and reach only common package registries and GitHub; any other host is refused. Add hosts or writable folders with `agents.claude.sandbox.allowedDomains` / `allowWrite` (the list replaces the defaults), or turn it off with `"sandbox": { "enabled": false }`. On Linux the sandbox needs bubblewrap; without it commands run unsandboxed. Codex uses its workspace-write sandbox. `autonomy: "full"` uses each agent's bypass mode, with no sandbox.
 
 Usage has actual, estimated, mixed or unknown provenance. Provider-reported dollar amounts are actual; token-only usage uses list-price estimates where pricing is available. Missing usage is unknown, not a measured zero-cost run. Override prices in `pricing`.
 
-Claude Code’s adapter passes its native `--max-budget-usd` option when a positive allowance is available (rounded to cents with a $0.05 minimum). Other adapters and unsupported/custom clients depend on reported/estimated usage and reactive stops. Daily admission uses recorded spend; concurrent work and delayed/absent usage can overshoot. This is not a universal provider billing cap. Concurrent task admission uses atomic reservations; delayed or missing usage can still overshoot observed spending. Optional JEV classifier charges are excluded from task totals and must be accounted for separately.
+The Claude Code adapter passes its native `--max-budget-usd` option with the run's reserved allowance when that allowance is positive. Other adapters and custom clients rely on reported or estimated usage, and a run is stopped after its usage passes the reservation. Admission uses atomic reservations against recorded spend, so concurrent tasks cannot claim the same dollars, but delayed or missing usage can still overshoot. None of this is a provider billing cap. Optional JEV classifier charges are not in task totals; account for them separately. Details: [docs/BUDGETS.md](docs/BUDGETS.md).
 
 To preserve manual effort and enforce a configured floor, set policy per agent, for example:
 
@@ -214,7 +222,7 @@ An optional, separately installed **JEV effort router** can lower reasoning effo
 
 ## Plugins
 
-Everything an agent needs is a small plugin, the same shape as the built-ins. Let your agent write one:
+Agent adapters, notifiers and service providers are small plugins, the same shape as the built-ins. Let your agent write one:
 
 ```sh
 ym plugin new aider --describe "drive the aider CLI non-interactively" --with claude
@@ -238,11 +246,11 @@ results appear in dashboard activity/task details; unknown results stop for insp
 
 Yardmaster stays out of your agents' way and cuts what each task costs:
 
-- Background agents start with about 14k tokens of context instead of 61k; a real task measured 69% fewer tokens and 68% lower cost.
-- A retry continues the agent's own session (measured: 71% cheaper and twice as fast as starting over).
+- Claude Code background agents start with about 14k tokens of context instead of 61k; a real task measured 69% fewer tokens and 68% lower cost.
+- A retry continues the agent's own session (measured on Claude Code: 71% cheaper and almost twice as fast as starting over).
 - A 79k-file `node_modules` reaches a new worktree in 1.9 s instead of 17.4 s, and is deleted in milliseconds when the task merges.
 - Hooks cost 3 to 5 ms when there's nothing to do; dependent tasks start the moment the previous one merges.
-- `ym report` shows spend per merged task, waste, and where the time goes; `ym disk --scan` finds duplicate dependency installs anywhere on your Mac (20 GB on the machine we measured) and `--dedupe` shares them, recoverably.
+- `ym report` shows spend per merged task, waste, and where the time goes; `ym disk --scan` finds duplicate `node_modules` installs in common project folders under your home directory, or in folders you name (20 GB on the machine we measured), and the experimental `--dedupe` shares them, recoverably.
 
 The measurements are in [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 
@@ -252,7 +260,17 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). For the research behind it (Ga
 
 ## Status
 
-Early (0.9.3). Tested end to end with deterministic agents and real repositories, including the CI gate, guard, budget and audit against a mock GitHub API and real git pushes, policies, cross-model review rounds, lessons, critical-path ordering, races, merge trains, import-graph coupling, hooks, the minimal MCP profile, parallel scheduling, scopes, dependencies, loops, budgets, retries, conflicts, edit-time overlap, approval, cleanup safety, two-machine execution, the MCP server, pause/redirect, supervisor warnings, disk holds and artifact trimming. JEV tests cover routing, fallback, manual effort, retry escalation, shutdown/cancellation and worker-local configuration with fake subprocesses. Earlier releases were smoke-tested with real Claude Code and Codex; this JEV integration has no measured task-level savings claim. The Cursor and Gemini adapters follow their documented stream formats but haven't been run against live sessions yet.
+Early (0.9.3). Tested end to end with deterministic agents and real git repositories, including the CI gate, guard, budget and audit against a mock GitHub API and real git pushes, policies, cross-model review rounds, lessons, critical-path ordering, races, merge trains, import-graph coupling, hooks, the minimal MCP profile, parallel scheduling, scopes, dependencies, loops, budgets, retries, conflicts, edit-time overlap, approval, cleanup safety, two-machine execution (simulated on one host over real HTTP), the MCP server, pause/redirect, supervisor warnings, disk holds and artifact trimming. JEV tests cover routing, fallback, manual effort, retry escalation, shutdown/cancellation and worker-local configuration with fake subprocesses. Earlier releases were smoke-tested with real Claude Code and Codex; this JEV integration has no measured task-level savings claim.
+
+Known gaps:
+
+- The Cursor and Gemini adapters follow their documented stream formats but haven't been run against live sessions yet.
+- Yardmaster is not published to npm yet. Use the standalone binary or install from GitHub.
+- CI runs on macOS and Linux only. Windows is not tested.
+
+## Help
+
+Questions, bugs and ideas: open an issue at [github.com/g4m35/yardmaster/issues](https://github.com/g4m35/yardmaster/issues). Include the output of `ym --version` and `ym doctor`.
 
 ## License
 

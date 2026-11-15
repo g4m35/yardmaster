@@ -238,7 +238,8 @@ ym devices recover <id> --note "host rebooted; old controller is gone"     # sta
 ym devices lease simulator -- maestro --device <udid> test flow.yaml       # any tool, any project
 ```
 
-`ym devices lease` holds a slot for any command (exit code passes through), so a
+`ym devices lease` holds a slot for any command (exit code passes through; its environment is filtered like
+shell checks, with `env.checks.pass` exceptions), so a
 script or another agent can share the same queue. It records no simulator: the
 command manages its own device and processes. T3 or other device panels are
 optional; Yardmaster does not lease, control or clean up their sessions.

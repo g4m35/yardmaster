@@ -3,7 +3,7 @@ import { accessSync, constants, statSync } from 'node:fs';
 import { delimiter, resolve } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import * as z from 'zod/v4';
-import { groupAlive, runOwnedProcess, terminateRecordedProcess, type OwnedRunOptions } from './proc.ts';
+import { cleanEnv, groupAlive, runOwnedProcess, terminateRecordedProcess, type OwnedRunOptions } from './proc.ts';
 import { OwnedResourceSchema, type OwnedResource, type ResourceCleanup } from './leases.ts';
 
 /**
@@ -169,7 +169,7 @@ export async function cleanupOwnedSimulators(ctx: ToolContext, owned: OwnedResou
 }
 
 /** Cleanup for reapers (hub, CLI) that did not create the simulators but find their recorded leases. */
-export function hostCleanup(env: NodeJS.ProcessEnv = process.env, cwd = process.cwd()): ResourceCleanup {
+export function hostCleanup(env: NodeJS.ProcessEnv = cleanEnv(), cwd = process.cwd()): ResourceCleanup {
   return async owned => {
     const xcrun = resolveTool('xcrun', cwd, env);
     if (!xcrun) return { ok: false, detail: 'xcrun is not available to clean up recorded simulators' };

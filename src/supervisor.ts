@@ -1,7 +1,7 @@
 import type { Coordinator } from './coordinator.ts';
 import { routingFor } from './config.ts';
 import { clip, formatUsd } from './text.ts';
-import { scopesOverlap } from './scope.ts';
+import { fromLiteralPattern, scopesOverlap } from './scope.ts';
 
 export interface Warning {
   key: string;
@@ -97,7 +97,7 @@ export class Supervisor {
         const blocking = queued.filter((t) => scopesOverlap(this.coord.effectiveScope(t), [lock.pattern]).length);
         if (!blocking.length) continue;
         this.coord.releaseLocks(project.id, lock.holder, [lock.pattern]);
-        this.coord.event(project.id, null, 'warn', 'supervisor.released', `Released ${lock.pattern}: ${lock.holder.slice(8)} reserved it but has been gone ${Number.isFinite(idle) ? Math.round(idle / 60_000) + ' min' : 'a while'}, and ${blocking.length} task(s) were waiting on it.`);
+        this.coord.event(project.id, null, 'warn', 'supervisor.released', `Released ${fromLiteralPattern(lock.pattern)}: ${lock.holder.slice(8)} reserved it but has been gone ${Number.isFinite(idle) ? Math.round(idle / 60_000) + ' min' : 'a while'}, and ${blocking.length} task(s) were waiting on it.`);
       }
     }
 

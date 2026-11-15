@@ -182,12 +182,12 @@ export async function runGate(opts: { cwd: string; remoteUrl: string; stdin: str
 
 /** Check exactly the commit being pushed: here if that's what's checked out and clean, else in a throwaway worktree. */
 export async function checkCommit(root: string, here: string, sha: string, commands: string[], config: Config) {
-  if ((await revParse(here, 'HEAD')) === sha && (await isClean(here))) return runVerify(here, commands, config.verifyTimeoutMinutes);
+  if ((await revParse(here, 'HEAD')) === sha && (await isClean(here))) return runVerify(here, commands, config.verifyTimeoutMinutes, undefined, undefined, { envPass: config.env.checks.pass });
   const dir = join(paths.tmp(), `ci-check-${sha.slice(0, 10)}-${process.pid}`);
   await git(root, ['worktree', 'add', '--detach', dir, sha]);
   try {
     await warmStart(root, dir, config).catch(() => undefined);
-    return await runVerify(dir, commands, config.verifyTimeoutMinutes);
+    return await runVerify(dir, commands, config.verifyTimeoutMinutes, undefined, undefined, { envPass: config.env.checks.pass });
   } finally {
     await git(root, ['worktree', 'remove', '--force', dir], { allowFail: true });
   }
