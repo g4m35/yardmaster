@@ -1,13 +1,14 @@
 import { RunPatchSchema, ScopePattern, LiteralPath, TouchedSchema } from './run-schema.ts';
 import { submitSessionHandoff } from './handoff.ts';
 import * as z from 'zod/v4';
-import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileTail } from './file-tail.ts';
 import { checkLiveOverlap, type Coordinator, type TaskPatch } from './coordinator.ts';
 import { ACTIVE_STATUSES, NewTaskSchema, STATUS_LABEL, TASK_STATUSES, TERMINAL_STATUSES, type Task, type TaskStatus } from './types.ts';
 import { paths } from './paths.ts';
-import { clip, formatUsd, tail } from './text.ts';
-import { changeSince, revParse } from './git.ts';
+import { clip, formatUsd } from './text.ts';
+import { ArtifactDiffCache, changeSince, revParse } from './git.ts';
 import type { Config } from './config.ts';
 import type { Supervisor } from './supervisor.ts';
 import { diskReport } from './janitor.ts';
@@ -142,6 +143,7 @@ export function boardText(coord: Coordinator, projectId?: string | null, supervi
 }
 
 export function buildMethods(coord: Coordinator, hooks: HubHooks) {
+  const artifactDiffs = new ArtifactDiffCache();
   const scopedLessons = (projectId: string, raw: unknown): string[] => {
     const ids = [...new Set(z.array(Id).max(20).parse(raw))];
     for (const id of ids) if (!coord.db.prepare('SELECT 1 FROM lessons WHERE id = ? AND project_id = ?').get(id, projectId)) throw new Error('Lesson does not belong to this run project.');
@@ -272,7 +274,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       const artifact = task.head_sha && (['verifying', 'ready', 'merging', 'done', 'canceled'].includes(task.status) || !copy);
       const root = coord.getProject(task.project_id)?.root;
       try {
-        if (artifact && root) return { source: 'artifact', ...(await changeSince(root, task.base_sha, task.head_sha)), note: null };
+        if (artifact && root) return { source: 'artifact', ...(await artifactDiffs.read(root, task.base_sha, task.head_sha!)), note: null };
         if (copy) return { source: 'working copy', ...(await changeSince(copy, task.base_sha, null)), note: null };
       } catch (err) {
         return none(`This hub cannot read the change: ${clip((err as Error).message, 200)}`);
@@ -283,7 +285,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       const run = coord.latestRun(p.id);
       if (!run) return '';
       const file = activityLogPath(run.id);
-      return existsSync(file) ? tail(readFileSync(file, 'utf8'), p.lines, 200_000) : '';
+      return fileTail(file, p.lines);
     }),
     'task.update': method(z.object({ id: TaskId, patch: z.record(z.string(), z.unknown()), owner: Owner.optional() }), (p) =>
       coord.updateTaskIfOwner(p.id, p.owner ?? { assignee: '' }, p.patch as TaskPatch),

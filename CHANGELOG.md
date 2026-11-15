@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Deduplicate acknowledged runner usage/activity, keep one control polling loop, and record ordinary usage growth from persisted run totals. Share supervisor reads per pass while keeping recovery holds fresh. Bound task log reads and patch output, cache immutable artifact diffs with size/count limits, and clarify performance and dependency-reuse limits. No database migration.
+
 - Remote CLI and hook connections require explicit credentials or a saved pairing credential for the exact hub, project and machine. The local owner token is used only for loopback or for the address this machine's own running hub published (an overlay IP it is bound to). Non-loopback HTTP requires `--private-network` (hooks: `YARDMASTER_PRIVATE_NETWORK=1`); authenticated RPCs reject redirects.
 - Validate worker run telemetry before storage and recover corrupt historical run JSON as empty values, with one durable warning per run.
 - Replace backtracking scope matching with bounded dynamic programming. Limit new scope patterns at RPC/config boundaries Reported touched paths are literal file names (glob characters in a real name match only that name); lock checks and `yard_who` take patterns and folders. Stored oversized scopes use conservative matching and one durable task warning, without throwing in shared scheduling.

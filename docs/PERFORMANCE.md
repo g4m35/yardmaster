@@ -47,7 +47,7 @@ On macOS arm64, Node 24.22.2, during concurrent test/agent activity on 2026-11-0
 
 End-of-run RSS was 245 MiB. These are in-process API dispatch measurements, excluding HTTP, browser rendering, provider latency and cold startup. This separate API stress run has no paired baseline; the scheduler comparison above uses a different fixture. Neither establishes a cross-machine performance guarantee. The raw measurements are not in this repository; rerun on the target machine for a meaningful comparison.
 
-Registry history and passive machine/session inventories are bounded; live runs remain visible. SSE refreshes coalesce and serialize. Cleanup removes up to 1,000 expired project events per pass, using `cleanup.eventRetentionDays` (30 by default, `null` to retain indefinitely). Unfinished and process-held task evidence survives retention and stale cleanup plans. Accepted artifact refs are pruned only after terminal integration, ancestry validation and compare-and-delete; unmerged artifacts remain reachable.
+Registry history and passive machine/session inventories are bounded; live runs remain visible. Board output is bounded, but its counts and lifetime totals still aggregate retained task/run history, and budget displays aggregate retained ledger rows. A bounded response does not imply constant work as history grows. SSE refreshes coalesce and serialize. Cleanup removes up to 1,000 expired project events per pass, using `cleanup.eventRetentionDays` (30 by default, `null` to retain indefinitely). Unfinished and process-held task evidence survives retention and stale cleanup plans. Accepted artifact refs are pruned only after terminal integration, ancestry validation and compare-and-delete; unmerged artifacts remain reachable.
 
 ## Historical measurements
 
@@ -99,9 +99,10 @@ Also cheaper by default:
 repos every combined check failed ("command not found"), sending good work back for another paid attempt. It now
 gets them like task worktrees, and refreshes them when a merge changes a lockfile.
 
-**Dependency reuse is lockfile-aware.** A new worktree takes dependencies from a checkout whose lockfiles match
+**Dependency reuse is lockfile-aware.** A new worktree prefers dependencies from a checkout whose lockfiles match
 it exactly: your checkout, or another Yardmaster worktree (often the one that just installed a new package). When
-none match, the event log says so.
+none match, it can fall back to the original checkout and records that the dependencies may be stale. Setup commands
+remain necessary when reuse is skipped or the install does not match.
 
 `ym report` shows the result for your own work: spend per merged task, money spent on work that never merged,
 how many retries resumed their session and what they cost compared with fresh ones, and median time per phase.
@@ -127,7 +128,7 @@ About 38 ms of the remaining 47 ms is Node's own startup.
 | Board read (dashboard, hooks, `yard_status`) | 256 ms | **17 ms** | 50 ms |
 
 The old code re-asked the same questions for every queued task (active work, reservations, dependencies, spend,
-agent stats). A per-pass cache answers each once, and indexes cover the hot queries. Cost now grows linearly.
+agent stats). A per-pass cache answers each once, and indexes cover the hot queries. These pass caches remove repeated shared reads; task counts, retained history and fresh recovery-hold checks still affect cost.
 
 ## Time between tasks
 
@@ -140,12 +141,11 @@ The hub reacts to every state change immediately (debounced 15 ms) instead of wa
 ## Work agents no longer redo
 
 - **Warm start.** New worktrees get installed, git-ignored dependency folders (`node_modules`, `target`, `vendor`,
-  ...) from a checkout with matching lockfiles. Python virtualenvs are never copied, since they hard-code their
+  ...) preferably from a checkout with matching lockfiles, with a potentially stale fallback when none match. Python virtualenvs are never copied, since they hard-code their
   location and a copy would still install into your real environment. Add a `worktree.setup` command such as
   `uv sync` instead. On APFS a whole folder is cloned with one `clonefile(2)` call (through macOS's built-in
-  JavaScript for Automation, so nothing extra is installed); on btrfs and XFS with reflinks. It takes no extra disk
-  until something changes, and the originals are never touched. Without copy-on-write, folders under
-  `worktree.maxPlainCopyMb` are copied and larger ones are skipped. Clones don't count against the disk quota.
+  JavaScript for Automation, so nothing extra is installed); on btrfs and XFS with reflinks. Copy-on-write shares file data initially, but metadata and later writes still consume disk; the originals are never touched. Without copy-on-write, folders under
+  `worktree.maxPlainCopyMb` are copied and larger ones are skipped. Current quota accounting excludes cloned dependency paths, so reported quota usage is not physical disk usage.
 - **Quick checks.** `verifyQuick` runs change-scoped checks per task (`{files}` is replaced with the changed
   files), and the full `verify` suite runs at merge time, batched by merge trains. With `integration.mode: "none"`
   there's no merge step, so tasks run the full suite themselves.

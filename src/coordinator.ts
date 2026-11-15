@@ -514,11 +514,24 @@ export class Coordinator {
       const run = this.db.prepare('SELECT * FROM runs WHERE id = ?').get(runId) as Row | undefined;
       if (!run || run.task_id !== taskId || !owner || owner.generation !== run.generation || owner.assignee !== `machine:${run.machine_id}` || (owner.generation ?? 0) < 1) throw new Error('Usage does not belong to this recorded run identity.');
       if (sequence <= Number(run.usage_seq)) return;
+      const measured = usage.provenance !== 'unknown';
+      const cost = measured ? Math.round(usage.costUsd * 1_000_000) / 1_000_000 : Number(run.cost_usd);
+      const cacheRead = measured ? usage.cacheReadTokens : run.cache_read_tokens;
+      const cacheWrite = measured ? usage.cacheWriteTokens : run.cache_write_tokens;
+      if (Number(run.usage_seq) > 0 && cost === Number(run.cost_usd) &&
+          (!measured || (usage.tokensIn === Number(run.tokens_in) && usage.tokensOut === Number(run.tokens_out))) &&
+          usage.provenance === run.usage_provenance && cacheRead === run.cache_read_tokens && cacheWrite === run.cache_write_tokens) {
+        // Advance the fence even for a no-op: an older, different snapshot must not overwrite this acknowledgment.
+        this.db.prepare('UPDATE runs SET usage_seq = ? WHERE id = ?').run(sequence, runId);
+        return;
+      }
       const planning = run.role === 'plan';
       const projectId = planning ? String(run.task_id).slice(5) : this.getTask(taskId)?.project_id ?? null;
-      const delta = recordUsageDelta(this.db, { runId, sequence, taskId: planning ? null : taskId, projectId, ...usage });
+      const delta = recordUsageDelta(this.db, { runId, sequence, taskId: planning ? null : taskId, projectId, ...usage }, {
+        sequence: Number(run.usage_seq), costUsd: Number(run.cost_usd), tokensIn: Number(run.tokens_in), tokensOut: Number(run.tokens_out),
+      });
       if (!delta.applied) return;
-      if (!planning) this.addUsage(taskId, delta.costDeltaUsd, delta.tokensInDelta, delta.tokensOutDelta);
+      if (!planning && (delta.costDeltaUsd || delta.tokensInDelta || delta.tokensOutDelta)) this.addUsage(taskId, delta.costDeltaUsd, delta.tokensInDelta, delta.tokensOutDelta);
       this.db.prepare(`UPDATE runs SET cost_usd = ?, tokens_in = ?, tokens_out = ?, cost_estimated = ?,
         usage_provenance = ?, cache_read_tokens = ?, cache_write_tokens = ?, usage_seq = ?,
         accounted_cost = ?, accounted_in = ?, accounted_out = ? WHERE id = ?`)
