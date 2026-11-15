@@ -570,26 +570,27 @@ test('a held A key never approves, and resizing across the breakpoint keeps the 
   await press('j');
   await press('a'); await press('a', true); await press('a', true);
   assert.equal(h.calls.filter(c => c.method === 'task.control').length, 0);
-  // Narrowing the window re-presents the same task full screen instead of closing it.
+  // Narrowing the window covers the screen with the same task; it is never closed and reopened.
+  const drawer = h.$('drawer');
+  let closes = 0; drawer.addEventListener('close', () => { closes++; });
   media.matches = false;
   for (const fn of media.listeners) fn();
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(h.$('drawer').open, true); assert.equal(h.api.state().openTask, 't-one'); assert.equal(h.$('overview').hidden, false);
+  assert.equal(drawer.open, true); assert.equal(h.api.state().openTask, 't-one'); assert.equal(closes, 0);
+  assert.equal(h.$('overview').hidden, false); assert.equal(drawer.getAttribute('aria-modal'), 'true');
+  // Focus stays inside the task that now covers the page.
+  assert.equal(drawer.contains(h.doc.activeElement), true);
   // Keys now belong to the full-screen task, not the list behind it.
   await press('a'); await press('a');
   assert.equal(h.calls.filter(c => c.method === 'task.control').length, 0);
-  // A browser delivers the close event later. Closing in between (a project change) cancels the re-presentation.
-  const drawer = h.$('drawer');
-  const deliver = drawer.close.bind(drawer);
-  let queued: (() => void) | null = null;
-  drawer.close = () => { drawer.open = false; queued = () => void drawer.dispatch('close'); };
   media.matches = true;
   for (const fn of media.listeners) fn();
-  h.api.closeDrawer();
-  queued!();
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(drawer.open, false); assert.equal(h.api.state().openTask, null); assert.equal(h.$('overview').hidden, false);
-  drawer.close = deliver;
+  assert.equal(drawer.open, true); assert.equal(h.$('overview').hidden, true); assert.equal(drawer.getAttribute('aria-modal'), 'false');
+  // Escape dismisses it in either presentation, and the dismissal is final.
+  await press('Escape');
+  assert.equal(drawer.open, false); assert.equal(h.api.state().openTask, null); assert.equal(h.$('overview').hidden, false); assert.equal(closes, 1);
+  media.matches = false;
+  for (const fn of media.listeners) fn();
+  assert.equal(drawer.open, false);
 });
 
 test('a change read for an earlier version of a task is never shown next to a newer one', async () => {

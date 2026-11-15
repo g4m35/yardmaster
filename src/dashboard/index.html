@@ -241,8 +241,7 @@
   dialog::backdrop { background: rgba(0, 0, 0, .6); }
   dialog.drawer { margin: 0; padding: 0; border: 0; border-radius: 0; box-shadow: none; background: var(--bg); width: 100%; max-width: 100%; }
   dialog.drawer[open] { display: flex; flex-direction: column; }
-  dialog.drawer:not(:modal) { position: static; inset: auto; height: 100%; max-height: 100%; flex: 1; min-height: 0; }
-  dialog.drawer:modal { position: fixed; inset: 0; height: 100dvh; max-height: 100dvh; }
+  dialog.drawer { position: static; inset: auto; height: 100%; max-height: 100%; flex: 1; min-height: 0; }
   .drawer .head { padding: 16px 24px 14px; border-bottom: 1px solid var(--line); display: grid; gap: 10px; position: relative; }
   .drawer .close { position: absolute; top: 10px; right: 12px; border: 1px solid transparent; background: none; color: var(--ink-2); font-size: 20px; cursor: pointer; line-height: 1; border-radius: var(--r-sm); min-height: 34px; min-width: 34px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
   .drawer .close:hover { border-color: var(--line-2); color: var(--ink); }
@@ -372,6 +371,8 @@
     .drawer .body { padding: 0 16px 30px; }
     .tabs { margin: 0 -16px; padding: 0 16px; }
     .choice { grid-template-columns: 1fr 1fr; }
+    /* No room beside the list: the open task covers the screen, and the page behind it is made inert. */
+    dialog.drawer[open] { position: fixed; inset: 0; z-index: 20; height: 100vh; height: 100dvh; max-height: none; }
   }
   @media (max-width: 560px) {
     .rail-foot { width: 100%; }
@@ -910,27 +911,28 @@
     $('d-facts').replaceChildren(...facts.flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)]));
   }
   // Wide screens show the selected task beside the list, so moving through the list keeps focus there.
-  // Narrow screens have no room beside it: the task takes the whole screen as a modal dialog.
+  // Narrow screens have no room beside it: the task covers the screen and everything behind it is inert.
+  // The dialog is always opened non-modally and only its presentation follows the width, so crossing the
+  // breakpoint never closes and reopens it (a close event arrives later and would race other actions).
   const wideQuery = typeof matchMedia === 'function' ? matchMedia('(min-width: 1100px)') : null;
-  let drawerModal = false;
+  const fullScreen = () => !!$('drawer')?.open && !wideQuery?.matches;
+  function applyPresentation() {
+    const open = !!$('drawer')?.open, cover = fullScreen();
+    if ($('overview')) $('overview').hidden = open && !!wideQuery?.matches;
+    for (const node of [document.querySelector?.('.rail'), document.querySelector?.('.list'), $('overview')]) {
+      if (!node) continue;
+      if (cover) node.setAttribute('inert', ''); else node.removeAttribute?.('inert');
+    }
+    $('drawer')?.setAttribute('aria-modal', cover ? 'true' : 'false');
+    if (cover && !$('drawer').contains(document.activeElement)) $('d-close').focus();
+  }
   function presentDrawer() {
     const drawer = $('drawer');
-    $('overview').hidden = !!wideQuery?.matches;
     markSelected();
-    if (drawer.open) return;
-    drawerOrigin = captureFocus();
-    if (wideQuery?.matches) { drawerModal = false; drawer.show(); return; }
-    drawerModal = true; drawer.showModal(); $('d-close').focus();
+    if (!drawer.open) { drawerOrigin = captureFocus(); drawer.show(); }
+    applyPresentation();
   }
-  // Crossing the breakpoint changes how the task is shown, not which task is open. The close event that
-  // follows arrives later, so it is marked as a re-presentation rather than the owner closing the task.
-  let representing = false;
-  wideQuery?.addEventListener('change', () => {
-    const drawer = $('drawer');
-    if (!drawer.open || drawerModal === !wideQuery.matches) return;
-    representing = true;
-    drawer.close();
-  });
+  wideQuery?.addEventListener('change', () => { if (!authFailed) applyPresentation(); });
   function showEntry(id, quiet = false) {
     const entry = registry?.entries.find(e => e.id === id);
     if (!entry) {
@@ -1369,20 +1371,13 @@
   }
   function closeDrawer() {
     if ($('drawer').open) $('drawer').close();
-    // Closing while a re-presentation is queued cancels it, so the queued close event cannot reopen old details.
-    else { representing = false; openTask = null; openEntry = null; ++detailSequence; clearInterval(logTimer); }
+    else { openTask = null; openEntry = null; ++detailSequence; clearInterval(logTimer); }
   }
   $('drawer').addEventListener('close', () => {
-    if (representing && (openTask || openEntry)) {
-      representing = false;
-      const origin = drawerOrigin;
-      presentDrawer();
-      drawerOrigin = origin;
-      return;
-    }
-    representing = false;
+    // A close only ever comes from dismissal; the page may already have been replaced by the access gate.
+    if (authFailed) { openTask = null; openEntry = null; ++detailSequence; drawerOrigin = null; return; }
     saveDraft(); openTask = null; openEntry = null; ++detailSequence; clearInterval(logTimer);
-    $('overview').hidden = false; drawerModal = false; markSelected();
+    applyPresentation(); markSelected();
     restoreFocus(drawerOrigin);
     if (!document.activeElement || document.activeElement === document.body) $('open-add')?.focus();
     drawerOrigin = null;
@@ -1396,7 +1391,7 @@
   // the document body, and a snapshot can remove the focused node; both would let Tab leave the dialog.
   document.addEventListener('keydown', event => {
     if (event.key !== 'Tab') return;
-    const dialog = [drawerModal ? $('drawer') : null, $('add-dialog')].find(node => node && node.open);
+    const dialog = [fullScreen() ? $('drawer') : null, $('add-dialog')].find(node => node && node.open);
     if (!dialog) return;
     const controls = [...dialog.querySelectorAll('button, input, select, textarea, summary, a[href], [tabindex]')]
       .filter(node => !node.disabled && node.tabIndex >= 0 && node.getClientRects().length);
@@ -1424,7 +1419,9 @@
       const next = keys[(Math.max(0, at) + (event.key === 'ArrowRight' ? 1 : keys.length - 1)) % keys.length];
       event.preventDefault(); selectTab(openTask, next); $('tab-' + next)?.focus(); return;
     }
-    if (typing || $('add-dialog').open || drawerModal) return;
+    // Escape closes the open task in either presentation, including while typing in it.
+    if (event.key === 'Escape' && $('drawer').open && !$('add-dialog').open) { event.preventDefault(); closeDrawer(); return; }
+    if (typing || $('add-dialog').open || fullScreen()) return;
     const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
     if (key === 'j' || key === 'k' || key === 'ArrowDown' || key === 'ArrowUp') {
       const rows = rowsInOrder();
