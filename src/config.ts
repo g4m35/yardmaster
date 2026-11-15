@@ -128,6 +128,10 @@ export type Policy = z.infer<typeof PolicySchema>;
 
 export const ConfigSchema = z.object({
   services: ServicesConfigSchema,
+  env: z.object({
+    pass: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/).max(200)).max(100).default([]),
+    checks: z.object({ pass: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/).max(200)).max(100).default([]) }).prefault({}),
+  }).prefault({}),
   preset: z.enum(['frugal', 'balanced', 'fast', 'careful']).default('balanced'),
   baseBranch: z.string().optional(),
   integration: z

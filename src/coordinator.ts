@@ -1,3 +1,5 @@
+import { RunPatchSchema, TouchedSchema, LessonsSchema, PhasesSchema, VerdictSchema } from './run-schema.ts';
+import type * as z from 'zod/v4';
 import { parseHandoff, type NativeHandoff } from './handoff.ts';
 import { serviceHold } from './service-holds.ts';
 import { tx, type Db } from './db.ts';
@@ -50,17 +52,6 @@ function toTask(r: Row): Task {
   };
 }
 
-function toRun(r: Row): Run {
-  return {
-    ...(r as unknown as Run),
-    touched: JSON.parse(String(r.touched ?? '[]')) as string[],
-    lessons: JSON.parse(String(r.lessons ?? '[]')) as string[],
-    cost_estimated: Boolean(r.cost_estimated),
-    phases: JSON.parse(String(r.phases ?? '{}')) as Record<string, number>,
-    resumed: Boolean(r.resumed),
-  };
-}
-
 const TASK_COLUMNS = new Set([
   'status', 'priority', 'tier', 'agent', 'model', 'scope', 'verify', 'attempts', 'max_attempts', 'budget_usd', 'cost_usd',
   'tokens_in', 'tokens_out', 'assignee', 'machine_id', 'branch', 'worktree', 'base_sha', 'head_sha', 'lease_until',
@@ -69,9 +60,6 @@ const TASK_COLUMNS = new Set([
   'review', 'review_rounds', 'race_group', 'guidance', 'needs_approval', 'policies', 'scope_inferred',
   'agent_session', 'session_agent', 'session_cost', 'session_at', 'session_fingerprint',
 ]);
-
-const RUN_COLUMNS = new Set(['pid', 'proc_started', 'status', 'stop_reason', 'exit_code', 'cost_usd', 'tokens_in', 'tokens_out', 'cost_estimated', 'last_activity', 'touched', 'ended_at', 'lessons', 'verdict', 'phases', 'resumed']);
-for (const field of ['phase', 'effort', 'effort_source', 'launch_fingerprint', 'verdict_sha']) RUN_COLUMNS.add(field);
 
 export class StaleAttemptError extends Error {
   constructor(id: string, status: string) {
@@ -683,9 +671,9 @@ export class Coordinator {
       // Files each active task has actually touched, from its latest run: one query instead of one per task.
       const touched = new Map<string, string[]>();
       const rows = this.db
-        .prepare(`SELECT task_id, touched FROM runs WHERE role = 'implement' AND task_id IN (${active.map(() => '?').join(',')}) ORDER BY started_at, rowid`)
-        .all(...active.map((t) => t.id)) as { task_id: string; touched: string }[];
-      for (const r of rows) touched.set(r.task_id, JSON.parse(r.touched ?? '[]') as string[]);
+        .prepare(`SELECT id, task_id, touched FROM runs WHERE role = 'implement' AND task_id IN (${active.map(() => '?').join(',')}) ORDER BY started_at, rowid`)
+        .all(...active.map((t) => t.id)) as { id: string; task_id: string; touched: string }[];
+      for (const r of rows) touched.set(r.task_id, this.decodeRunJson(r, 'touched', TouchedSchema, []));
       return active.map((task) => ({ task, scope: [...new Set([...this.effectiveScope(task), ...(touched.get(task.id) ?? [])])] }));
     });
     if (!excludeId) return all;
@@ -1172,9 +1160,38 @@ export class Coordinator {
     return task;
   }
 
+  private warnCorruptRun(r: Row): void {
+    const key = `run:corrupt:${String(r.id)}`;
+    if (this.getMeta(key)) return;
+    this.setMeta(key, '1');
+    const task = this.getTask(String(r.task_id));
+    this.event(task?.project_id ?? null, task?.id ?? null, 'warn', 'run.corrupt', 'Invalid historical run telemetry was treated as empty.', { runId: r.id });
+  }
+
+  private decodeRunJson<T>(r: Row, column: string, schema: z.ZodType<T>, empty: T): T {
+    try {
+      const value: unknown = JSON.parse(String(r[column] ?? JSON.stringify(empty)));
+      const parsed = schema.safeParse(value);
+      if (parsed.success) return parsed.data;
+    } catch { /* Historical worker data must not prevent unrelated work from scheduling. */ }
+    this.warnCorruptRun(r);
+    return empty;
+  }
+
+  private toRun(r: Row): Run {
+    let verdict = r.verdict ?? null;
+    if (!VerdictSchema.safeParse(verdict).success) { this.warnCorruptRun(r); verdict = null; }
+    return { ...(r as unknown as Run),
+      touched: this.decodeRunJson(r, 'touched', TouchedSchema, []),
+      lessons: this.decodeRunJson(r, 'lessons', LessonsSchema, []),
+      phases: this.decodeRunJson(r, 'phases', PhasesSchema, {}),
+      verdict: verdict as string | null, cost_estimated: Boolean(r.cost_estimated), resumed: Boolean(r.resumed),
+    };
+  }
+
   getRun(id: string): Run | null {
     const r = this.db.prepare('SELECT * FROM runs WHERE id = ?').get(id) as Row | undefined;
-    return r ? toRun(r) : null;
+    return r ? this.toRun(r) : null;
   }
 
   latestRun(taskId: string): Run | null {
@@ -1184,22 +1201,25 @@ export class Coordinator {
   private latestRunUncached(taskId: string): Run | null {
     const query = this.latestImplementationRunQuery ??= this.db.prepare("SELECT * FROM runs WHERE task_id = ? AND role = 'implement' ORDER BY started_at DESC, rowid DESC LIMIT 1");
     const r = query.get(taskId) as Row | undefined;
-    return r ? toRun(r) : null;
+    return r ? this.toRun(r) : null;
   }
 
   runsFor(taskId: string): Run[] {
-    return (this.db.prepare('SELECT * FROM runs WHERE task_id = ? ORDER BY started_at').all(taskId) as Row[]).map(toRun);
+    return (this.db.prepare('SELECT * FROM runs WHERE task_id = ? ORDER BY started_at').all(taskId) as Row[]).map(r => this.toRun(r));
   }
 
   runningRunsOn(machineId: string): Run[] {
-    return (this.db.prepare("SELECT * FROM runs WHERE machine_id = ? AND status = 'running'").all(machineId) as Row[]).map(toRun);
+    return (this.db.prepare("SELECT * FROM runs WHERE machine_id = ? AND status = 'running'").all(machineId) as Row[]).map(r => this.toRun(r));
   }
 
   updateRun(id: string, patch: Partial<Omit<Run, 'id' | 'task_id'>>): void {
+    for (const k of Object.keys(patch)) {
+      if (!(k in RunPatchSchema.shape)) throw new Error(`Cannot update run column ${k}`);
+    }
+    const validated = RunPatchSchema.parse(patch);
     const sets: string[] = [];
     const vals: (string | number | null)[] = [];
-    for (const [k, v] of Object.entries(patch)) {
-      if (!RUN_COLUMNS.has(k)) throw new Error(`Cannot update run column ${k}`);
+    for (const [k, v] of Object.entries(validated)) {
       sets.push(`${k} = ?`);
       if (v === undefined || v === null) vals.push(null);
       else if (typeof v === 'boolean') vals.push(v ? 1 : 0);

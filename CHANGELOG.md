@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Remote CLI and hook connections require explicit credentials or a saved pairing credential for the exact hub, project and machine. Local owner-token discovery is limited to loopback. Non-loopback HTTP requires `--private-network` (hooks: `YARDMASTER_PRIVATE_NETWORK=1`); authenticated RPCs reject redirects.
+- Validate worker run telemetry before storage and recover corrupt historical run JSON as empty values, with one durable warning per run.
+- Replace backtracking scope matching with bounded dynamic programming. Limit scope patterns and require literal touched paths and lock-check paths.
+- Remove secret-shaped environment variables from agents and shell checks by default, while preserving authentication only for the selected agent. Configure `env.pass` for agent exceptions and `env.checks.pass` for setup/verification exceptions; see `docs/INTEGRATION.md`.
+- Always remove temporary base bundles after creation, authorization or streaming failures. Limit outstanding downloads to four per hub and one per worker, returning HTTP 429 when busy.
+
 ## 0.9.3
 - Fixed: while a task merged newer work in to resolve a conflict, every merged-in file counted as changed by the task (994 files for a 9-file change). Those counts feed live overlap checks and the file reservations that keep tasks apart, so a conflict fix could block or pause unrelated work. Uncommitted edits now count only where they differ from the task's base, and the paths are compared in memory so very large merges cannot exceed the command-line limit.
 - Dashboard: the Changes tab counts the change itself once read; the status line counts projects instead of listing folder names; feed events name tasks briefly; machines say "idle" or how many are busy; agents and connections sit above the feed.

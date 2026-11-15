@@ -10,38 +10,70 @@ export function normalizePattern(p: string): string {
   return s;
 }
 
-export function globToRegExp(glob: string): RegExp {
+export const MAX_SCOPE_PATTERNS = 4096;
+export const MAX_PATTERN_LENGTH = 1024;
+export const MAX_WILDCARDS = 64;
+
+export function validatePattern(pattern: string): boolean {
+  return pattern.length <= MAX_PATTERN_LENGTH && (pattern.match(/[*?{]/g)?.length ?? 0) <= MAX_WILDCARDS;
+}
+
+function boundedPatterns(patterns: string[]): void {
+  if (patterns.length > MAX_SCOPE_PATTERNS || patterns.some(p => !validatePattern(p))) {
+    throw new Error('Scope exceeds limits: 4096 patterns, 1024 characters and 64 wildcards per pattern.');
+  }
+}
+
+type GlobToken = { kind: 'literal'; choices: string[] } | { kind: 'star' | 'globstar' | 'directory' | 'one' };
+
+/** Retains the old test interface, but uses dynamic programming instead of a backtracking RegExp. */
+export function globToRegExp(glob: string): { test(path: string): boolean } {
+  boundedPatterns([glob]);
   const g = normalizePattern(glob);
-  let re = '';
+  const tokens: GlobToken[] = [];
   for (let i = 0; i < g.length; i++) {
     const c = g[i]!;
     if (c === '*') {
       if (g[i + 1] === '*') {
-        const slashAfter = g[i + 2] === '/';
-        re += slashAfter ? '(?:.*/)?' : '.*';
-        i += slashAfter ? 2 : 1;
-      } else {
-        re += '[^/]*';
-      }
-    } else if (c === '?') {
-      re += '[^/]';
-    } else if (c === '{') {
+        const slash = g[i + 2] === '/';
+        tokens.push({ kind: slash ? 'directory' : 'globstar' });
+        i += slash ? 2 : 1;
+      } else tokens.push({ kind: 'star' });
+    } else if (c === '?') tokens.push({ kind: 'one' });
+    else if (c === '{' && g.indexOf('}', i) !== -1) {
       const end = g.indexOf('}', i);
-      if (end === -1) {
-        re += '\\{';
-      } else {
-        re += `(?:${g.slice(i + 1, end).split(',').map(escapeRe).join('|')})`;
-        i = end;
-      }
-    } else {
-      re += escapeRe(c);
-    }
+      tokens.push({ kind: 'literal', choices: g.slice(i + 1, end).split(',') });
+      i = end;
+    } else tokens.push({ kind: 'literal', choices: [c] });
   }
-  return new RegExp(`^${re}(?:/.*)?$`);
-}
-
-function escapeRe(s: string): string {
-  return s.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+  return { test(path) {
+    let previous = new Uint8Array(path.length + 1);
+    previous[0] = 1;
+    for (const token of tokens) {
+      const next = new Uint8Array(path.length + 1);
+      if (token.kind === 'star' || token.kind === 'globstar' || token.kind === 'directory') {
+        let reachable = false;
+        for (let i = 0; i <= path.length; i++) {
+          if (i && (token.kind === 'star' ? path[i - 1] === '/' : /[\n\r\u2028\u2029]/.test(path[i - 1]!))) reachable = false;
+          if (token.kind === 'directory') {
+            if (previous[i] || (reachable && path[i - 1] === '/')) next[i] = 1;
+          } else if (previous[i] || reachable) next[i] = 1;
+          reachable ||= previous[i] === 1;
+        }
+      } else {
+        for (let i = 0; i < path.length + 1; i++) {
+          if (!previous[i]) continue;
+          if (token.kind === 'one') { if (i < path.length && path[i] !== '/') next[i + 1] = 1; }
+          else for (const choice of token.choices) if (path.startsWith(choice, i)) next[i + choice.length] = 1;
+        }
+      }
+      previous = next;
+    }
+    for (let i = 0; i <= path.length; i++) {
+      if (previous[i] && (i === path.length || (path[i] === '/' && !/[\n\r\u2028\u2029]/.test(path.slice(i))))) return true;
+    }
+    return false;
+  } };
 }
 
 export function matches(path: string, pattern: string): boolean {
@@ -50,15 +82,16 @@ export function matches(path: string, pattern: string): boolean {
 
 function staticPrefix(pattern: string): string {
   const g = normalizePattern(pattern);
-  const idx = g.search(/[*?{[]/);
+  const idx = g.search(/[*?{]/);
   return idx === -1 ? g : g.slice(0, idx);
 }
 
 function hasGlob(pattern: string): boolean {
-  return /[*?{[]/.test(pattern);
+  return /[*?{]/.test(pattern);
 }
 
 export function patternsOverlap(a: string, b: string): boolean {
+  boundedPatterns([a, b]);
   const pa = normalizePattern(a);
   const pb = normalizePattern(b);
   if (pa === '**' || pb === '**' || pa === pb) return true;
@@ -74,12 +107,14 @@ export function patternsOverlap(a: string, b: string): boolean {
 }
 
 export function scopesOverlap(a: string[], b: string[]): string[] {
+  boundedPatterns(a); boundedPatterns(b);
   const hits: string[] = [];
   for (const x of a) for (const y of b) if (patternsOverlap(x, y)) hits.push(x === y ? x : `${x} ~ ${y}`);
   return hits;
 }
 
 export function inScope(path: string, scope: string[]): boolean {
+  boundedPatterns(scope);
   return scope.some((p) => matches(path, p));
 }
 

@@ -1,5 +1,5 @@
 import { isClean, revParse } from './git.ts';
-import { runShell, type OwnedRunOptions } from './proc.ts';
+import { cleanEnv, runShell, type OwnedRunOptions } from './proc.ts';
 import { loadPlugins } from './plugins.ts';
 import { planService, runService, type ServicePlan } from './providers.ts';
 import type { ServicesConfig } from './provider-contract.ts';
@@ -8,6 +8,7 @@ import type { ServiceIntent } from './service-holds.ts';
 
 export type ServiceRun = Awaited<ReturnType<typeof runService>>;
 type VerificationLifecycle = {
+  envPass?: readonly string[];
   beforeSpawn?: () => void | Promise<void>; onExit?: (reaped: boolean) => void | Promise<void>;
   services?: ServicesConfig; context?: ServiceContext;
   onServicePlan?: (plan: ServicePlan) => void | Promise<void>;
@@ -52,7 +53,7 @@ export async function verifyArtifact(cwd: string, commands: string[], timeoutMin
   for (const command of commands) {
     if (signal?.aborted) return fail(command, 'Verification canceled before starting the next command.');
     await lifecycle?.beforeSpawn?.();
-    const r = await runShell(command, { cwd, timeoutMs: timeoutMinutes * 60_000, signal, onSpawn });
+    const r = await runShell(command, { cwd, env: cleanEnv({ CI: '1' }, { pass: lifecycle?.envPass }), timeoutMs: timeoutMinutes * 60_000, signal, onSpawn });
     await lifecycle?.onExit?.(r.reaped);
     if (!r.reaped) return { ...fail(command, 'A verification process survived cleanup. Keep this worktree held for recovery; do not retry into it.'), reaped: false };
     // Check even on command failure: retain the mutated files for the agent/person to inspect.

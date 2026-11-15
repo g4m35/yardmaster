@@ -18,12 +18,16 @@ export function normalizeHubUrl(input: string, opts: PrivateTransport = {}): str
   let url: URL;
   try { url = new URL(input); } catch { throw new Error('Invalid hub URL. Use https://hub-host:7777.'); }
   if (url.username || url.password || input.split('/')[2]?.includes('@')) throw new Error('Hub URL must not contain credentials.');
-  const host = url.hostname.toLowerCase();
-  const loopback = host === 'localhost' || host === '[::1]' || /^127\.\d+\.\d+\.\d+$/.test(host);
+  const loopback = isLoopbackHub(url.href);
   if (url.protocol === 'http:' && !loopback && !opts.privateNetwork) {
     throw new Error('Non-loopback HTTP requires --private-network to acknowledge an existing encrypted private overlay. Otherwise use HTTPS.');
   }
   return url.href.replace(/\/+$/, '');
+}
+
+export function isLoopbackHub(input: string): boolean {
+  const host = new URL(input).hostname.toLowerCase();
+  return host === 'localhost' || host === '[::1]' || /^127\.\d+\.\d+\.\d+$/.test(host);
 }
 
 /** Do not follow redirects with invitation codes or bearer credentials. */

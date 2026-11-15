@@ -54,6 +54,8 @@ export class Hub {
   readonly token: string;
   readonly machineId: string;
   private readonly pairing: PairingStore;
+  private baseBundles = 0;
+  private readonly workerBaseBundles = new Map<string, number>();
   private readonly nativeCaptures = new Map<string, Promise<unknown>>();
   private readonly captureAbort = new AbortController();
   private readonly background = new Set<Promise<unknown>>();
@@ -411,7 +413,7 @@ export class Hub {
       if (base && req.method === 'GET') {
         const guard = () => { if (worker) authorizeWorkerBaseBundle(this.coord, worker, base[1]!); };
         guard();
-        return await this.sendBaseBundle(res, base[1]!, url.searchParams.get('have'), guard);
+        return await this.sendBaseBundle(res, base[1]!, url.searchParams.get('have'), guard, worker?.machineId);
       }
 
       const up = url.pathname.match(/^\/api\/tasks\/([\w-]+)\/bundle$/);
@@ -456,24 +458,40 @@ export class Hub {
     req.on('close', () => clearInterval(timer));
   }
 
-  private async sendBaseBundle(res: ServerResponse, projectId: string, have: string | null, guard: () => void = () => {}) {
+  private async sendBaseBundle(res: ServerResponse, projectId: string, have: string | null, guard: () => void = () => {}, workerId?: string) {
+    if (this.baseBundles >= 4 || (workerId && (this.workerBaseBundles.get(workerId) ?? 0) >= 1)) {
+      res.setHeader('retry-after', '5');
+      return json(res, 429, { ok: false, error: 'Too many outstanding base-bundle downloads. Retry after the current download finishes.' });
+    }
     const project = this.coord.getProject(projectId);
     if (!project) return json(res, 404, { ok: false, error: 'unknown project' });
     const branch = this.coord.configFor(projectId).integration.branch;
-    await this.integrator.head(projectId);
+    this.baseBundles++;
+    if (workerId) this.workerBaseBundles.set(workerId, (this.workerBaseBundles.get(workerId) ?? 0) + 1);
     const file = join(paths.tmp(), `${shortId('b')}.bundle`);
-    // Bundle under the integration lock so a merge in progress (not yet verified) is never shipped.
-    await this.integrator.withLock(projectId, async () => {
-      const args = ['bundle', 'create', file, `refs/heads/${branch}`];
-      if (have && /^[0-9a-f]{7,40}$/.test(have) && (await revParse(project.root, have))) args.push(`^${have}`);
-      const r = await git(project.root, args, { allowFail: true });
-      // Nothing new relative to `have`: still send a complete bundle so the worker can proceed.
-      if (r.code !== 0 || !existsSync(file)) await git(project.root, ['bundle', 'create', file, `refs/heads/${branch}`]);
-    });
-    guard();
-    res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': statSync(file).size, 'x-yardmaster-branch': branch });
-    await pipeline(createReadStream(file), res);
-    rmSync(file, { force: true });
+    try {
+      await this.integrator.head(projectId);
+      // Bundle under the integration lock so an unverified merge is never shipped.
+      await this.integrator.withLock(projectId, async () => {
+        if (res.destroyed) throw new Error('Base-bundle download disconnected.');
+        const args = ['bundle', 'create', file, `refs/heads/${branch}`];
+        if (have && /^[0-9a-f]{7,40}$/.test(have) && (await revParse(project.root, have))) args.push(`^${have}`);
+        const r = await git(project.root, args, { allowFail: true });
+        if (r.code !== 0 || !existsSync(file)) await git(project.root, ['bundle', 'create', file, `refs/heads/${branch}`]);
+      });
+      guard();
+      if (res.destroyed) throw new Error('Base-bundle download disconnected.');
+      res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': statSync(file).size, 'x-yardmaster-branch': branch });
+      await pipeline(createReadStream(file), res);
+    } finally {
+      rmSync(file, { force: true });
+      this.baseBundles--;
+      if (workerId) {
+        const remaining = (this.workerBaseBundles.get(workerId) ?? 1) - 1;
+        if (remaining) this.workerBaseBundles.set(workerId, remaining);
+        else this.workerBaseBundles.delete(workerId);
+      }
+    }
   }
 
   private async receiveBundle(req: IncomingMessage, res: ServerResponse, taskId: string, branch: string, machine: string, head: string, generation: number, worker?: WorkerIdentity | null) {

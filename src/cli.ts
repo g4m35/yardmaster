@@ -18,13 +18,13 @@ import { isAlive, run, which } from './proc.ts';
 import { ago, clip, formatUsd, taskTitle } from './text.ts';
 import { STATUS_LABEL, type Task } from './types.ts';
 import { WorkerLoop } from './worker.ts';
-import { connectWorker, fleetClient, joinFleet, normalizeHubUrl, workerCredentialDirectory } from './fleet-client.ts';
+import { connectWorker, fleetClient, joinFleet, isLoopbackHub, normalizeHubUrl, workerCredentialDirectory } from './fleet-client.ts';
 import { resolveEffort, describeEffort } from './effort.ts';
 import { Semaphore } from './runner.ts';
 import { httpTransport } from './transport.ts';
 import { applyConnect, connectPlan, hookPlan, installHooks, installSkill, selfCommand } from './connect.ts';
 import { HOOK_EVENTS, runHook } from './hook.ts';
-import { hookClient } from './hookclient.ts';
+import { hookClient, hubCredential } from './hookclient.ts';
 import { creatorPrompt, loadPlugins, scaffoldPlugin, testPlugin } from './plugins.ts';
 import { PlanError, planGoal } from './planner.ts';
 import { VERSION } from './version.ts';
@@ -71,7 +71,7 @@ function parseArgs(argv: string[]): Args {
 }
 
 const SHORT: Record<string, string> = { f: 'follow', n: 'lines', y: 'yes', j: 'json', h: 'help' };
-const BOOLEAN_FLAGS = new Set(['confirm-stopped', 'remote', 'adopt-legacy-journal', 'scan', 'dedupe', 'restore', 'purge', 'with-hooks', 'no-hooks', 'experimental', 'no-skill', 'now', 'version', 'follow', 'yes', 'json', 'help', 'all', 'dry-run', 'foreground', 'force', 'no-changes-ok', 'watch', 'with-hook', 'no-hub', 'open', 'draft', 'quiet', 'hooks-path']);
+const BOOLEAN_FLAGS = new Set(['confirm-stopped', 'remote', 'adopt-legacy-journal', 'scan', 'dedupe', 'restore', 'purge', 'with-hooks', 'no-hooks', 'experimental', 'no-skill', 'now', 'version', 'follow', 'yes', 'json', 'help', 'all', 'dry-run', 'foreground', 'force', 'no-changes-ok', 'watch', 'with-hook', 'no-hub', 'open', 'draft', 'quiet', 'hooks-path', 'private-network']);
 
 const flag = (a: Args, k: string) => (typeof a.flags[k] === 'string' ? (a.flags[k] as string) : undefined);
 const list = (a: Args, k: string) => flag(a, k)?.split(',').map((s) => s.trim()).filter(Boolean);
@@ -132,7 +132,16 @@ async function startHubInBackground(extra: string[] = []): Promise<string> {
 /** Remote hub if configured, the local running hub if any, otherwise direct database access. */
 async function getClient(a: Args, opts: { needHub?: boolean } = {}): Promise<Client> {
   const remote = flag(a, 'hub') ?? process.env.YARDMASTER_HUB;
-  if (remote) return remoteClient(remote, flag(a, 'token') ?? process.env.YARDMASTER_TOKEN ?? hubToken());
+  if (remote) {
+    const opts = { privateNetwork: a.flags['private-network'] === true || flag(a, 'private-network') === 'true' || process.env.YARDMASTER_PRIVATE_NETWORK === '1' };
+    const explicit = flag(a, 'token') ?? process.env.YARDMASTER_TOKEN;
+    const hubUrl = normalizeHubUrl(remote, opts);
+    const projectId = !explicit && !isLoopbackHub(hubUrl)
+      ? flag(a, 'project') ?? await projectIdFor(await mainRepoRoot(process.cwd()) ?? process.cwd()).catch(() => undefined) : undefined;
+    const { hub, token } = hubCredential(hubUrl, explicit, { ...opts, projectId, machineId: projectId ? machineId() : undefined });
+    if (!token) throw new Error('No local hub token. Start the local hub first.');
+    return remoteClient(hub, token, opts);
+  }
   let url = await runningHubUrl();
   if (!url && opts.needHub && !a.flags['no-hub']) {
     url = await startHubInBackground();

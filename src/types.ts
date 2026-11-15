@@ -1,3 +1,4 @@
+import { ScopePattern } from './run-schema.ts';
 import * as z from 'zod/v4';
 import { TierSchema, type Tier } from './config.ts';
 
@@ -169,7 +170,7 @@ export const NewTaskSchema = z.object({
   key: z.string().optional().describe('Optional local key so other tasks in the same batch can depend on this one via "after".'),
   title: z.string().min(3).max(200).describe('Short name for the work.'),
   prompt: z.string().max(20000).optional().describe('Full instructions. Defaults to the title.'),
-  files: z.array(z.string()).optional().describe('Files or globs this task will change, e.g. ["src/auth/**"]. Used to prevent overlapping edits.'),
+  files: z.array(ScopePattern).max(200).optional().describe('Files or globs this task will change, e.g. ["src/auth/**"]. Used to prevent overlapping edits.'),
   after: z.array(z.string()).optional().describe('Task ids (or batch keys) that must be done first.'),
   agent: z.string().optional().describe('Force a specific agent (claude, codex, opencode, cursor, gemini, or a plugin).'),
   tier: TierSchema.optional().describe('cheap | standard | strong. Picks model size; omitted = inferred.'),

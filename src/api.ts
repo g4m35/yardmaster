@@ -1,3 +1,4 @@
+import { RunPatchSchema, ScopePattern, LiteralPath, TouchedSchema } from './run-schema.ts';
 import { submitSessionHandoff } from './handoff.ts';
 import * as z from 'zod/v4';
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
@@ -291,7 +292,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
     'task.adminUpdate': method(z.object({ id: TaskId, patch: z.record(z.string(), z.unknown()) }), (p) => coord.updateTask(p.id, p.patch as TaskPatch, { requestEdit: true })),
     // The owner's answer to "it changed files outside its scope": widen (or correct) what the task may touch.
     // A running attempt keeps the list it started with; the new list applies from the next attempt.
-    'task.setScope': method(z.object({ id: TaskId, scope: z.array(z.string().trim().min(1).max(300)).max(200), by: z.string().default('you') }), (p) => tx(coord.db, () => {
+    'task.setScope': method(z.object({ id: TaskId, scope: z.array(ScopePattern.transform(p => p.trim()).pipe(z.string().min(1).max(300))).max(200), by: z.string().default('you') }), (p) => tx(coord.db, () => {
       const task = coord.getTask(p.id);
       if (!task) throw new Error(`No task ${p.id}`);
       if (task.status === 'done' || task.status === 'canceled') throw new Error(`"${clip(task.title, 60)}" is ${STATUS_LABEL[task.status].toLowerCase()}; its files can no longer change.`);
@@ -361,7 +362,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       return coord.withRunOwner(p.runId ?? '', p.owner && { ...p.owner, statuses: WORKER_FINALIZE_STATUSES },
         () => { throw new Error('Unsequenced task usage is no longer accepted. Upgrade the worker to run.usage absolute snapshots.'); }, p.id);
     }),
-    'task.touched': method(z.object({ taskId: TaskId, runId: RunId, files: z.array(z.string()).max(2000), owner: Owner.optional() }), (p) => checkLiveOverlap(coord, p.taskId, p.runId, p.files, p.owner)),
+    'task.touched': method(z.object({ taskId: TaskId, runId: RunId, files: TouchedSchema, owner: Owner.optional() }), (p) => checkLiveOverlap(coord, p.taskId, p.runId, p.files, p.owner)),
     'task.event': method(
       z.object({ projectId: z.string().nullable(), taskId: z.string().nullable(), level: z.enum(['info', 'warn', 'error', 'success']), kind: z.string(), message: z.string(), data: z.unknown().optional(), owner: Owner.optional() }),
       (p) => tx(coord.db, () => {
@@ -418,11 +419,11 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
     ),
 
     'lock.claim': method(
-      z.object({ projectId: Id, holder: Id, patterns: z.array(z.string()).min(1).max(100), reason: z.string().nullish(), ttlMinutes: z.number().min(1).max(24 * 60).default(30) }),
+      z.object({ projectId: Id, holder: Id, patterns: z.array(ScopePattern).min(1).max(100), reason: z.string().nullish(), ttlMinutes: z.number().min(1).max(24 * 60).default(30) }),
       (p) => coord.claimLocks(p.projectId, p.holder, p.patterns, p.reason ?? null, p.ttlMinutes),
     ),
-    'lock.release': method(z.object({ projectId: Id, holder: Id, patterns: z.array(z.string()).optional() }), (p) => coord.releaseLocks(p.projectId, p.holder, p.patterns)),
-    'lock.check': method(z.object({ projectId: Id, paths: z.array(z.string()).min(1).max(200) }), (p) => coord.whoHas(p.projectId, p.paths)),
+    'lock.release': method(z.object({ projectId: Id, holder: Id, patterns: z.array(ScopePattern).max(200).optional() }), (p) => coord.releaseLocks(p.projectId, p.holder, p.patterns)),
+    'lock.check': method(z.object({ projectId: Id, paths: z.array(LiteralPath).min(1).max(200) }), (p) => coord.whoHas(p.projectId, p.paths)),
 
     'session.register': method(z.object({ name: Id, agent: z.string().nullish(), projectId: z.string().nullish(), cwd: z.string().nullish(), machineId: z.string().nullish() }), (p) =>
       coord.registerSession(p.name, p.agent ?? null, p.projectId ?? null, p.cwd ?? null, p.machineId ?? null),
@@ -519,7 +520,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       for (const issue of p.reviewIssues) addLesson(coord, task.project_id, `A reviewer flagged, and the fix was accepted: ${issue}`, 'review', task.scope, task.id);
       return null;
     }),
-    'run.update': method(z.object({ runId: RunId, patch: z.record(z.string(), z.unknown()), owner: Owner.optional(), launch: z.boolean().optional() }), (p) => {
+    'run.update': method(z.object({ runId: RunId, patch: RunPatchSchema, owner: Owner.optional(), launch: z.boolean().optional() }), (p) => {
       if (p.launch) {
         if (Object.keys(p.patch).length) throw new Error('Launch authorization cannot update a run.');
         return coord.launchBudget(p.runId, p.owner);

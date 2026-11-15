@@ -16,18 +16,34 @@ const execFileP = promisify(execFile);
  */
 const LEAKY_GIT_VARS = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_COMMON_DIR', 'GIT_PREFIX', 'GIT_NAMESPACE', 'GIT_ALTERNATE_OBJECT_DIRECTORIES'];
 
-export function cleanEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env };
+const AGENT_AUTH: Record<string, readonly string[]> = {
+  claude: ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN'],
+  codex: ['OPENAI_API_KEY', 'OPENAI_ORG_ID', 'OPENAI_PROJECT_ID'],
+  cursor: ['CURSOR_API_KEY'],
+  gemini: ['GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GOOGLE_APPLICATION_CREDENTIALS'],
+  opencode: ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY'],
+};
+
+function secretEnv(name: string, value: string): boolean {
+  return /(?:^|_)(?:TOKEN|SECRET|KEY)(?:_|$)|PASSWORD|CREDENTIAL|^(?:AWS|AZURE)_|^(?:GH|GITHUB|NPM)_TOKEN$/i.test(name) ||
+    /[a-z][a-z0-9+.-]*:\/\/[^/\s@]+:[^/\s@]*@/i.test(value);
+}
+
+export function cleanEnv(extra: NodeJS.ProcessEnv = {}, opts: { agent?: string; pass?: readonly string[] } = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
+  const pass = new Set(opts.pass ?? []);
+  for (const [name, value] of Object.entries(env)) {
+    const auth = opts.agent && (AGENT_AUTH[opts.agent]?.includes(name) ||
+      (opts.agent === 'codex' && name.startsWith('CODEX_')) || (opts.agent === 'opencode' && name.startsWith('OPENCODE_')));
+    if (value !== undefined && secretEnv(name, value) && !auth && !pass.has(name)) delete env[name];
+  }
   for (const k of LEAKY_GIT_VARS) delete env[k];
-  // Nested Claude Code sessions refuse to start when they think they are inside another session.
   delete env.CLAUDECODE;
   delete env.CLAUDE_CODE_ENTRYPOINT;
-  // The hub's admin token never reaches agents or check commands. The hub address goes too: a child that finds a hub
-  // address but no token would call that hub with this machine's own token, so children find the hub (and its token)
-  // through the owner-only files in the Yardmaster home instead.
+  // A configured pass list cannot delegate the hub's administrator identity to children.
   delete env.YARDMASTER_TOKEN;
   delete env.YARDMASTER_HUB;
-  return { ...env, ...extra };
+  return env;
 }
 
 export interface RunResult {

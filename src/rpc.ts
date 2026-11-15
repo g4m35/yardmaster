@@ -1,3 +1,4 @@
+import { normalizeHubUrl, type PrivateTransport } from './fleet-client.ts';
 import type { Client } from './api.ts';
 
 /**
@@ -18,15 +19,15 @@ export function rpcDeadline(name: string, params: unknown, override?: number): n
   return RPC_TIMEOUT_MS;
 }
 
-export function remoteClient(baseUrl: string, token: string, opts: { timeoutMs?: number } = {}): Client {
-  const url = baseUrl.replace(/\/$/, '');
+export function remoteClient(baseUrl: string, token: string, opts: { timeoutMs?: number } & PrivateTransport = {}): Client {
+  const url = normalizeHubUrl(baseUrl, opts);
   return new Proxy({} as Client, {
     get: (_t, name: string) =>
       name === 'then'
         ? undefined
         : async (params: unknown) => {
             const res = await fetch(`${url}/api/rpc/${name}`, {
-              method: 'POST',
+              method: 'POST', redirect: 'error',
               headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
               body: JSON.stringify(params ?? {}),
               signal: AbortSignal.timeout(rpcDeadline(name, params, opts.timeoutMs)),
