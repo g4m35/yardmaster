@@ -71,13 +71,17 @@ test('a running agent has one control poll per tick and sends usage/activity onl
   t.mock.method(f.ctx.api, 'task.peek', async p => { polling++; return peek(p); });
   t.mock.method(f.ctx.api, 'run.usage', async p => { usages++; return usage(p); });
   t.mock.method(f.ctx.api, 'run.update', async p => { if ('last_activity' in p.patch) activity++; return update(p); });
+  t.mock.timers.enable({ apis: ['setInterval'] });
   const running = runAttempt({ ...f.ctx, onSpawn: handler => { stop = handler; } });
   try {
     await until(() => f.coord.latestRun(f.ctx.task.id)?.phase, value => value === 'agent', 15_000, 'agent');
-    // Sample two telemetry periods; process supervision keeps its real OS timers.
     const before = polling;
-    await new Promise(resolve => setTimeout(resolve, 4500));
-    assert.ok(polling - before <= 19, `one 250 ms loop, observed ${polling - before} peeks`);
+    for (let i = 0; i < 16; i++) {
+      t.mock.timers.tick(250);
+      await setImmediate();
+      if (i === 7) await until(() => activity, count => count === 1, 5000, 'first telemetry acknowledgment');
+    }
+    assert.equal(polling - before, 16, 'one control read per 250 ms tick, including telemetry ticks');
     assert.equal(usages, 1);
     assert.equal(activity, 1);
     stop!('stopped', 'fixture finished');
@@ -87,6 +91,6 @@ test('a running agent has one control poll per tick and sends usage/activity onl
   } finally {
     stop?.('shutdown', 'fixture cleanup');
     await running;
-    f.db.close();
+    t.mock.timers.reset(); f.db.close();
   }
 });
