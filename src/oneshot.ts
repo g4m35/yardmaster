@@ -177,7 +177,7 @@ export async function runOneShot(opts: {
   try {
     await opts.hooks?.beforeSpawn?.();
     proc = startOwnedProcess(spec.command, spec.args, {
-      cwd: opts.cwd, env: cleanEnv({ ...spec.env, ...opts.env }), stdin: spec.stdin, signal,
+      cwd: opts.cwd, env: cleanEnv({ ...spec.env, ...opts.env }, { agent: opts.agent, pass: opts.config.env.pass }), stdin: spec.stdin, signal,
       timeoutMs: opts.timeoutMs ?? 10 * 60_000, termGraceMs: opts.termGraceMs, exitGraceMs: opts.exitGraceMs, hookTimeoutMs: opts.hookTimeoutMs,
       onSpawn: opts.hooks?.onSpawn, onStdout, onStderr: (d) => (stderr = (stderr + d.toString()).slice(-4000)),
     });

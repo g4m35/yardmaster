@@ -18,13 +18,13 @@ import { isAlive, run, which } from './proc.ts';
 import { ago, clip, formatUsd, taskTitle } from './text.ts';
 import { STATUS_LABEL, type Task } from './types.ts';
 import { WorkerLoop } from './worker.ts';
-import { connectWorker, fleetClient, joinFleet, normalizeHubUrl, workerCredentialDirectory } from './fleet-client.ts';
+import { connectWorker, fleetClient, joinFleet, isLoopbackHub, normalizeHubUrl, workerCredentialDirectory } from './fleet-client.ts';
 import { resolveEffort, describeEffort } from './effort.ts';
 import { Semaphore } from './runner.ts';
 import { httpTransport } from './transport.ts';
 import { applyConnect, connectPlan, hookPlan, installHooks, installSkill, selfCommand } from './connect.ts';
 import { HOOK_EVENTS, runHook } from './hook.ts';
-import { hookClient } from './hookclient.ts';
+import { hookClient, hubCredential } from './hookclient.ts';
 import { creatorPrompt, loadPlugins, scaffoldPlugin, testPlugin } from './plugins.ts';
 import { PlanError, planGoal } from './planner.ts';
 import { VERSION } from './version.ts';
@@ -71,7 +71,7 @@ function parseArgs(argv: string[]): Args {
 }
 
 const SHORT: Record<string, string> = { f: 'follow', n: 'lines', y: 'yes', j: 'json', h: 'help' };
-const BOOLEAN_FLAGS = new Set(['confirm-stopped', 'remote', 'adopt-legacy-journal', 'scan', 'dedupe', 'restore', 'purge', 'with-hooks', 'no-hooks', 'experimental', 'no-skill', 'now', 'version', 'follow', 'yes', 'json', 'help', 'all', 'dry-run', 'foreground', 'force', 'no-changes-ok', 'watch', 'with-hook', 'no-hub', 'open', 'draft', 'quiet', 'hooks-path']);
+const BOOLEAN_FLAGS = new Set(['confirm-stopped', 'remote', 'adopt-legacy-journal', 'scan', 'dedupe', 'restore', 'purge', 'with-hooks', 'no-hooks', 'experimental', 'no-skill', 'now', 'version', 'follow', 'yes', 'json', 'help', 'all', 'dry-run', 'foreground', 'force', 'no-changes-ok', 'watch', 'with-hook', 'no-hub', 'open', 'draft', 'quiet', 'hooks-path', 'private-network']);
 
 const flag = (a: Args, k: string) => (typeof a.flags[k] === 'string' ? (a.flags[k] as string) : undefined);
 const list = (a: Args, k: string) => flag(a, k)?.split(',').map((s) => s.trim()).filter(Boolean);
@@ -132,13 +132,22 @@ async function startHubInBackground(extra: string[] = []): Promise<string> {
 /** Remote hub if configured, the local running hub if any, otherwise direct database access. */
 async function getClient(a: Args, opts: { needHub?: boolean } = {}): Promise<Client> {
   const remote = flag(a, 'hub') ?? process.env.YARDMASTER_HUB;
-  if (remote) return remoteClient(remote, flag(a, 'token') ?? process.env.YARDMASTER_TOKEN ?? hubToken());
+  if (remote) {
+    const opts = { privateNetwork: a.flags['private-network'] === true || flag(a, 'private-network') === 'true' || process.env.YARDMASTER_PRIVATE_NETWORK === '1' };
+    const explicit = flag(a, 'token') ?? process.env.YARDMASTER_TOKEN;
+    const hubUrl = normalizeHubUrl(remote, opts);
+    const projectId = !explicit && !isLoopbackHub(hubUrl)
+      ? flag(a, 'project') ?? await projectIdFor(await mainRepoRoot(process.cwd()) ?? process.cwd()).catch(() => undefined) : undefined;
+    const { hub, token } = hubCredential(hubUrl, explicit, { ...opts, projectId, machineId: projectId ? machineId() : undefined });
+    if (!token) throw new Error('No local hub token. Start the local hub first.');
+    return remoteClient(hub, token, opts);
+  }
   let url = await runningHubUrl();
   if (!url && opts.needHub && !a.flags['no-hub']) {
     url = await startHubInBackground();
     console.log(dim(`Started the Yardmaster hub in the background (${url}).`));
   }
-  if (url) return remoteClient(url, hubToken());
+  if (url) return remoteClient(url, hubToken(), { ownerLocal: true });
   const coord = new Coordinator(openDb());
   return localClient(buildMethods(coord, { machineId: machineId(), cleanPlan: (p) => planCleanup(coord, p), cleanRun: async (p) => runCleanup(coord, await planCleanup(coord, p)) }));
 }
@@ -161,7 +170,7 @@ const HELP = `${bold('Yardmaster')} ${VERSION}: run many coding agents at once w
 ${bold('Get started')}
   ym setup [--agent codex]     guided repo setup; --dry-run previews without changing configs
   ym init                      set up this repo (detects your agents and test command)
-  ym verify [--json]            run committed-artifact checks and configured service verification; save receipts
+  ym verify [--dry-run]         run committed-artifact checks and configured service verification (JSON output)
   ym connect [agent|all]       add Yardmaster tools + skill to Claude Code, Codex, Cursor, OpenCode, Gemini
                                (also installs zero-token hooks for Claude Code and Codex; --no-hooks to skip)
   ym add "what you want"       queue work (--files, --after, --agent, --tier cheap|standard|strong)
@@ -188,12 +197,12 @@ ${bold('Manage work')}
 ${bold('CI costs')} (GitHub Actions)
   ym ci audit [owner/repo]     where your Actions minutes went and what to fix (--owner, --days)
   ym ci init                   push gate: checks before push, once per file tree; prints the workflow guard
-  ym ci budget | status | ship push finished agent work as one PR (ym ci help for all)
+  ym ci budget | status | ship spend, gate status, one PR for finished work (ym ci help for all)
 
 ${bold('Machines')}
-  ym hub start|stop|status|run [--host 0.0.0.0] [--port 7777]
+  ym hub start|stop|restart|status|run [--host 0.0.0.0] [--port 7777]
   ym service install|uninstall keep the hub running across crashes and reboots
-  ym pair invite --project ID  create a one-use, expiring worker invitation (owner only)
+  ym pair invite [--project ID] create a one-use, expiring worker invitation (owner only)
   ym pair list                 list paired device/invitation metadata (owner only)
   ym pair revoke ID [--invitation]  revoke a worker credential or unused invitation
   ym pair join CODE --hub URL  save a project-scoped credential on this machine
@@ -208,6 +217,11 @@ ${bold('Extend')}
   ym providers list [--json]              configured service providers and routing
   ym providers plan <capability> [--input file.json] [--json]  explain selection without dispatch
   ym providers run <capability> [--input file.json] [--json]  explicitly execute once
+  ym providers pending | resolve <id> --note "..."  inspect or settle interrupted provider requests
+  ym devices status|evidence [--task id] [--json]  machine-wide device/build leases and device evidence
+  ym devices reap | release <lease-id> --note "..."  free leases of crashed holders; resolve a failed cleanup
+  ym devices recover <lease-id> --note "..."  free a stale claim whose holder cannot be identified
+  ym devices lease <build|simulator|physical> -- <command...>  run any tool while holding a machine-wide slot
 `;
 
 async function cmdInit(a: Args) {
@@ -227,7 +241,7 @@ async function cmdInit(a: Args) {
   const agents = detectAgents(loadConfig(root));
   console.log(green(`✔ ${project.name} is ready`) + dim(` (base branch ${project.base_branch}, id ${project.id})`));
   console.log(agents.length ? `Agents found: ${agents.map((x) => bold(x)).join(', ')}` : yellow('No coding agents found on PATH. Install Claude Code, Codex, OpenCode, Cursor CLI or Gemini CLI.'));
-  console.log(`\nNext:\n  ${cyan('ym connect all')}      so your agents can use Yardmaster from where you already work\n  ${cyan('ym add "..."')}        or ask your agent to "split this into parallel tasks with yardmaster"`);
+  console.log(`\nNext:\n  ${cyan('ym connect codex')}    (or claude, cursor, opencode, gemini) so your agent can use Yardmaster where you already work\n  ${cyan('ym add "..."')}        or ask your agent to "split this into parallel tasks with yardmaster"`);
 }
 
 async function cmdAdd(a: Args) {
@@ -664,7 +678,7 @@ async function cmdPair(a: Args) {
     const explicit = flag(a, 'token') ?? process.env.YARDMASTER_TOKEN;
     const local = readHubInfo();
     const localUrl = local ? normalizeHubUrl(local.url, { privateNetwork }) : null;
-    const token = explicit ?? (hub === localUrl ? hubToken() : die('Remote owner operations require an explicit owner credential. Prefer running ym pair invite/list/revoke on the owner hub machine.'));
+    const token = explicit ?? (isLoopbackHub(hub) && hub === localUrl ? hubToken() : die('Remote owner operations require an explicit owner credential. Prefer running ym pair invite/list/revoke on the owner hub machine.'));
     client = fleetClient(hub, token, { privateNetwork });
   } else client = await getClient(a);
   const identity = await client['fleet.identity']({});
@@ -792,13 +806,13 @@ async function cmdMcp(a: Args) {
   // The MCP server needs a hub to run background work; start one quietly if needed.
   const remote = flag(a, 'hub') ?? process.env.YARDMASTER_HUB;
   let client: Client;
-  if (remote) client = remoteClient(remote, flag(a, 'token') ?? process.env.YARDMASTER_TOKEN ?? hubToken());
+  if (remote) client = await getClient(a);
   else {
     // Inside a background task the hub is whoever launched it; never start a stray one (on a remote worker there is
     // no local hub, and the agent's tools then just say so).
     if (process.env.YARDMASTER_TASK_ID && !(await runningHubUrl())) die('No Yardmaster hub on this machine for this background task.');
     const url = (await runningHubUrl()) ?? (await startHubInBackground());
-    client = remoteClient(url, hubToken());
+    client = remoteClient(url, hubToken(), { ownerLocal: true });
   }
   // Loaded only for this command: the MCP SDK is the slowest import, and every other command skips it.
   const { runMcp } = await import('./mcp.ts');
@@ -941,9 +955,123 @@ async function cmdProviders(a: Args) {
   const abort = () => stop.abort('provider command interrupted');
   process.once('SIGINT', abort); process.once('SIGTERM', abort);
   try {
-    const result = await runService(capability, input, config.services, loaded.providers, { cwd, signal: stop.signal, context: { sha: await revParse(cwd, 'HEAD') } });
+    const project = await cliProject(cwd);
+    const result = await runService(capability, input, config.services, loaded.providers, { cwd, signal: stop.signal, context: { sha: await revParse(cwd, 'HEAD'), ...project } });
+    await keepDeviceEvidence(result, project);
     console.log(JSON.stringify(result, null, 2));
     if (result.result.status !== 'passed') process.exitCode = 1;
+  } finally { process.off('SIGINT', abort); process.off('SIGTERM', abort); }
+}
+
+async function cliProject(cwd: string): Promise<{ projectId?: string }> {
+  const root = await mainRepoRoot(cwd).catch(() => null);
+  return root ? { projectId: await projectIdFor(root) } : {};
+}
+
+/** Device evidence from CLI runs joins the same machine-local record the hub shows. */
+async function keepDeviceEvidence(run: { requestId: string; result: object; receiptPath: string }, context: { projectId?: string }): Promise<void> {
+  const { boundEvidence, recordDeviceEvidence } = await import('./device-evidence.ts');
+  const evidence = boundEvidence(run.result, { requestId: run.requestId, projectId: context.projectId });
+  const receiptPath = run.receiptPath;
+  if (!evidence) return;
+  const db = openDb();
+  try { recordDeviceEvidence(db, evidence, receiptPath); } finally { db.close(); }
+}
+
+async function cmdDevices(a: Args) {
+  const { LEASE_POOLS, acquireLease, describeOwned, listLeases, queuePosition, reapLeases, resolveLease } = await import('./leases.ts');
+  const { hostCleanup } = await import('./simctl.ts');
+  const sub = a._[1] ?? 'status';
+  const allowed: Record<string, string[]> = { status: ['json'], evidence: ['json', 'task', 'limit'], reap: ['json'], release: ['note', 'json'], recover: ['note', 'json'], lease: ['wait-minutes'] };
+  if (!allowed[sub]) die('ym devices status|evidence|reap|release|recover|lease');
+  for (const name of Object.keys(a.flags)) if (!allowed[sub]!.includes(name)) die(`Unknown devices option --${name}`);
+  const cwd = process.cwd();
+  const projectConfig = loadConfig((await mainRepoRoot(cwd).catch(() => null)) ?? undefined);
+  const config = projectConfig.devices;
+  // Projects may lower the machine-wide limits, never raise them.
+  const machine = loadConfig().devices;
+  const capacity = (pool: (typeof LEASE_POOLS)[number]) => Math.min(config.limits[pool], machine.limits[pool]);
+  if (sub === 'status') {
+    const { memoryHold, sampleMemory } = await import('./machine-pressure.ts');
+    const db = openDb();
+    const leases = (() => { try { return listLeases(db); } finally { db.close(); } })();
+    const memory = await sampleMemory();
+    const hold = memoryHold(memory, config);
+    const report = { machineId: machineId(), limits: Object.fromEntries(LEASE_POOLS.map(pool => [pool, capacity(pool)])), memory: { ...memory, admitsHeavyWork: !hold, hold },
+      leases: leases.map(lease => ({ ...lease, position: queuePosition(leases, lease) })) };
+    if (a.flags.json) return console.log(JSON.stringify(report, null, 2));
+    console.log(`Limits on this machine: ${LEASE_POOLS.map(pool => `${pool} ${leases.filter(l => l.pool === pool && l.state !== 'waiting').length}/${capacity(pool)}`).join(', ')}`);
+    console.log(hold ? yellow(`Heavy device work is held: ${hold}.`) : green(`Memory admits heavy device work (${Math.round(memory.availableMb)} MB available${memory.pressure ? `, pressure ${memory.pressure}` : ''}).`));
+    if (!leases.length) return console.log(dim('No leases held or queued.'));
+    for (const lease of report.leases) {
+      const where = [lease.projectId, lease.taskId].filter(Boolean).join(' ');
+      const owned = lease.owned.map(describeOwned).join(', ');
+      const stale = lease.state === 'held' && lease.expiresAt < Date.now() ? ' stale (not renewing; kept until its holder process exits)' : '';
+      console.log(`${lease.id} ${lease.pool} ${lease.state}${stale}${lease.position ? ` #${lease.position}` : ''} ${lease.holder}${where ? ` (${where})` : ''} pid ${lease.pid}${owned ? ` owns ${owned}` : ''}${lease.note ? ` - ${lease.note}` : ''}`);
+    }
+    return;
+  }
+  if (sub === 'evidence') {
+    const { deviceEvidence, evidenceLine } = await import('./device-evidence.ts');
+    const db = openDb();
+    const root = await mainRepoRoot(cwd).catch(() => null);
+    const projectId = flag(a, 'task') ? undefined : root ? await projectIdFor(root).catch(() => undefined) : undefined;
+    const items = (() => { try { return deviceEvidence(db, { taskId: flag(a, 'task'), projectId, limit: Number(flag(a, 'limit') ?? 10) }); } finally { db.close(); } })();
+    if (a.flags.json) return console.log(JSON.stringify(items, null, 2));
+    if (!items.length) return console.log(dim('No device evidence recorded on this machine yet. Configure device.test (docs/DEVICES.md) and run ym verify.'));
+    for (const item of items) console.log(`${evidenceLine(item.evidence)}\n  ${dim(item.evidence.summary)}${item.receiptPath ? dim(`\n  receipt ${item.receiptPath}`) : ''}`);
+    return;
+  }
+  if (sub === 'reap') {
+    const results = await reapLeases(hostCleanup());
+    if (a.flags.json) return console.log(JSON.stringify(results, null, 2));
+    if (!results.length) return console.log(dim('Nothing to reap: every lease has a live holder.'));
+    for (const r of results) console.log(`${r.outcome === 'cleanup_failed' ? yellow('!') : green('✔')} ${r.id} ${r.pool} ${r.holder}: ${r.outcome} (${r.detail})`);
+    return;
+  }
+  if (sub === 'release') {
+    const id = a._[2], note = flag(a, 'note');
+    if (!id || !note || a._.length !== 3) die('ym devices release <lease-id> --note "how the leftover simulator was inspected and removed"');
+    const lease = resolveLease(id, note);
+    return console.log(a.flags.json ? JSON.stringify(lease, null, 2) : green(`✔ Recorded your inspection and freed ${lease.pool} lease ${lease.id}. No device was touched.`));
+  }
+  if (sub === 'recover') {
+    const id = a._[2], note = flag(a, 'note');
+    if (!id || !note || a._.length !== 3) die('ym devices recover <lease-id> --note "how you confirmed the holder is gone"');
+    const { recoverStaleLease } = await import('./leases.ts');
+    const r = await recoverStaleLease(id, note, hostCleanup());
+    if (a.flags.json) return console.log(JSON.stringify(r, null, 2));
+    return console.log(r.outcome === 'released' ? green(`✔ Recovered ${r.pool} lease ${r.id}: ${r.detail}. Only simulators it recorded were touched.`)
+      : yellow(`! Cleanup of ${r.id} failed (${r.detail}); the slot stays held. Inspect, then "ym devices release ${r.id} --note ...".`));
+  }
+  const pool = a._[2] as (typeof LEASE_POOLS)[number];
+  const command = a._.slice(3);
+  if (!LEASE_POOLS.includes(pool) || !command.length) die('ym devices lease <build|simulator|physical> [--wait-minutes N] -- <command> [args...]');
+  const { memoryHold, sampleMemory } = await import('./machine-pressure.ts');
+  const { cleanEnv, runOwnedProcess } = await import('./proc.ts');
+  const stop = new AbortController();
+  const abort = () => stop.abort('interrupted');
+  process.once('SIGINT', abort); process.once('SIGTERM', abort);
+  try {
+    const waitMinutes = flag(a, 'wait-minutes') !== undefined ? Number(flag(a, 'wait-minutes')) : config.waitMinutes;
+    const outcome = await acquireLease({ pool, capacity: capacity(pool), holder: `cli:${command[0]}`, ...await cliProject(cwd).catch(() => ({})),
+      ttlMs: config.leaseMinutes * 60_000, waitMs: waitMinutes * 60_000, signal: stop.signal, cleanup: hostCleanup(),
+      admit: async () => memoryHold(await sampleMemory(), config),
+      onWait: ({ reason }) => process.stderr.write(dim(`${reason}\n`)) });
+    if (!outcome.lease) die(`No ${pool} slot: ${outcome.reason}`);
+    let unconfirmed: { pid: number; startedAt: number | null } | null = null;
+    try {
+      const r = await runOwnedProcess(command[0]!, command.slice(1), { cwd, env: cleanEnv({ YARDMASTER_LEASE_ID: outcome.lease.id }, { pass: projectConfig.env.checks.pass }), signal: AbortSignal.any([stop.signal, outcome.lease.lost]),
+        onStdout: chunk => process.stdout.write(chunk), onStderr: chunk => process.stderr.write(chunk) });
+      process.exitCode = r.end === 'exit' && r.code !== null ? r.code : 1;
+      if (!r.reaped && r.pid !== null) unconfirmed = { pid: r.pid, startedAt: r.startedAt };
+    } finally {
+      // A command that may still be running keeps the slot; the reaper frees it once it is confirmed stopped.
+      if (unconfirmed) {
+        outcome.lease.retain([unconfirmed], 'leased command not confirmed stopped');
+        process.stderr.write(yellow(`! The command could not be confirmed stopped. Its ${pool} slot stays held until it is (ym devices status, ym devices reap).\n`));
+      } else outcome.lease.release();
+    }
   } finally { process.off('SIGINT', abort); process.off('SIGTERM', abort); }
 }
 
@@ -964,8 +1092,10 @@ async function cmdVerify(a: Args) {
   process.once('SIGINT', abort); process.once('SIGTERM', abort);
   try {
     const receipts: string[] = [];
+    const project = await cliProject(cwd);
     const result = await verifyArtifact(cwd, config.verify, config.verifyTimeoutMinutes, stop.signal, undefined, {
-      services: config.services, onServiceResult: run => { receipts.push(run.receiptPath); },
+      envPass: config.env.checks.pass, services: config.services, context: project,
+      onServiceResult: async run => { receipts.push(run.receiptPath); await keepDeviceEvidence(run, project); },
     });
     console.log(JSON.stringify({ ...result, receipts }, null, 2));
     if (!result.ok) process.exitCode = 1;
@@ -1015,7 +1145,7 @@ async function cmdDoctor(a: Args) {
       if (remote) {
         const explicit = flag(a, 'token') ?? process.env.YARDMASTER_TOKEN;
         const local = readHubInfo();
-        if (explicit || (local && normalizeHubUrl(local.url, { privateNetwork }) === url)) client = fleetClient(url, explicit ?? hubToken(), { privateNetwork });
+        if (explicit || (isLoopbackHub(url) && local && normalizeHubUrl(local.url, { privateNetwork }) === url)) client = fleetClient(url, explicit ?? hubToken(), { privateNetwork });
         else {
           const projectId = flag(a, 'project') ?? (root ? await projectIdFor(root) : undefined);
           if (!projectId) throw new Error('Pass --project ID or run from the paired repo to check this worker channel.');
@@ -1136,6 +1266,7 @@ async function main() {
     case 'hook': return cmdHook(a);
     case 'plugin': return cmdPlugin(a);
     case 'providers': return cmdProviders(a);
+    case 'devices': return cmdDevices(a);
     case 'verify': return cmdVerify(a);
     case 'doctor': return cmdDoctor(a);
     case 'presets': return cmdPresets();

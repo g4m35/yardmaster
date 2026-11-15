@@ -1,5 +1,6 @@
 import { LOCKFILES } from './warmstart.ts';
-import * as z from 'zod/v4';
+import type * as z from 'zod/v4';
+import { ReviewSchema } from './run-schema.ts';
 import { AGENT_FAMILY, agentSettings, type Config } from './config.ts';
 import { chooseReviewer } from './router.ts';
 import { matches } from './scope.ts';
@@ -12,13 +13,6 @@ import type { Task } from './types.ts';
 
 export const REVIEW_MARKER = 'YARDMASTER-REVIEW';
 
-const ReviewSchema = z.object({
-  verdict: z.enum(['approve', 'request_changes']),
-  issues: z
-    .array(z.object({ severity: z.enum(['blocker', 'major', 'minor']).default('minor'), file: z.string().optional(), note: z.string().min(3) }))
-    .default([]),
-  summary: z.string().optional(),
-});
 export type Review = z.infer<typeof ReviewSchema>;
 
 /** Accounting and provenance carried by every review result, including skipped and failed ones. */

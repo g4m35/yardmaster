@@ -6,10 +6,14 @@ import { runOwnedProcess, type OwnedRunOptions } from './proc.ts';
 import { ProviderResultSchema, SERVICE_KINDS, type ProviderOperation, type ProviderPlugin, type ServicesConfig } from './provider-contract.ts';
 import { serviceReceipt, type ServiceContext } from './service-receipts.ts';
 import { BrowserbaseOptionsSchema, runBrowserbase } from './browserbase-provider.ts';
+import { AppleSimulatorOptionsSchema, runAppleSimulator } from './device-provider.ts';
 import type { ServiceIntent } from './service-holds.ts';
 
 function browserbaseOperation(provider: string, op: ProviderOperation): boolean {
   return provider === 'browserbase' && op.command.at(-1) === '__browserbase-provider';
+}
+function simulatorOperation(provider: string, op: ProviderOperation): boolean {
+  return provider === 'apple-simulator' && op.command.at(-1) === '__apple-simulator-provider';
 }
 
 export interface ProviderCandidate {
@@ -47,10 +51,9 @@ export function resolveProviderExecutable(command: string, cwd: string, env: Nod
 function operationFor(provider: string, capability: string, services: ServicesConfig, plugins: ProviderPlugin[]): ProviderOperation | undefined {
   const capabilities = provider === 'local' ? services.local : plugins.find(p => p.name === provider)?.capabilities;
   const op = capabilities && Object.hasOwn(capabilities, capability) ? capabilities[capability] : undefined;
-  if (op && browserbaseOperation(provider, op)) {
-    const options = BrowserbaseOptionsSchema.safeParse(services.providers[provider]?.options ?? {});
-    if (options.success) return { ...op, requiredEnv: [...new Set([...op.requiredEnv, ...options.data.requiredEnv])] };
-  }
+  const extra = op && browserbaseOperation(provider, op) ? BrowserbaseOptionsSchema.safeParse(services.providers[provider]?.options ?? {})
+    : op && simulatorOperation(provider, op) ? AppleSimulatorOptionsSchema.safeParse(services.providers[provider]?.options ?? {}) : null;
+  if (op && extra?.success) return { ...op, requiredEnv: [...new Set([...op.requiredEnv, ...extra.data.requiredEnv])] };
   return op;
 }
 
@@ -74,6 +77,12 @@ export function planService(capability: string, services: ServicesConfig, plugin
       const browser = BrowserbaseOptionsSchema.safeParse(services.providers[provider]?.options ?? {});
       if (!browser.success) reasons.push('Browserbase needs valid options.command; timeoutSeconds must be 60–240');
       else if (!resolveProviderExecutable(browser.data.command[0]!, cwd, env)) reasons.push('configured browser test executable is missing or not executable');
+    }
+    if (simulatorOperation(provider, op)) {
+      const device = AppleSimulatorOptionsSchema.safeParse(services.providers[provider]?.options ?? {});
+      if (!device.success) reasons.push(`apple-simulator options are invalid: ${device.error.issues.map(issue => `${issue.path.join('.') || 'options'} ${issue.message}`).join('; ').slice(0, 300)}`);
+      // Discovery does not boot, list or create anything; it only checks that Xcode's tool is present.
+      if (!resolveProviderExecutable('xcrun', cwd, env)) reasons.push('xcrun is missing; Apple simulators need macOS with Xcode');
     }
     for (const name of op.requiredEnv) {
       if (BLOCKED_ENV.has(name)) reasons.push(`environment variable ${name} cannot be forwarded to providers`);
@@ -152,6 +161,12 @@ export async function runService(capability: string, input: unknown, services: S
     return finish({ apiVersion: 1, requestId, provider, capability, dispatched: run.dispatched,
       execution, result: { ...run.result, summary: redactValue(run.result.summary, secrets) as string,
         data: redactValue(run.result.data, secrets), artifacts: run.result.artifacts.map(file => redactValue(file, secrets) as string) } });
+  }
+  if (simulatorOperation(provider, op)) {
+    const run = await runAppleSimulator(AppleSimulatorOptionsSchema.parse(request.options), { cwd: options.cwd, env: childEnv,
+      evidenceDir: receipt.directory, input, requestId, context: options.context ?? {}, signal: options.signal, onSpawn });
+    return finish({ apiVersion: 1, requestId, provider, capability, dispatched: run.dispatched, execution: run.execution,
+      result: { ...run.result, summary: redactValue(run.result.summary, secrets) as string, data: redactValue(run.result.data, secrets) } });
   }
   let stdout = '';
   let outputBytes = 0;

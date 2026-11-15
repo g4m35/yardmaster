@@ -19,11 +19,12 @@ import type { Client } from './api.ts';
 import type { TaskPatch } from './coordinator.ts';
 import { changedLineCount, formatIssues, runReview, shouldReview } from './review.ts';
 import { siblingWorktrees, warmStart } from './warmstart.ts';
-import { emptyUsage, UsageMeter, type UsageSnapshot } from './usage.ts';
+import { emptyUsage, UsageMeter, UsageReporter } from './usage.ts';
 import { routeEffort, routedEffortOf } from './jev.ts';
 import { withProcessScope, UtilityProcessError, currentProcessScopeSignal } from './proc.ts';
 import { EffortPolicyError, launchEffort, launchIdentity } from './effort.ts';
 import { verifyArtifact as runVerify, hasVerification, serviceVerificationHooks } from './verification.ts';
+import { boundEvidence } from './device-evidence.ts';
 
 export class Semaphore {
   private queue: { grant: () => void; reject: (error: Error) => void; signal?: AbortSignal; abort: () => void }[] = [];
@@ -105,6 +106,13 @@ export function worktreePathFor(config: Config, project: Project, taskId: string
 }
 
 /** A task's own checks run in addition to the project's: work never merges on a lower bar than the project sets. */
+/** Device evidence travels with the service result so the hub can show it beside the task. */
+function deviceEvidenceAction(run: { requestId: string; result: object; receiptPath: string }, task: Pick<Task, 'id' | 'project_id'>) {
+  const evidence = boundEvidence(run.result, { requestId: run.requestId, projectId: task.project_id, taskId: task.id });
+  const receiptPath = run.receiptPath;
+  return evidence ? { evidence, receiptPath } : {};
+}
+
 export function verifyCommands(task: Pick<Task, 'verify'>, config: Pick<Config, 'verify'>): string[] {
   return [...config.verify, ...(task.verify ?? []).filter((c) => !config.verify.includes(c))];
 }
@@ -273,7 +281,7 @@ export async function runAttempt(ctx: RunContext): Promise<RunOutcome> {
       }
     }).catch(() => { if (lease <= Date.now()) stopTask('lost', 'Hub unreachable beyond the claim lease.'); })
       .finally(() => { polling = false; });
-  }, 250);
+  }, Math.min(250, Math.max(200, ctx.config.liveOverlapIntervalSeconds * 500)));
   try {
     const owner = claimOwner(ctx.task);
     const fenced = new Set(['task.update', 'task.completeReport', 'task.usage', 'task.touched', 'task.event', 'run.start', 'run.update', 'run.log', 'run.usage', 'run.utility', 'lesson.outcome']);
@@ -408,7 +416,7 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
     for (const command of config.worktree.setup) {
       await api['run.update']({ runId, patch: { phase: 'setup:spawning' } });
       attemptReaped = false;
-      const r = await runShell(command, { cwd: wt, timeoutMs: config.verifyTimeoutMinutes * 60_000, signal: ctx.signal, onSpawn: async ({ pid, startedAt }) => { await api['run.update']({ runId, patch: { phase: 'setup', pid, proc_started: startedAt } }); } });
+      const r = await runShell(command, { cwd: wt, env: cleanEnv({ CI: '1' }, { pass: config.env.checks.pass }), timeoutMs: config.verifyTimeoutMinutes * 60_000, signal: ctx.signal, onSpawn: async ({ pid, startedAt }) => { await api['run.update']({ runId, patch: { phase: 'setup', pid, proc_started: startedAt } }); } });
       attemptReaped = r.reaped;
       if (!r.reaped) { attemptReaped = false; await api['run.update']({ runId, patch: { status: 'cleanup_failed' } }); return finishNeedsHuman(ctx, 'A setup process survived cleanup; work is held for recovery.'); }
       await api['run.update']({ runId, patch: { phase: 'prepare', pid: null, proc_started: null } });
@@ -523,16 +531,16 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   ctx.cleanup?.(() => { raw.end(); });
   const watchdog = new Watchdog(config.watchdog);
   const meter = new UsageMeter(priceFor(config, ctx.agent, ctx.model), baseline);
-  let usageSequence = 0;
-  const recordUsage = (usage: UsageSnapshot) => api['run.usage']({ runId, taskId: task.id, owner: claimOwner(task), sequence: ++usageSequence, usage });
+  const reporter = new UsageReporter((sequence, usage) => api['run.usage']({ runId, taskId: task.id, owner: claimOwner(task), sequence, usage }));
+  const recordUsage = reporter.record.bind(reporter);
   let resultText = '';
   let resultOk: boolean | null = null;
   let lastText = '';
   let stderrTail = '';
   let stop: { reason: StopReason; message: string } | null = null;
   let lastActivity = '';
+  let acknowledgedActivity: string | null = null;
   const budget = reservation.amountUsd;
-  const owner = claimOwner(task);
 
   let coding: OwnedProcess | null = null;
   const requestStop = (reason: StopReason, message: string) => {
@@ -596,7 +604,7 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   finalUsageRecorded = false;
   coding = startOwnedProcess(spec.command, spec.args, {
     cwd: wt, env: cleanEnv({ ...spec.env, YARDMASTER_TASK_ID: task.id, YARDMASTER_ATTEMPT: String(task.attempts),
-      YARDMASTER_GENERATION: String(task.generation), YARDMASTER_PROJECT_ID: task.project_id }),
+      YARDMASTER_GENERATION: String(task.generation), YARDMASTER_PROJECT_ID: task.project_id }, { agent: ctx.agent, pass: config.env.pass }),
     stdin: spec.stdin, signal: ctx.signal,
     onSpawn: async ({ pid, startedAt }) => {
       await api['run.update']({ runId, patch: { phase: 'agent', pid, proc_started: startedAt } });
@@ -616,15 +624,11 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
     const v = watchdog.tick();
     if (v) requestStop(v.kind, v.message);
     await recordUsage(meter.snapshot()).catch(() => undefined);
-    const patch: Record<string, unknown> = { last_activity: lastActivity };
-    await api['run.update']({ runId, patch }).catch(() => undefined);
+    const activity = lastActivity;
+    if (activity !== acknowledgedActivity) {
+      await api['run.update']({ runId, patch: { last_activity: activity } }).then(() => { acknowledgedActivity = activity; }).catch(() => undefined);
+    }
     try {
-      const control = await api['task.peek']({ id: task.id });
-      if (control.assignee !== owner.assignee || control.generation !== owner.generation) requestStop('lost', 'This attempt no longer owns the task (it was re-queued or claimed elsewhere).');
-      else if (control.status === 'canceled') requestStop('canceled', 'Canceled.');
-      else if (control.control === 'stop') requestStop('stopped', 'Stopped on request.');
-      else if (control.control === 'stop-pause') requestStop('shutdown', 'Paused by the supervisor; partial work is saved.');
-      else if (control.control === 'redirect') requestStop('redirected', 'Restarting with new guidance from the supervisor.');
       if (Date.now() - lastTouchedCheck > config.liveOverlapIntervalSeconds * 1000 && !stop) {
         lastTouchedCheck = Date.now();
         const touched = await changedFiles(wt, baseSha!);
@@ -801,7 +805,7 @@ async function runNativeArtifact(ctx: RunContext, runId: string, log: LogBuffer,
   for (const command of config.worktree.setup) {
     await api['run.update']({ runId, patch: { phase: 'setup:spawning' } });
     setAttemptReaped(false);
-    const result = await runShell(command, { cwd: wt, timeoutMs: config.verifyTimeoutMinutes * 60_000, signal: ctx.signal,
+    const result = await runShell(command, { cwd: wt, env: cleanEnv({ CI: '1' }, { pass: config.env.checks.pass }), timeoutMs: config.verifyTimeoutMinutes * 60_000, signal: ctx.signal,
       onSpawn: async ({ pid, startedAt }) => { await api['run.update']({ runId, patch: { phase: 'setup', pid, proc_started: startedAt } }); } });
     setAttemptReaped(result.reaped);
     if (!result.reaped) { await api['run.update']({ runId, patch: { status: 'cleanup_failed' } }); return finishNeedsHuman(ctx, 'Native setup process requires recovery.'); }
@@ -858,10 +862,12 @@ async function acceptArtifact(ctx: RunContext, wt: string, baseSha: string, file
     phase('collect');
     const result = await ctx.verifySlots.use(() => runVerify(wt, commands, config.verifyTimeoutMinutes, ctx.signal,
       async ({ pid, startedAt }) => { await api['run.update']({ runId, patch: { phase: 'verify', pid, proc_started: startedAt } }); }, {
+        envPass: config.env.checks.pass,
         ...serviceVerificationHooks(config.services, { projectId: task.project_id, taskId: task.id, runId },
           (level, kind, message, data) => event(ctx, level, kind, message, data), {
             begin: intent => api['run.service']({ runId, taskId: task.id, owner: claimOwner(task), action: { kind: 'begin', ...intent } }),
-            finish: run => api['run.service']({ runId, taskId: task.id, owner: claimOwner(task), action: { kind: 'finish', requestId: run.requestId, status: run.result.status, reaped: run.execution.reaped } }),
+            finish: run => api['run.service']({ runId, taskId: task.id, owner: claimOwner(task), action: { kind: 'finish', requestId: run.requestId, status: run.result.status, reaped: run.execution.reaped,
+              ...deviceEvidenceAction(run, task) } }),
           }),
         beforeSpawn: async () => {
           await api['run.update']({ runId, patch: { phase: 'verify:spawning' } });
@@ -902,7 +908,7 @@ async function acceptArtifact(ctx: RunContext, wt: string, baseSha: string, file
     let reviewRun: string | null = null;
     let reviewReaped = true;
     let reviewAccounted = true;
-    let reviewSequence = 0;
+    const reviewReporter = new UsageReporter((sequence, usage) => api['run.usage']({ runId: reviewRun!, taskId: task.id, owner: claimOwner(task), sequence, usage }));
     let reviewFinalizing = false;
     let releaseReviewer: (() => void) | undefined;
     const reviewConfig = { ...config, review: { ...config.review } };
@@ -927,7 +933,7 @@ async function acceptArtifact(ctx: RunContext, wt: string, baseSha: string, file
           reviewAccounted = false;
         },
         onSpawn: async ({ pid, startedAt }) => { if (reviewRun) await api['run.update']({ runId: reviewRun, patch: { phase: 'review', pid, proc_started: startedAt } }); },
-        onUsage: async (usage) => { if (reviewRun && !reviewFinalizing) await api['run.usage']({ runId: reviewRun, taskId: task.id, owner: claimOwner(task), sequence: ++reviewSequence, usage }); },
+        onUsage: async (usage) => { if (reviewRun && !reviewFinalizing) await reviewReporter.record(usage); },
       },
     }).catch((err: Error) => ({ skipped: err.message, reason: 'failed' as const, reviewer: null, required: config.review.required,
       costUsd: 0, tokensIn: 0, tokensOut: 0, costEstimated: true, usage: emptyUsage(), model: null, startedAt: Date.now(), endedAt: Date.now(), status: 'not_started' as const, error: err.message, reaped: reviewReaped })).finally(() => releaseReviewer?.());
@@ -935,7 +941,7 @@ async function acceptArtifact(ctx: RunContext, wt: string, baseSha: string, file
     reviewReaped = outcome.reaped;
     phase('review');
     if (reviewRun) {
-      await api['run.usage']({ runId: reviewRun, taskId: task.id, owner: claimOwner(task), sequence: ++reviewSequence, usage: outcome.usage });
+      await reviewReporter.record(outcome.usage);
       reviewAccounted = true;
       await api['run.update']({ runId: reviewRun, patch: { status: !outcome.reaped ? 'cleanup_failed' : 'skipped' in outcome ? outcome.status === 'not_started' ? 'skipped' : 'failed' : 'succeeded',
         ended_at: outcome.endedAt, stop_reason: 'skipped' in outcome ? outcome.skipped : null, verdict: 'review' in outcome ? JSON.stringify(outcome.review) : null,

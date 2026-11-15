@@ -32,7 +32,7 @@ function fixture(agent: string) {
   const client = localClient(buildMethods(coord, { machineId: 'm-hub' }));
   const identity = { runId: 'r-cache', taskId: 't-cache', owner: { generation: 1, assignee: 'machine:m-cache' } };
   const persist = (usage: UsageSnapshot, sequence = 1) => client['run.usage']({ ...identity, sequence, usage });
-  function check(snapshot: UsageSnapshot, expectedRead: number | null, sequence = 1) {
+  function check(snapshot: UsageSnapshot, expectedRead: number | null, sequence = 1, entries = sequence) {
     const row = db.prepare('SELECT * FROM runs WHERE id = ?').get(identity.runId)!;
     assert.equal(row.cache_read_tokens, expectedRead, 'run persistence preserves the cache counter presence');
     assert.equal(row.cache_write_tokens, snapshot.cacheWriteTokens);
@@ -42,7 +42,7 @@ function fixture(agent: string) {
     assert.equal(row.tokens_out, snapshot.tokensOut);
     const ledger = db.prepare(`SELECT COUNT(*) AS count, SUM(tokens_in_delta) AS tokens_in,
       SUM(tokens_out_delta) AS tokens_out FROM usage_ledger WHERE run_id = ?`).get(identity.runId)!;
-    assert.equal(ledger.count, sequence, 'the fenced API wrote each absolute snapshot once');
+    assert.equal(ledger.count, entries, 'the fenced API writes only changed absolute snapshots');
     assert.equal(ledger.tokens_in, snapshot.tokensIn);
     assert.equal(ledger.tokens_out, snapshot.tokensOut);
     const entry = buildRegistry(db, { projectId: 'p-cache', now }).entries.find(e => e.runId === identity.runId)!;
@@ -176,7 +176,7 @@ for (const reportedCost of [false, true]) for (const read of [undefined, 0, 240]
         assert.ok(Math.abs(snapshot.costUsd - expectedCost) < 1e-12);
         assert.equal(snapshot.provenance, reportedCost ? 'actual' : 'estimated');
         await f.persist(snapshot, sequence);
-        f.check(snapshot, read ?? null, sequence);
+        f.check(snapshot, read ?? null, sequence, 2);
         const total = f.db.prepare('SELECT SUM(tokens_in_delta) AS input, SUM(cost_delta_micros) AS micros FROM usage_ledger WHERE run_id = ?').get(f.identity.runId)!;
         assert.equal(total.input, expectedInput, 'ledger corrections retain reads without counting a repeated final twice');
         assert.equal(total.micros, Math.round(expectedCost * 1e6));

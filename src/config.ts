@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { availableParallelism } from 'node:os';
 import * as z from 'zod/v4';
 import { expandHome, paths, yardHome } from './paths.ts';
+import { ScopePattern } from './run-schema.ts';
 import { ServicesConfigSchema } from './provider-contract.ts';
 
 export const TIERS = ['cheap', 'standard', 'strong'] as const;
@@ -104,7 +105,7 @@ export const PolicySchema = z.object({
   name: z.string().optional(),
   when: z
     .object({
-      files: z.array(z.string()).optional().describe('Matches if the task scope overlaps any of these globs.'),
+      files: z.array(ScopePattern).max(200).optional().describe('Matches if the task scope overlaps any of these globs.'),
       text: z.string().optional().describe('Case-insensitive regex tested against title and prompt.'),
       tier: TierSchema.optional(),
       createdBy: z.string().optional(),
@@ -128,6 +129,10 @@ export type Policy = z.infer<typeof PolicySchema>;
 
 export const ConfigSchema = z.object({
   services: ServicesConfigSchema,
+  env: z.object({
+    pass: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/).max(200)).max(100).default([]),
+    checks: z.object({ pass: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/).max(200)).max(100).default([]) }).prefault({}),
+  }).prefault({}),
   preset: z.enum(['frugal', 'balanced', 'fast', 'careful']).default('balanced'),
   baseBranch: z.string().optional(),
   integration: z
@@ -187,7 +192,7 @@ export const ConfigSchema = z.object({
       backoffSeconds: z.number().default(20),
     })
     .default({ maxAttempts: 3, escalate: true, sameFailureLimit: 2, backoffSeconds: 20 }),
-  hotFiles: z.array(z.string()).default([
+  hotFiles: z.array(ScopePattern).max(200).default([
     'yardmaster.json',
     'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb', 'Cargo.lock', 'poetry.lock', 'uv.lock', 'go.sum',
     '**/migrations/**', '.github/workflows/**',
@@ -198,9 +203,34 @@ export const ConfigSchema = z.object({
   liveOverlapIntervalSeconds: z.number().min(0.2).default(10),
   /** Where task worktrees live. Empty means <YARDMASTER_HOME>/worktrees. */
   worktreeRoot: z.string().default(''),
+  /** Admission for new tasks, checked before the first one too. Other programs on the machine count. */
   resources: z
-    .object({ maxLoadPerCpu: z.number().default(0.9), minFreeMemMb: z.number().default(1024) })
-    .default({ maxLoadPerCpu: 0.9, minFreeMemMb: 1024 }),
+    .object({
+      maxLoadPerCpu: z.number().default(0.9), minFreeMemMb: z.number().default(1024),
+      /** Hold new tasks at or above this macOS memory-pressure level ("off" to ignore it). */
+      holdAtPressure: z.enum(['warn', 'critical', 'off']).default('critical'),
+    })
+    .default({ maxLoadPerCpu: 0.9, minFreeMemMb: 1024, holdAtPressure: 'critical' }),
+  /**
+   * Machine-wide simulator, physical-device and build slots (docs/DEVICES.md). Put limits in the global config so
+   * every project on this machine shares them; a project setting can only make its own requests wait longer.
+   */
+  devices: z
+    .object({
+      limits: z.object({
+        build: z.number().int().min(1).max(16).default(1),
+        simulator: z.number().int().min(1).max(16).default(1),
+        physical: z.number().int().min(1).max(16).default(1),
+      }).prefault({}),
+      /** Heavy device work waits at or above this pressure level: stricter than ordinary task admission. */
+      holdAtPressure: z.enum(['warn', 'critical', 'off']).default('warn'),
+      minFreeMemMb: z.number().min(0).default(2048),
+      /** Holders renew within this. A holder that stops renewing is shown as stale but keeps its slot while its process lives. */
+      leaseMinutes: z.number().min(1).max(240).default(5),
+      /** How long a request waits in the queue for a slot or for memory before reporting unknown. */
+      waitMinutes: z.number().min(0).max(24 * 60).default(30),
+    })
+    .prefault({}),
   cleanup: z
     .object({ auto: z.boolean().default(true), logRetentionDays: z.number().default(14), eventRetentionDays: z.number().int().min(1).max(3650).nullable().default(30), deleteMergedBranches: z.boolean().default(true) })
     .default({ auto: true, logRetentionDays: 14, eventRetentionDays: 30, deleteMergedBranches: true }),

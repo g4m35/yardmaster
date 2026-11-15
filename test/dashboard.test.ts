@@ -640,3 +640,33 @@ test('live data stays readable: counted projects, short feed names, plain machin
   assert.equal(h.$('tab-changes').textContent, 'Changes9');
   assert.doesNotMatch(h.$('panel-changes').textContent, /994|f12\.ts/);
 });
+
+test('task details show device evidence as separate code, simulator and physical-device answers', async () => {
+  const h = harness();
+  const evidence = { kind: 'yardmaster.device-evidence', version: 1, requestId: 'r', projectId: 'p-one', taskId: 't-one', commit: 'c'.repeat(40), requirement: 'physical',
+    status: { code: 'passed', simulator: 'passed', physical: 'untested', overall: 'unknown' },
+    artifact: { path: '/w/build/Smoke.app', sha256: 'a1b2c3d4e5f6'.padEnd(64, '0'), bundleId: 'dev.yardmaster.smoke', source: 'reused', fingerprint: 'native-1', builtFromCommit: 'd'.repeat(40) },
+    environment: { machineId: 'm-one', os: 'darwin 27.2', arch: 'arm64', xcode: 'Xcode 27.2' },
+    device: { kind: 'simulator', name: 'ym-1', model: 'iPhone 17', modelIdentifier: 'iPhone18,3', runtime: 'iOS 26.5', runtimeIdentifier: 'rt', udid: 'U', createdByYardmaster: true },
+    checks: [{ name: 'launch', runner: 'simctl', status: 'passed', durationMs: 1, detail: '', log: null }, { name: 'smoke', runner: 'maestro', status: 'passed', durationMs: 1, detail: '', log: null }],
+    files: [], lease: { id: 'l-1', pool: 'simulator', queuedAt: 0, acquiredAt: 1, releasedAt: 2, waitedMs: 0, cleanup: 'released' }, startedAt: '', completedAt: '', summary: 'Simulator passed; physical device untested. A simulator pass does not satisfy this physical-device requirement.' };
+  h.respond(method => method === 'task.get' ? { ...detail(), label: 'Needs you', devices: [{ evidence, receiptPath: '/home/.yardmaster/service-runs/r/result.json', recordedAt: now }],
+    task: { ...detail().task, status: 'needs_human', branch: 'yardmaster/t-one', base_sha: 'b'.repeat(40), head_sha: 'c'.repeat(40) } } : method === 'registry.list' ? snapshot() : board());
+  await h.api.refresh(); await h.api.showTask('t-one');
+  const view = h.$('d-devices');
+  assert.ok(view, 'device evidence appears under Details');
+  assert.deepEqual(view.children[1]!.children[0]!.children.map(li => `${li.textContent}=${li.getAttribute('data-s')}`), ['Code passed=passed', 'Simulator passed=passed', 'Physical device untested=untested']);
+  assert.match(view.textContent, /DeviceiPhone 17 · iOS 26\.5 · simulator \(created and removed by Yardmaster\)RequirementPhysical deviceCommitcccccccccccc/);
+  assert.match(view.textContent, /ArtifactSmoke\.app · sha256 a1b2c3d4e5f6 · reused from dddddddddddd/);
+  assert.match(view.textContent, /Checkslaunch passed · smoke passed/);
+  assert.match(view.textContent, /does not satisfy this physical-device requirement/);
+  // Creation is not removal: a failed cleanup never reads as removed.
+  h.respond(method => method === 'task.get' ? { ...detail(), devices: [{ evidence: { ...evidence, lease: { ...evidence.lease, cleanup: 'cleanup_failed' } }, receiptPath: null, recordedAt: now }],
+    task: { ...detail().task, branch: 'yardmaster/t-one' } } : method === 'registry.list' ? snapshot() : board());
+  await h.api.showTask('t-one');
+  assert.match(h.$('d-devices').textContent, /\(created by Yardmaster; removal not confirmed\)/);
+  // No device evidence: nothing is shown, not an empty pass.
+  h.respond(method => method === 'task.get' ? { ...detail(), task: { ...detail().task, branch: 'yardmaster/t-one' } } : method === 'registry.list' ? snapshot() : board());
+  await h.api.showTask('t-one');
+  assert.equal(h.$('d-devices'), null);
+});

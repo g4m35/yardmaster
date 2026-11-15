@@ -1,13 +1,15 @@
 import { isClean, revParse } from './git.ts';
-import { runShell, type OwnedRunOptions } from './proc.ts';
+import { cleanEnv, runShell, type OwnedRunOptions } from './proc.ts';
 import { loadPlugins } from './plugins.ts';
 import { planService, runService, type ServicePlan } from './providers.ts';
 import type { ServicesConfig } from './provider-contract.ts';
 import type { ServiceContext } from './service-receipts.ts';
 import type { ServiceIntent } from './service-holds.ts';
+import { bindingProblem, evidenceProblem, evidenceState, requiredDeviceLevel } from './device-evidence.ts';
 
 export type ServiceRun = Awaited<ReturnType<typeof runService>>;
 type VerificationLifecycle = {
+  envPass?: readonly string[];
   beforeSpawn?: () => void | Promise<void>; onExit?: (reaped: boolean) => void | Promise<void>;
   services?: ServicesConfig; context?: ServiceContext;
   onServicePlan?: (plan: ServicePlan) => void | Promise<void>;
@@ -52,7 +54,7 @@ export async function verifyArtifact(cwd: string, commands: string[], timeoutMin
   for (const command of commands) {
     if (signal?.aborted) return fail(command, 'Verification canceled before starting the next command.');
     await lifecycle?.beforeSpawn?.();
-    const r = await runShell(command, { cwd, timeoutMs: timeoutMinutes * 60_000, signal, onSpawn });
+    const r = await runShell(command, { cwd, env: cleanEnv({ CI: '1' }, { pass: lifecycle?.envPass }), timeoutMs: timeoutMinutes * 60_000, signal, onSpawn });
     await lifecycle?.onExit?.(r.reaped);
     if (!r.reaped) return { ...fail(command, 'A verification process survived cleanup. Keep this worktree held for recovery; do not retry into it.'), reaped: false };
     // Check even on command failure: retain the mutated files for the agent/person to inspect.
@@ -74,7 +76,7 @@ export async function verifyArtifact(cwd: string, commands: string[], timeoutMin
       let run: ServiceRun;
       try {
         run = await runService(check.capability, check.input, services, plugins.providers, {
-          cwd, signal, onSpawn, context: { ...lifecycle.context, sha }, beforeDispatch: lifecycle.beforeService,
+          cwd, signal, onSpawn, context: { ...lifecycle.context, sha, ...(commands.length ? { codeChecks: 'passed' as const } : {}) }, beforeDispatch: lifecycle.beforeService,
         });
       } catch {
         // An exception may happen after dispatch or while saving evidence. Do not claim a clean process exit.
@@ -88,6 +90,18 @@ export async function verifyArtifact(cwd: string, commands: string[], timeoutMin
       if ((await revParse(cwd, 'HEAD')) !== sha || !(await isClean(cwd))) return { ...fail(command, `Provider verification changed the committed artifact. Preserve the changes and rerun verification. Receipt: ${run.receiptPath}`), serviceStatus: 'unknown' };
       if (signal?.aborted || run.result.status !== 'passed') return { ...fail(command, `${run.result.summary}\nReceipt: ${run.receiptPath}`),
         serviceStatus: signal?.aborted || run.result.status === 'unknown' ? 'unknown' : 'failed' };
+      // Device evidence must describe this commit and meet its own requirement; a simulator never stands in for hardware.
+      const device = evidenceState(run.result);
+      if (device.kind === 'invalid') return { ...fail(command, `The provider attached malformed device evidence; it cannot establish a pass.\nReceipt: ${run.receiptPath}`), serviceStatus: 'unknown' };
+      // The requirement comes from this check's input or the project's provider options, not from the provider's report.
+      // A stated requirement needs matching evidence whatever service the provider declares itself to be.
+      const required = requiredDeviceLevel(check.input, services.providers[plan.selected]?.options);
+      if (device.kind === 'absent' && required) {
+        return { ...fail(command, `This check requires a ${required} device pass; ${plan.selected} reported a pass without device evidence.\nReceipt: ${run.receiptPath}`), serviceStatus: 'unknown' };
+      }
+      const problem = device.kind === 'valid' ? bindingProblem(device.evidence, { requestId: run.requestId, projectId: lifecycle.context?.projectId, taskId: lifecycle.context?.taskId })
+        ?? evidenceProblem(device.evidence, sha, required ?? 'simulator') : null;
+      if (problem) return { ...fail(command, `Device evidence does not establish a pass for commit ${sha}: ${problem}\nReceipt: ${run.receiptPath}`), serviceStatus: 'unknown' };
     }
   }
   return { ok: true, command: [...commands, ...(lifecycle?.services?.verify ?? []).map(check => `provider:${check.capability}`)].join(' && '), output: '', sha, reaped: true };

@@ -1,12 +1,14 @@
+import { RunPatchSchema, ScopePattern, LiteralPath, TouchedSchema } from './run-schema.ts';
 import { submitSessionHandoff } from './handoff.ts';
 import * as z from 'zod/v4';
-import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileTail } from './file-tail.ts';
 import { checkLiveOverlap, type Coordinator, type TaskPatch } from './coordinator.ts';
 import { ACTIVE_STATUSES, NewTaskSchema, STATUS_LABEL, TASK_STATUSES, TERMINAL_STATUSES, type Task, type TaskStatus } from './types.ts';
 import { paths } from './paths.ts';
-import { clip, formatUsd, tail } from './text.ts';
-import { changeSince, revParse } from './git.ts';
+import { clip, formatUsd } from './text.ts';
+import { ArtifactDiffCache, changeSince, revParse } from './git.ts';
 import type { Config } from './config.ts';
 import type { Supervisor } from './supervisor.ts';
 import { diskReport } from './janitor.ts';
@@ -15,7 +17,7 @@ import { addLesson, creditLessons, lessonFromFix, lessonsFor, listLessons, markU
 import { coupling, filesIn } from './imports.ts';
 import { PairingStore } from './pairing.ts';
 import { buildRegistry } from './registry.ts';
-import { normalizePattern } from './scope.ts';
+import { literalPattern, normalizePattern } from './scope.ts';
 import { tx } from './transaction.ts';
 import { WORKER_ACTIVE_STATUSES, WORKER_FINALIZE_STATUSES } from './worker-policy.ts';
 import { recordUtility, runUtilityKey, utilitiesStopped, utilities, taskHasPendingUtilities } from './utility-records.ts';
@@ -23,6 +25,8 @@ import { noteControllerActivity } from './controller-activity.ts';
 import { loadPlugins } from './plugins.ts';
 import { planService, providerInventory } from './providers.ts';
 import { beginService, finishService, resolveService, serviceHolds } from './service-holds.ts';
+import { DeviceEvidenceSchema, bindingProblem, deviceEvidence, recordDeviceEvidence } from './device-evidence.ts';
+import { listLeases, queuePosition } from './leases.ts';
 
 /**
  * The single API surface. The hub serves it over HTTP, the CLI and MCP server call it locally or
@@ -72,7 +76,6 @@ export function boardSummary(coord: Coordinator, projectId?: string | null, supe
 }
 
 function boardSummaryInPass(coord: Coordinator, projectId?: string | null, supervisor?: Supervisor) {
-  // Open work, plus the latest failures for "needs you": the board costs the same with any amount of history.
   const tasks = [...coord.openTasks(projectId ?? null), ...coord.recentlyFinished(projectId, 'failed', 20)];
   const totals = coord.taskTotals(projectId ?? null);
   const counts = totals.counts;
@@ -141,6 +144,7 @@ export function boardText(coord: Coordinator, projectId?: string | null, supervi
 }
 
 export function buildMethods(coord: Coordinator, hooks: HubHooks) {
+  const artifactDiffs = new ArtifactDiffCache();
   const scopedLessons = (projectId: string, raw: unknown): string[] => {
     const ids = [...new Set(z.array(Id).max(20).parse(raw))];
     for (const id of ids) if (!coord.db.prepare('SELECT 1 FROM lessons WHERE id = ? AND project_id = ?').get(id, projectId)) throw new Error('Lesson does not belong to this run project.');
@@ -162,17 +166,29 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
     'run.service': method(z.object({ runId: RunId, taskId: TaskId, owner: Owner,
       action: z.discriminatedUnion('kind', [
         z.object({ kind: z.literal('begin'), requestId: z.uuid(), capability: Id.max(300), provider: Id.max(100), receiptPath: Id.max(4096) }),
-        z.object({ kind: z.literal('finish'), requestId: z.uuid(), status: z.enum(['passed', 'failed', 'unknown']), reaped: z.boolean() }),
+        z.object({ kind: z.literal('finish'), requestId: z.uuid(), status: z.enum(['passed', 'failed', 'unknown']), reaped: z.boolean(),
+          evidence: DeviceEvidenceSchema.optional(), receiptPath: z.string().max(4096).optional() }),
       ]) }), p => coord.withRunOwner(p.runId, { ...p.owner, statuses: p.action.kind === 'begin' ? WORKER_ACTIVE_STATUSES : WORKER_FINALIZE_STATUSES }, () => {
       const task = coord.getTask(p.taskId)!, run = coord.getRun(p.runId)!;
       if (p.action.kind === 'begin') {
         if (task.control) throw new Error('Task control pending; service dispatch denied');
         beginService(coord.db, `task:${task.id}`, p.action, { projectId: task.project_id, taskIds: [task.id], runId: run.id, machineId: run.machine_id });
         coord.event(task.project_id, task.id, 'info', 'service.started', `Starting ${p.action.capability} via ${p.action.provider}; request ${p.action.requestId}`, p.action);
-      } else finishService(coord.db, `task:${task.id}`, p.action.requestId, p.action.status, p.action.reaped);
+      } else {
+        const evidence = p.action.evidence;
+        if (evidence && bindingProblem(evidence, { requestId: p.action.requestId, projectId: task.project_id, taskId: task.id })) throw new Error('Device evidence does not belong to this task request');
+        finishService(coord.db, `task:${task.id}`, p.action.requestId, p.action.status, p.action.reaped);
+        if (evidence) recordDeviceEvidence(coord.db, evidence, p.action.receiptPath ?? null);
+      }
       if (hooks.externalWorker) noteControllerActivity(coord.db, task.id, run.machine_id, p.owner.generation!);
     }, p.taskId)),
     'providers.pending': method(z.object({}), () => serviceHolds(coord.db)),
+    // Leases are the hub machine's own; a remote worker's simulators are coordinated in that machine's database.
+    'devices.status': method(z.object({ projectId: Id.optional(), taskId: TaskId.optional(), limit: z.number().int().min(1).max(100).default(10) }), p => {
+      const leases = listLeases(coord.db);
+      return { machineId: hooks.machineId, leases: leases.map(lease => ({ ...lease, position: queuePosition(leases, lease) })),
+        evidence: deviceEvidence(coord.db, { projectId: p.projectId, taskId: p.taskId, limit: p.limit }) };
+    }),
     'providers.resolve': method(z.object({ requestId: z.uuid(), note: z.string().min(12).max(4000) }), p => tx(coord.db, () => {
       const held = serviceHolds(coord.db).find(hold => hold.requestId === p.requestId);
       if (!held) throw new Error('No unresolved service request with that ID');
@@ -253,6 +269,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
         dependents: coord.dependentsOf(task.id).map((d) => ({ id: d.id, title: d.title, status: d.status })),
         runs: coord.runsFor(task.id),
         events: coord.eventsSince(0, null, 40, task.id),
+        devices: deviceEvidence(coord.db, { taskId: task.id, limit: 3 }),
       };
     }),
     'task.peek': method(z.object({ id: Id }), (p) => {
@@ -271,7 +288,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       const artifact = task.head_sha && (['verifying', 'ready', 'merging', 'done', 'canceled'].includes(task.status) || !copy);
       const root = coord.getProject(task.project_id)?.root;
       try {
-        if (artifact && root) return { source: 'artifact', ...(await changeSince(root, task.base_sha, task.head_sha)), note: null };
+        if (artifact && root) return { source: 'artifact', ...(await artifactDiffs.read(root, task.base_sha, task.head_sha!)), note: null };
         if (copy) return { source: 'working copy', ...(await changeSince(copy, task.base_sha, null)), note: null };
       } catch (err) {
         return none(`This hub cannot read the change: ${clip((err as Error).message, 200)}`);
@@ -282,7 +299,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       const run = coord.latestRun(p.id);
       if (!run) return '';
       const file = activityLogPath(run.id);
-      return existsSync(file) ? tail(readFileSync(file, 'utf8'), p.lines, 200_000) : '';
+      return fileTail(file, p.lines);
     }),
     'task.update': method(z.object({ id: TaskId, patch: z.record(z.string(), z.unknown()), owner: Owner.optional() }), (p) =>
       coord.updateTaskIfOwner(p.id, p.owner ?? { assignee: '' }, p.patch as TaskPatch),
@@ -291,7 +308,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
     'task.adminUpdate': method(z.object({ id: TaskId, patch: z.record(z.string(), z.unknown()) }), (p) => coord.updateTask(p.id, p.patch as TaskPatch, { requestEdit: true })),
     // The owner's answer to "it changed files outside its scope": widen (or correct) what the task may touch.
     // A running attempt keeps the list it started with; the new list applies from the next attempt.
-    'task.setScope': method(z.object({ id: TaskId, scope: z.array(z.string().trim().min(1).max(300)).max(200), by: z.string().default('you') }), (p) => tx(coord.db, () => {
+    'task.setScope': method(z.object({ id: TaskId, scope: z.array(ScopePattern.transform(p => p.trim()).pipe(z.string().min(1).max(300))).max(200), by: z.string().default('you') }), (p) => tx(coord.db, () => {
       const task = coord.getTask(p.id);
       if (!task) throw new Error(`No task ${p.id}`);
       if (task.status === 'done' || task.status === 'canceled') throw new Error(`"${clip(task.title, 60)}" is ${STATUS_LABEL[task.status].toLowerCase()}; its files can no longer change.`);
@@ -361,7 +378,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       return coord.withRunOwner(p.runId ?? '', p.owner && { ...p.owner, statuses: WORKER_FINALIZE_STATUSES },
         () => { throw new Error('Unsequenced task usage is no longer accepted. Upgrade the worker to run.usage absolute snapshots.'); }, p.id);
     }),
-    'task.touched': method(z.object({ taskId: TaskId, runId: RunId, files: z.array(z.string()).max(2000), owner: Owner.optional() }), (p) => checkLiveOverlap(coord, p.taskId, p.runId, p.files, p.owner)),
+    'task.touched': method(z.object({ taskId: TaskId, runId: RunId, files: TouchedSchema, owner: Owner.optional() }), (p) => checkLiveOverlap(coord, p.taskId, p.runId, p.files, p.owner)),
     'task.event': method(
       z.object({ projectId: z.string().nullable(), taskId: z.string().nullable(), level: z.enum(['info', 'warn', 'error', 'success']), kind: z.string(), message: z.string(), data: z.unknown().optional(), owner: Owner.optional() }),
       (p) => tx(coord.db, () => {
@@ -386,7 +403,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
 
     // Hook operations stay small; canonical session registration is a separate identity step.
     'hook.check': method(z.object({ projectId: Id, paths: z.array(z.string()).min(1).max(50), cwd: z.string(), sessionId: Id }), (p) => {
-      const holders = coord.whoHas(p.projectId, p.paths);
+      const holders = coord.whoHas(p.projectId, p.paths, { literal: true });
       if (!holders.length) return null;
       // A folder is shared workspace, not proof that two native clients are the same session.
       const registered = coord.db.prepare('SELECT id FROM sessions WHERE id = ? AND project_id = ?').get(p.sessionId, p.projectId);
@@ -394,7 +411,8 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
     }),
     'hook.reserve': method(z.object({ projectId: Id, sessionName: Id, cwd: z.string(), paths: z.array(z.string()).min(1).max(50), machineId: z.string().nullish() }), (p) => {
       const sessionId = coord.registerSession(p.sessionName, 'hooked-agent', p.projectId, p.cwd, p.machineId ?? null);
-      return coord.claimLocks(p.projectId, sessionId, p.paths, 'edited in an interactive session', 20);
+      // Edited files are names, not patterns: a file literally called src/*.ts must not reserve every .ts file.
+      return coord.claimLocks(p.projectId, sessionId, p.paths.map(literalPattern), 'edited in an interactive session', 20);
     }),
     'board.status': method(z.object({ projectId: z.string().nullish() }), (p) => boardSummary(coord, p.projectId, hooks.supervisor)),
     'board.text': method(z.object({ projectId: z.string().nullish() }), (p) => boardText(coord, p.projectId, hooks.supervisor)),
@@ -418,11 +436,12 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
     ),
 
     'lock.claim': method(
-      z.object({ projectId: Id, holder: Id, patterns: z.array(z.string()).min(1).max(100), reason: z.string().nullish(), ttlMinutes: z.number().min(1).max(24 * 60).default(30) }),
+      z.object({ projectId: Id, holder: Id, patterns: z.array(ScopePattern).min(1).max(100), reason: z.string().nullish(), ttlMinutes: z.number().min(1).max(24 * 60).default(30) }),
       (p) => coord.claimLocks(p.projectId, p.holder, p.patterns, p.reason ?? null, p.ttlMinutes),
     ),
-    'lock.release': method(z.object({ projectId: Id, holder: Id, patterns: z.array(z.string()).optional() }), (p) => coord.releaseLocks(p.projectId, p.holder, p.patterns)),
-    'lock.check': method(z.object({ projectId: Id, paths: z.array(z.string()).min(1).max(200) }), (p) => coord.whoHas(p.projectId, p.paths)),
+    'lock.release': method(z.object({ projectId: Id, holder: Id, patterns: z.array(ScopePattern).max(200).optional() }), (p) => coord.releaseLocks(p.projectId, p.holder, p.patterns)),
+    // Each path is compared with every reservation and active scope on the shared event loop; keep a request small.
+    'lock.check': method(z.object({ projectId: Id, paths: z.array(ScopePattern).min(1).max(50) }), (p) => coord.whoHas(p.projectId, p.paths)),
 
     'session.register': method(z.object({ name: Id, agent: z.string().nullish(), projectId: z.string().nullish(), cwd: z.string().nullish(), machineId: z.string().nullish() }), (p) =>
       coord.registerSession(p.name, p.agent ?? null, p.projectId ?? null, p.cwd ?? null, p.machineId ?? null),
@@ -519,7 +538,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       for (const issue of p.reviewIssues) addLesson(coord, task.project_id, `A reviewer flagged, and the fix was accepted: ${issue}`, 'review', task.scope, task.id);
       return null;
     }),
-    'run.update': method(z.object({ runId: RunId, patch: z.record(z.string(), z.unknown()), owner: Owner.optional(), launch: z.boolean().optional() }), (p) => {
+    'run.update': method(z.object({ runId: RunId, patch: RunPatchSchema, owner: Owner.optional(), launch: z.boolean().optional() }), (p) => {
       if (p.launch) {
         if (Object.keys(p.patch).length) throw new Error('Launch authorization cannot update a run.');
         return coord.launchBudget(p.runId, p.owner);

@@ -1,3 +1,4 @@
+import { isThisMachineAddress, normalizeHubUrl, type PrivateTransport } from './fleet-client.ts';
 import type { Client } from './api.ts';
 
 /**
@@ -18,15 +19,21 @@ export function rpcDeadline(name: string, params: unknown, override?: number): n
   return RPC_TIMEOUT_MS;
 }
 
-export function remoteClient(baseUrl: string, token: string, opts: { timeoutMs?: number } = {}): Client {
-  const url = baseUrl.replace(/\/$/, '');
+/**
+ * `ownerLocal` marks the URL this machine's own hub wrote to hub.info in the owner-only home. That hub may be bound to
+ * a private overlay address (`ym hub run --host 100.x`), which is still this owner's hub: the remote-endpoint gate
+ * exists for URLs a user or environment supplies, not for the one the local hub published.
+ */
+export function remoteClient(baseUrl: string, token: string, opts: { timeoutMs?: number; ownerLocal?: boolean } & PrivateTransport = {}): Client {
+  // Owner-local only while the address is still one of this machine's; otherwise the normal remote gate applies.
+  const url = normalizeHubUrl(baseUrl, opts.ownerLocal && isThisMachineAddress(baseUrl) ? { privateNetwork: true } : opts);
   return new Proxy({} as Client, {
     get: (_t, name: string) =>
       name === 'then'
         ? undefined
         : async (params: unknown) => {
             const res = await fetch(`${url}/api/rpc/${name}`, {
-              method: 'POST',
+              method: 'POST', redirect: 'error',
               headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
               body: JSON.stringify(params ?? {}),
               signal: AbortSignal.timeout(rpcDeadline(name, params, opts.timeoutMs)),

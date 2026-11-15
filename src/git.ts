@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
-import { run, cleanEnv } from './proc.ts';
+import { run, cleanEnv, startOwnedProcess } from './proc.ts';
 import { removeWorktreeFast } from './fastfs.ts';
 
 export class GitError extends Error {
@@ -216,6 +216,7 @@ export interface Change { files: ChangeFile[]; patch: string; truncated: boolean
  * the working copy at `cwd` against `base` (tracked files only: untracked files have no diff until saved).
  */
 export async function changeSince(cwd: string, base: string, head: string | null, maxBytes = 400_000): Promise<Change> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error('Patch byte limit must be a positive safe integer.');
   // Workers can write these fields. Anything but a full commit id could be read by Git as an option.
   for (const sha of [base, head]) if (sha !== null && !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(sha)) throw new Error(`Not a commit id: ${sha.slice(0, 80)}`);
   const range = head ? [base, head] : [base];
@@ -230,8 +231,71 @@ export async function changeSince(cwd: string, base: string, head: string | null
     const path = m[3] ? m[3] : (i += 2, parts[i]!);
     files.push({ path, added: m[1] === '-' ? null : Number(m[1]), removed: m[2] === '-' ? null : Number(m[2]) });
   }
-  const full = (await git(cwd, [...opts, ...range, '--'], { timeoutMs: 30_000 })).stdout;
-  if (full.length <= maxBytes) return { files, patch: full, truncated: false };
-  const cut = full.lastIndexOf('\n', maxBytes);
-  return { files, patch: full.slice(0, cut > 0 ? cut : maxBytes), truncated: true };
+  const { patch, truncated } = await boundedPatch(cwd, [...opts, ...range, '--'], maxBytes);
+  return { files, patch, truncated };
+}
+
+async function boundedPatch(cwd: string, args: string[], maxBytes: number): Promise<{ patch: string; truncated: boolean }> {
+  const chunks: Buffer[] = [];
+  let bytes = 0, stderr = '', truncated = false;
+  const child = startOwnedProcess('git', args, {
+    cwd, env: cleanEnv({ GIT_TERMINAL_PROMPT: '0' }), timeoutMs: 30_000,
+    onStdout: chunk => {
+      if (truncated) return;
+      const remaining = maxBytes - bytes;
+      chunks.push(chunk.subarray(0, remaining));
+      bytes += Math.min(remaining, chunk.length);
+      if (chunk.length > remaining) {
+        truncated = true;
+        child.stop('Patch byte limit reached.');
+      }
+    },
+    onStderr: chunk => { if (stderr.length < 4000) stderr += chunk.toString('utf8').slice(0, 4000 - stderr.length); },
+  });
+  const result = await child.done;
+  if (!result.reaped || (result.end !== 'exit' && !(truncated && result.end === 'stopped')) || (!truncated && result.code !== 0)) {
+    throw new GitError(args, result.error || stderr || 'Patch process did not finish safely.');
+  }
+  const buffer = Buffer.concat(chunks, bytes);
+  // Do not emit a partial character when the byte cap bisects UTF-8.
+  const decoder = new TextDecoder('utf-8');
+  const full = decoder.decode(buffer, { stream: truncated });
+  if (!truncated) return { patch: full, truncated: false };
+  const cut = full.lastIndexOf('\n');
+  return { patch: full.slice(0, cut > 0 ? cut : full.length), truncated: true };
+}
+
+/** Immutable artifact results only; working copies and failed reads must always be retried. */
+export class ArtifactDiffCache {
+  private readonly entries = new Map<string, { change: Change; bytes: number }>();
+  private bytes = 0;
+  private readonly maxEntries: number;
+  private readonly maxBytes: number;
+
+  constructor(maxEntries = 32, maxBytes = 4 * 1024 * 1024) { this.maxEntries = maxEntries; this.maxBytes = maxBytes; }
+
+  async read(cwd: string, base: string, head: string, limit = 400_000): Promise<Change> {
+    const key = JSON.stringify([resolve(cwd), base, head, limit]);
+    const hit = this.entries.get(key);
+    if (hit) {
+      this.entries.delete(key);
+      this.entries.set(key, hit);
+      return structuredClone(hit.change);
+    }
+    const change = await changeSince(cwd, base, head, limit);
+    const bytes = Buffer.byteLength(JSON.stringify(change));
+    if (bytes <= this.maxBytes && this.maxEntries > 0) {
+      // Concurrent misses may complete for the same key; account for just one retained result.
+      const old = this.entries.get(key);
+      if (old) { this.bytes -= old.bytes; this.entries.delete(key); }
+      while (this.entries.size >= this.maxEntries || this.bytes + bytes > this.maxBytes) {
+        const first = this.entries.keys().next().value!;
+        this.bytes -= this.entries.get(first)!.bytes;
+        this.entries.delete(first);
+      }
+      this.entries.set(key, { change: structuredClone(change), bytes });
+      this.bytes += bytes;
+    }
+    return change;
+  }
 }

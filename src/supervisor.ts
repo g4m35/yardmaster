@@ -1,7 +1,7 @@
 import type { Coordinator } from './coordinator.ts';
 import { routingFor } from './config.ts';
 import { clip, formatUsd } from './text.ts';
-import { scopesOverlap } from './scope.ts';
+import { fromLiteralPattern, scopesOverlap } from './scope.ts';
 
 export interface Warning {
   key: string;
@@ -37,10 +37,15 @@ export class Supervisor {
   }
 
   check(now = Date.now()): Warning[] {
+    return this.coord.pass(() => this.checkInPass(now));
+  }
+
+  private checkInPass(now: number): Warning[] {
     const seen = new Set<string>();
     const keep = (key: string) => seen.add(key);
     const machines = this.coord.listMachines().filter((m) => now - m.last_seen < 60_000);
 
+    const queuedIds = new Set<string>();
     for (const project of this.coord.listProjects()) {
       const cfg = this.coord.configFor(project.id).supervision;
       const integrationProcess = this.coord.getMeta(`integration_process:${project.id}`);
@@ -63,7 +68,9 @@ export class Supervisor {
       }
 
       // Work that could start but hasn't: explain why instead of leaving people guessing.
-      for (const t of this.coord.listTasks(project.id, ['queued'])) {
+      const queued = this.coord.listTasks(project.id, ['queued']);
+      for (const t of queued) {
+        queuedIds.add(t.id);
         if (this.coord.blocker(t, now)) {
           this.readyToStartSince.delete(t.id);
           continue;
@@ -88,7 +95,6 @@ export class Supervisor {
 
       // Reservations held by sessions that went away, blocking queued work.
       const sessions = new Map(this.coord.listSessions(project.id).map((s) => [s.id, s]));
-      const queued = this.coord.listTasks(project.id, ['queued']);
       for (const lock of this.coord.activeLocks(project.id)) {
         if (!lock.holder.startsWith('session:')) continue;
         const s = sessions.get(lock.holder);
@@ -97,7 +103,7 @@ export class Supervisor {
         const blocking = queued.filter((t) => scopesOverlap(this.coord.effectiveScope(t), [lock.pattern]).length);
         if (!blocking.length) continue;
         this.coord.releaseLocks(project.id, lock.holder, [lock.pattern]);
-        this.coord.event(project.id, null, 'warn', 'supervisor.released', `Released ${lock.pattern}: ${lock.holder.slice(8)} reserved it but has been gone ${Number.isFinite(idle) ? Math.round(idle / 60_000) + ' min' : 'a while'}, and ${blocking.length} task(s) were waiting on it.`);
+        this.coord.event(project.id, null, 'warn', 'supervisor.released', `Released ${fromLiteralPattern(lock.pattern)}: ${lock.holder.slice(8)} reserved it but has been gone ${Number.isFinite(idle) ? Math.round(idle / 60_000) + ' min' : 'a while'}, and ${blocking.length} task(s) were waiting on it.`);
       }
     }
 
@@ -115,7 +121,7 @@ export class Supervisor {
     }
 
     for (const key of this.warnings.keys()) if (!seen.has(key)) this.warnings.delete(key);
-    for (const id of this.readyToStartSince.keys()) if (!this.coord.getTask(id) || this.coord.getTask(id)!.status !== 'queued') this.readyToStartSince.delete(id);
+    for (const id of this.readyToStartSince.keys()) if (!queuedIds.has(id)) this.readyToStartSince.delete(id);
     return this.current();
   }
 
