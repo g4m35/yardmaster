@@ -97,3 +97,24 @@ test('clients with different replay cursors share bounded reads and receive each
     assert.deepEqual(ids(recent), events.slice(400).map(e => e.id));
   } finally { stream.close(); }
 });
+
+test('shared stream invalidates silent machine/session snapshots every 30 seconds, including after drain', t => {
+  t.mock.timers.enable({ apis: ['setInterval', 'Date'] });
+  let polls = 0;
+  const stream = new EventStream({ lastEventId: () => 1, eventsSince: () => { polls++; return []; } });
+  const first = new Response(); const second = new Response(); const slow = new Response();
+  slow.blocked = true;
+  try {
+    stream.connect(first.response(), 0); stream.connect(second.response(), 0); stream.connect(slow.response(), 0);
+    t.mock.timers.tick(29_400);
+    assert.equal(first.frames.some(frame => frame.includes('event: refresh')), false);
+    const previous = polls;
+    t.mock.timers.tick(700);
+    assert.equal(polls, previous + 1, 'invalidation needs no additional database poll');
+    assert.equal(first.frames.filter(frame => frame.includes('event: refresh')).length, 1);
+    assert.equal(second.frames.filter(frame => frame.includes('event: refresh')).length, 1);
+    assert.equal(slow.frames.length, 1);
+    slow.blocked = false; slow.emit('drain'); t.mock.timers.tick(700);
+    assert.match(slow.frames.at(-1)!, /event: refresh/);
+  } finally { stream.close(); }
+});

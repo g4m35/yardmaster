@@ -5,6 +5,7 @@ interface Client {
   res: ServerResponse;
   last: number;
   blocked: boolean;
+  refreshedAt: number;
   close(): void;
 }
 
@@ -21,7 +22,7 @@ export class EventStream {
     if (this.stopped) { res.writeHead(503); res.end(); return; }
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
     const drain = () => { client.blocked = false; };
-    const client: Client = { res, last: after || this.source.lastEventId(), blocked: false, close: () => {
+    const client: Client = { res, last: after || this.source.lastEventId(), blocked: false, refreshedAt: Date.now(), close: () => {
       this.clients.delete(client);
       res.off('drain', drain);
       res.off('close', client.close);
@@ -43,7 +44,13 @@ export class EventStream {
     for (const client of ready) {
       const pending = events.filter(event => event.id > client.last);
       if (pending.length) client.last = pending[pending.length - 1]!.id;
-      client.blocked = !client.res.write(pending.length ? `data: ${JSON.stringify(pending)}\n\n` : ': keepalive\n\n');
+      let frame = pending.length ? `data: ${JSON.stringify(pending)}\n\n` : ': keepalive\n\n';
+      // Machine/session records and time-based freshness can change without durable events.
+      if (Date.now() - client.refreshedAt >= 30_000) {
+        frame += 'event: refresh\ndata: {}\n\n';
+        client.refreshedAt = Date.now();
+      }
+      client.blocked = !client.res.write(frame);
     }
   }
 

@@ -147,7 +147,7 @@ function harness(options: { token?: string | null; hash?: string; wide?: boolean
       return { status: 200, ok: true, json: async () => ({ ok: true, result }) };
     },
   };
-  const exposed = script.replace(/  refresh\(\);\n  stream\(\);\n  updatePolling\(\);/, `  globalThis.dashboard = { refresh, scheduleRefresh, showTask, showEntry, closeDrawer, requestStop, renderRegistry, actionButtons, pushEvents, stream, rpc, updatePolling, state: () => ({ board, registry, openTask, openEntry }) };`);
+  const exposed = script.replace(/  refresh\(\);\n  stream\(\);/, `  globalThis.dashboard = { refresh, scheduleRefresh, showTask, showEntry, closeDrawer, requestStop, renderRegistry, actionButtons, pushEvents, stream, rpc, updatePolling: typeof updatePolling === 'function' ? updatePolling : () => {}, state: () => ({ board, registry, openTask, openEntry }) };`);
   runInNewContext(exposed, context);
   const $ = (id: string) => doc.getElementById(id)!;
   return { doc, $, api: context.dashboard, calls, storage, context, timers, intervals,
@@ -677,12 +677,13 @@ test('fallback polling stops on SSE connect, resumes on disconnect, and pauses w
   const h = harness();
   h.respond(method => method === 'events.since' ? [] : method === 'registry.list' ? snapshot() : board());
   const fetchRpc = h.context.fetch;
-  let finishRead!: (value: { done: boolean }) => void;
+  let finishRead!: (value: { done: boolean; value?: string }) => void;
   let attempts = 0;
+  let expired = false;
   h.context.TextDecoderStream = class {};
   h.context.fetch = (url: string, init: unknown) => {
     if (!url.startsWith('/api/stream')) return fetchRpc(url, init);
-    if (attempts++) return Promise.resolve({ status: 401 });
+    if (attempts++) return Promise.resolve({ status: expired ? 401 : 503, ok: false });
     return Promise.resolve({ status: 200, ok: true, body: { pipeThrough: () => ({ getReader: () => ({
       read: () => new Promise(resolve => { finishRead = resolve; }), cancel: async () => {},
     }) }) } });
@@ -693,9 +694,18 @@ test('fallback polling stops on SSE connect, resumes on disconnect, and pauses w
   await new Promise(resolve => setImmediate(resolve));
   assert.equal([...h.intervals.values()].filter(timer => timer.ms === 10000).length, 0);
   await h.flush();
+  const liveCalls = h.calls.length;
+  finishRead({ done: false, value: 'event: refresh\ndata: {}\n\n' });
+  await new Promise(resolve => setImmediate(resolve)); await h.flush();
+  assert.equal(h.calls.length, liveCalls + 2, 'server invalidation refreshes silent machine/session changes');
   finishRead({ done: true });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal([...h.intervals.values()].filter(timer => timer.ms === 10000).length, 1);
+  const fallbackId = [...h.intervals.keys()][0];
+  for (let retry = 0; retry < 6; retry++) {
+    await h.flush(2000);
+    assert.equal([...h.intervals.keys()][0], fallbackId, 'reconnect failures must not postpone the fallback deadline');
+  }
   const calls = h.calls.length;
   for (const timer of h.intervals.values()) if (timer.ms === 10000) await timer.fn();
   assert.equal(h.calls.length, calls + 2, 'fallback reads one snapshot pair');
@@ -711,6 +721,7 @@ test('fallback polling stops on SSE connect, resumes on disconnect, and pauses w
   assert.equal([...h.intervals.values()].filter(timer => timer.ms === 10000).length, 1);
   await h.flush();
   assert.equal(h.calls.length, hiddenCalls + 2, 'returning to the page refreshes immediately');
+  expired = true;
   await h.flush(2000); await streaming;
   assert.equal(h.intervals.size, 0, 'authentication failure also clears fallback polling');
 });

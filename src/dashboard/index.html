@@ -1081,6 +1081,7 @@
           while ((i = buf.indexOf('\n\n')) >= 0) {
             const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
             const data = chunk.split('\n').filter((l) => l.startsWith('data: ')).map((l) => l.slice(6)).join('');
+            if (chunk.startsWith('event: refresh')) { scheduleRefresh(); continue; }
             if (!data || chunk.startsWith('event: hello')) continue;
             const evs = JSON.parse(data);
             if (Array.isArray(evs) && evs.length) {
@@ -1582,8 +1583,9 @@
 
   let pollTimer = null;
   function updatePolling() {
-    if (pollTimer !== null) { clearInterval(pollTimer); pollTimer = null; }
-    if (!authFailed && !streamConnected && !document.hidden) pollTimer = setInterval(refresh, 10000);
+    const enabled = !authFailed && !streamConnected && !document.hidden;
+    if (enabled && pollTimer === null) pollTimer = setInterval(refresh, 10000);
+    else if (!enabled && pollTimer !== null) { clearInterval(pollTimer); pollTimer = null; }
   }
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {

@@ -2,7 +2,7 @@
 
 ## Unreleased
 - Count dependency directories conservatively toward worktree disk quotas, including fresh installs and rewritten clones. Warm-start now requires matching root and nested lockfiles; stale or unpinned dependencies are skipped so setup can install them.
-- Dashboard snapshots use SSE while connected, fall back to polling when disconnected, and pause automatic reads while hidden. The hub shares one bounded event poll across stream clients and pauses writes to backpressured connections.
+- Dashboard snapshots use SSE while connected, fall back to polling when disconnected, and pause automatic reads while hidden. The hub shares one bounded event poll across stream clients, requests a snapshot every 30 seconds for machine/session freshness, and pauses writes to backpressured connections.
 - Migration 14 adds a backward-compatible `(status, finished_at DESC)` index for global recent completions. CI matrix jobs compile and type-check once instead of three times; the OS/Node matrix and device checks are preserved.
 - Remote CLI and hook connections require explicit credentials or a saved pairing credential for the exact hub, project and machine. The local owner token is used only for loopback or for the address this machine's own running hub published (an overlay IP it is bound to). Non-loopback HTTP requires `--private-network` (hooks: `YARDMASTER_PRIVATE_NETWORK=1`); authenticated RPCs reject redirects.
 - Validate worker run telemetry before storage and recover corrupt historical run JSON as empty values, with one durable warning per run.
