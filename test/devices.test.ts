@@ -405,7 +405,10 @@ test('the run installs and hashes its own copy of the build, not output a later 
   const s = appRepo(), m = fakeMachine();
   const blocker = await acquireLease({ pool: 'simulator', capacity: 1, holder: 'blocker', ttlMs: 60_000, waitMs: 0, cleanup: async () => ({ ok: true, detail: '' }) });
   assert(blocker.lease);
-  const running = runAppleSimulator(options(), context(s, m));
+  // The test reads the app through both inputs it is given; both must be the copy that was hashed and installed.
+  const READ = `const fs=require('node:fs');const d=process.env.YARDMASTER_ARTIFACT_DIR;fs.writeFileSync(d+'/env.txt',fs.readFileSync(process.env.YARDMASTER_APP_PATH+'/Smoke','utf8'));fs.writeFileSync(d+'/arg.txt',fs.readFileSync(process.argv[1]+'/Smoke','utf8'));`;
+  const ctx = context(s, m);
+  const running = runAppleSimulator(options({ tests: [{ name: 'smoke', runner: 'command', command: [process.execPath, '-e', READ, '{app}'] }] }), ctx);
   // Once it queues for the simulator its build is done; another build now rewrites the shared output.
   await until(() => leasesNow(), leases => leases.some(l => l.state === 'waiting'), 20_000, 'the run to queue for a simulator');
   const app = join(s.repo, 'build/Smoke.app');
@@ -417,6 +420,7 @@ test('the run installs and hashes its own copy of the build, not output a later 
   assert.equal(run.result.data.evidence.artifact!.sha256, original);
   const installed = m.log().find(e => e.args[1] === 'install')!.args[3]!;
   assert.notEqual(installed, app, 'installed from the run-owned snapshot');
+  for (const input of ['env.txt', 'arg.txt']) assert.equal(readFileSync(join(ctx.evidenceDir, 'tests', 'smoke', input), 'utf8'), `binary for ${s.sha}\n`, `tests read the installed copy via ${input}`);
   assert(!existsSync(installed), 'the snapshot is removed after the run');
 });
 

@@ -271,7 +271,8 @@ async function onSimulator(options: AppleSimulatorOptions, ctx: DeviceRunContext
       await new Promise(resolve => setTimeout(resolve, 1500));
       await screenshot(sim, 'launch');
     }
-    const values = { udid: sim.udid, app: artifact.path, bundleId: options.bundleId, sha: sha ?? '' };
+    // Tests get the copy that was hashed and installed; the build output can be overwritten by another build meanwhile.
+    const values = { udid: sim.udid, app: installPath, bundleId: options.bundleId, sha: sha ?? '' };
     for (const test of options.tests) {
       if (tool.signal?.aborted) { checks.push({ name: test.name, runner: test.runner, status: 'unknown', durationMs: null, detail: 'Canceled before this test started.', log: null }); continue; }
       const dir = join(ctx.evidenceDir, 'tests', test.name);
@@ -284,7 +285,7 @@ async function onSimulator(options: AppleSimulatorOptions, ctx: DeviceRunContext
           detail: !exe ? `${argv[0]} is not installed on this machine; no result is claimed.` : `${argv[0]} --version failed; the tool is present but not working (for Maestro, check its Java runtime).`, log: null });
         continue;
       }
-      const env = { ...tool.env, YARDMASTER_DEVICE_UDID: sim.udid, YARDMASTER_DEVICE_KIND: 'simulator', YARDMASTER_APP_PATH: artifact.path,
+      const env = { ...tool.env, YARDMASTER_DEVICE_UDID: sim.udid, YARDMASTER_DEVICE_KIND: 'simulator', YARDMASTER_APP_PATH: installPath,
         YARDMASTER_BUNDLE_ID: options.bundleId, YARDMASTER_ARTIFACT_DIR: dir, YARDMASTER_VERIFY_SHA: sha ?? '' };
       const r = track(await exec({ ...tool, env }, exe, argv.slice(1), { timeoutMs: test.timeoutMinutes * 60_000 }));
       const log = saveLog(`test-${test.name}.log`, transcript(r));
