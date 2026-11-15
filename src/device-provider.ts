@@ -163,7 +163,7 @@ export async function runAppleSimulator(options: AppleSimulatorOptions, ctx: Dev
           const r = exe ? track(await exec({ ...tool, signal: AbortSignal.any([slot.lease.lost, ...(ctx.signal ? [ctx.signal] : [])]) }, exe, options.build.command.slice(1), { timeoutMs: options.build.timeoutMinutes * 60_000 })) : null;
           const log = saveLog('build.log', r ? transcript(r) : `${options.build.command[0]} is not installed`);
           const status = !r ? 'unavailable' : r.clean ? (r.code === 0 ? 'passed' : 'failed') : 'unknown';
-          checks.push({ name: 'build', runner: 'command', status, durationMs: r?.durationMs ?? null, detail: status === 'passed' ? 'Build command passed.' : `Build ${status}${r?.code ? ` (exit ${r.code})` : ''}: ${tail(r ? transcript(r) : '', 600)}`, log });
+          checks.push({ name: 'build', runner: 'command', status, durationMs: r?.durationMs ?? null, detail: status === 'passed' ? 'Build command passed.' : `Build ${status}${r?.code ? ` (exit ${r.code})` : ''}${r?.cleanup ? `; process cleanup ${r.cleanup}` : ''}: ${tail(r ? transcript(r) : '', 600)}`, log });
           if (status === 'failed') failedBuild = true;
           else if (status !== 'passed') problem = 'The build did not complete cleanly.';
           // Copy while still holding the slot: the next build may overwrite this output before it is installed.
@@ -286,7 +286,7 @@ async function onSimulator(options: AppleSimulatorOptions, ctx: DeviceRunContext
       const r = track(await exec({ ...tool, env }, exe, argv.slice(1), { timeoutMs: test.timeoutMinutes * 60_000 }));
       const log = saveLog(`test-${test.name}.log`, transcript(r));
       const status = r.clean ? (r.code === 0 ? 'passed' : 'failed') : 'unknown';
-      checks.push({ name: test.name, runner: test.runner, status, durationMs: r.durationMs, detail: status === 'passed' ? 'Passed.' : `${status}${r.code !== null ? ` (exit ${r.code})` : ` (${r.end})`}: ${tail(transcript(r), 600)}`, log });
+      checks.push({ name: test.name, runner: test.runner, status, durationMs: r.durationMs, detail: status === 'passed' ? 'Passed.' : `${status}${r.code !== null ? ` (exit ${r.code})` : ` (${r.end})`}${r.cleanup ? `; process cleanup ${r.cleanup}` : ''}: ${tail(transcript(r), 600)}`, log });
     }
     if (!tool.signal?.aborted) await screenshot(sim, 'final');
     // Stop the app before hashing its logs, so the recorded hashes match the files kept.

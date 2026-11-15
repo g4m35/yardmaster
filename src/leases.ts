@@ -60,6 +60,9 @@ export function selfIdentity(): Promise<ProcessId> {
 /** A holder whose PID is gone, or reused by a process with a different start time, has crashed. */
 export async function holderAlive(pid: number, startedAt: number | null): Promise<boolean> {
   if (!isAlive(pid)) return false;
+  // This process is alive by definition; skip the ps call (waiters poll this often).
+  const me = await selfIdentity();
+  if (pid === me.pid && startedAt === me.startedAt) return true;
   if (startedAt === null) return true;
   const now = await processStartTime(pid).catch(() => null);
   return now === null || Math.abs(now - startedAt) <= 2000;

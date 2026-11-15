@@ -3,7 +3,7 @@ import { accessSync, constants, statSync } from 'node:fs';
 import { delimiter, resolve } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import * as z from 'zod/v4';
-import { runOwnedProcess, type OwnedRunOptions } from './proc.ts';
+import { groupAlive, runOwnedProcess, terminateRecordedProcess, type OwnedRunOptions } from './proc.ts';
 import { OwnedResourceSchema, type OwnedResource, type ResourceCleanup } from './leases.ts';
 
 /**
@@ -12,7 +12,11 @@ import { OwnedResourceSchema, type OwnedResource, type ResourceCleanup } from '.
  * the recorded unique name before touching a UDID. Existing simulators (another session's included) are read only.
  */
 export interface ToolContext { xcrun: string; cwd: string; env: NodeJS.ProcessEnv; signal?: AbortSignal; onSpawn?: OwnedRunOptions['onSpawn'] }
-export interface ExecResult { ok: boolean; clean: boolean; reaped: boolean; code: number | null; end: string; stdout: string; stderr: string; durationMs: number }
+export interface ExecResult {
+  ok: boolean; clean: boolean; reaped: boolean; code: number | null; end: string; stdout: string; stderr: string; durationMs: number;
+  /** Why process cleanup is not confirmed; empty when it is. */
+  cleanup: string;
+}
 
 export function resolveTool(name: string, cwd: string, env: NodeJS.ProcessEnv): string | null {
   const dirs = name.includes('/') ? [''] : (env.PATH ?? '').split(delimiter).filter(Boolean);
@@ -27,7 +31,7 @@ export function resolveTool(name: string, cwd: string, env: NodeJS.ProcessEnv): 
  * Owned process with bounded stdout and stderr, kept apart so machine-read output (JSON, fingerprints) stays clean.
  * `clean` means it exited by itself and every descendant was reaped.
  */
-export async function exec(ctx: Omit<ToolContext, 'xcrun'>, command: string, args: string[], opts: { timeoutMs: number; cancel?: boolean }): Promise<ExecResult> {
+export async function exec(ctx: Omit<ToolContext, 'xcrun'>, command: string, args: string[], opts: { timeoutMs: number; cancel?: boolean; reinspectDelayMs?: number }): Promise<ExecResult> {
   const started = Date.now();
   const out = new StringDecoder('utf8'), err = new StringDecoder('utf8');
   let stdout = '', stderr = '';
@@ -36,9 +40,20 @@ export async function exec(ctx: Omit<ToolContext, 'xcrun'>, command: string, arg
     onStdout: chunk => { stdout = (stdout + out.write(chunk)).slice(-256 * 1024); },
     onStderr: chunk => { stderr = (stderr + err.write(chunk)).slice(-64 * 1024); } });
   stdout += out.end(); stderr += err.end();
-  const clean = r.end === 'exit' && r.reaped && r.code !== null;
-  return { ok: clean && r.code === 0, clean, reaped: r.reaped, code: r.code, end: r.end, stdout, stderr, durationMs: Date.now() - started };
+  let reaped = r.reaped, reap = r.reap;
+  // "Unverified" means the ownership inspection itself did not finish (its ps calls can miss their deadline on a
+  // machine busy booting a simulator); it is not evidence that anything survived. Re-inspect with the same
+  // identity-checked recovery used after a restart, a bounded number of times, before reporting it unconfirmed.
+  for (let attempt = 1; !reaped && reap.status === 'unverified' && r.pid !== null && attempt <= REINSPECTIONS; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, (opts.reinspectDelayMs ?? 2000) * attempt));
+    reap = await terminateRecordedProcess({ pid: r.pid, startedAt: r.startedAt });
+    reaped = (reap.status === 'exited' || reap.status === 'terminated') && (r.end === 'exit' || !groupAlive(r.pid));
+  }
+  const clean = r.end === 'exit' && reaped && r.code !== null;
+  return { ok: clean && r.code === 0, clean, reaped, code: r.code, end: r.end, stdout, stderr, durationMs: Date.now() - started,
+    cleanup: reaped ? '' : `${reap.status}${reap.reason ? `: ${reap.reason}` : ''}` };
 }
+const REINSPECTIONS = 3;
 
 /** Both streams, for saved logs and failure details. */
 export const transcript = (r: ExecResult) => r.stderr ? `${r.stdout}${r.stdout.endsWith('\n') || !r.stdout ? '' : '\n'}--- stderr ---\n${r.stderr}` : r.stdout;
@@ -55,7 +70,7 @@ function simctl(ctx: ToolContext, args: string[], timeoutMs = 60_000, cancel = t
       const e = error as (Error & { code?: number | string; killed?: boolean }) | null;
       const end = !e ? 'exit' : e.name === 'AbortError' ? 'aborted' : e.killed ? 'timeout' : typeof e.code === 'number' ? 'exit' : 'spawn_failed';
       const code = !e ? 0 : typeof e.code === 'number' ? e.code : null;
-      resolve({ ok: !e, clean: end === 'exit', reaped: true, code, end, stdout: String(stdout ?? '').slice(-256 * 1024), stderr: String(stderr ?? '').slice(-64 * 1024), durationMs: Date.now() - started });
+      resolve({ ok: !e, clean: end === 'exit', reaped: true, cleanup: '', code, end, stdout: String(stdout ?? '').slice(-256 * 1024), stderr: String(stderr ?? '').slice(-64 * 1024), durationMs: Date.now() - started });
     });
   });
 }

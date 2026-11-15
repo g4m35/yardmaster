@@ -146,7 +146,7 @@ export function evidenceProblem(e: DeviceEvidence, sha: string | null, required:
   if (LEVELS[e.requirement] < LEVELS[required]) return `it answers a ${e.requirement} requirement, but this check requires ${required}`;
   if (e.status.physical === 'passed' && e.device?.kind !== 'physical') return `it claims a physical-device pass on ${e.device ? `a ${e.device.kind}` : 'no device'}`;
   if (e.status.simulator === 'passed' && !e.device) return 'it claims a simulator pass without naming a device';
-  if (e.status.overall !== 'passed') return e.summary;
+  if (e.status.overall !== 'passed') return e.summary.trim() || `its overall status is ${e.status.overall}`;
   if (required === 'physical' && e.status.physical !== 'passed') return `physical device ${e.status.physical}; a simulator pass does not satisfy a physical-device requirement`;
   if (required === 'simulator' && e.status.simulator !== 'passed' && e.status.physical !== 'passed') return 'no device check passed';
   return null;

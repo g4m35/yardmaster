@@ -10,12 +10,12 @@ import { openDb } from '../src/db.ts';
 import { AppleSimulatorOptionsSchema, runAppleSimulator, type DeviceRunContext } from '../src/device-provider.ts';
 import { artifactSha256, deviceEvidence, type DeviceEvidence } from '../src/device-evidence.ts';
 import { acquireLease, listLeases, reapLeases } from '../src/leases.ts';
-import { chooseTarget, cleanupOwnedSimulators, compareVersions, hostCleanup } from '../src/simctl.ts';
+import { chooseTarget, cleanupOwnedSimulators, compareVersions, exec, hostCleanup } from '../src/simctl.ts';
 import { linuxAvailableMb, meminfoAvailableMb, memoryHold, type MemorySample } from '../src/machine-pressure.ts';
 import { builtinProviders } from '../src/provider-builtins.ts';
 import { planService } from '../src/providers.ts';
 import { ServicesConfigSchema } from '../src/provider-contract.ts';
-import { DeviceEvidenceSchema, scrubFile } from '../src/device-evidence.ts';
+import { DeviceEvidenceSchema, evidenceProblem, scrubFile } from '../src/device-evidence.ts';
 import { verifyArtifact } from '../src/verification.ts';
 import { WorkerLoop } from '../src/worker.ts';
 import { runAttempt, Semaphore } from '../src/runner.ts';
@@ -61,7 +61,7 @@ const devices = (over: Record<string, unknown> = {}) => resolveConfig([{ devices
 function context(s: { repo: string; home: string; sha: string }, m: ReturnType<typeof fakeMachine>, over: Partial<DeviceRunContext> = {}): DeviceRunContext {
   const evidenceDir = join(s.home, 'evidence-' + randomUUID()); mkdirSync(evidenceDir, { recursive: true });
   return { cwd: s.repo, env: { PATH: m.PATH, HOME: s.home }, evidenceDir, input: {}, requestId: randomUUID(),
-    context: { sha: s.sha, projectId: 'p-one' }, devices: devices(), sampleMemory: normal, pollMs: 40, ...over };
+    context: { sha: s.sha, projectId: 'p-one' }, devices: devices(), sampleMemory: normal, pollMs: 250, ...over };
 }
 const leasesNow = () => { const db = openDb(); try { return listLeases(db); } finally { db.close(); } };
 const created = (m: ReturnType<typeof fakeMachine>) => m.log().filter(e => e.args[1] === 'create');
@@ -242,7 +242,7 @@ test('an expired lease of a live holder keeps its slot; only a dead holder ident
   expire();
   assert.deepEqual(await reapLeases(cleanup), [], 'expiry alone is not proof of death');
   assert.equal(build.lease.holds(), true); assert.equal(sim.lease.holds(), true);
-  const contender = await acquireLease({ pool: 'build', capacity: 1, holder: 'next', ttlMs: 60_000, waitMs: 100, pollMs: 20, cleanup });
+  const contender = await acquireLease({ pool: 'build', capacity: 1, holder: 'next', ttlMs: 60_000, waitMs: 300, pollMs: 250, cleanup });
   assert.equal(contender.lease, null, 'nobody else gets the build slot while its holder lives');
   assert.equal(m.state().devices.length, 2, 'the live holder keeps its simulator');
   // Once the recorded holder identity is dead, the slot is reclaimed and only its recorded simulator removed.
@@ -572,4 +572,33 @@ test('scrubbing streams any file size and catches secrets split across chunk bou
   assert.equal(content.includes(big), false, 'no unsanitized file is kept as evidence');
   assert.equal(content.indexOf('[redacted]'), 1024 * 1024 - 5);
   assert.equal(artifactSha256(kept.path), kept.sha256);
+});
+
+test('device commands re-inspect cleanup that could not be verified before reporting it unconfirmed', async () => {
+  appRepo();
+  // A ps whose process census fails, like an ownership inspection missing its deadline on a loaded machine.
+  const bin = tempDir('ym-slow-ps-'), flag = join(bin, 'failures');
+  writeFileSync(join(bin, 'ps'), `#!/bin/sh\nfor a in "$@"; do if [ "$a" = "-U" ]; then n=$(cat "${flag}" 2>/dev/null || echo 0); if [ "$n" -gt 0 ]; then echo $((n - 1)) > "${flag}"; exit 1; fi; fi; done\nexec /bin/ps "$@"\n`, { mode: 0o755 });
+  const previous = process.env.PATH; process.env.PATH = `${bin}:${previous}`;
+  try {
+    const ctx = { cwd: bin, env: { PATH: process.env.PATH, HOME: process.env.HOME } };
+    writeFileSync(flag, '1');
+    const once = await exec(ctx, process.execPath, ['-e', ''], { timeoutMs: 30_000, reinspectDelayMs: 10 });
+    assert.equal(once.reaped, true, `a single failed inspection is re-checked: ${once.cleanup}`);
+    assert.equal(once.cleanup, ''); assert.equal(once.ok, true);
+    writeFileSync(flag, '99');
+    const always = await exec(ctx, process.execPath, ['-e', ''], { timeoutMs: 30_000, reinspectDelayMs: 10 });
+    assert.equal(always.reaped, false, 'inspection that never completes stays unconfirmed');
+    assert.match(always.cleanup, /^unverified/);
+  } finally { process.env.PATH = previous; }
+});
+
+test('evidence that is not a pass is never accepted, even with an empty summary', () => {
+  const sha = 'a'.repeat(40);
+  for (const overall of ['unknown', 'failed']) {
+    const e = DeviceEvidenceSchema.parse({ ...claimed(sha, { status: { overall } }), summary: '' });
+    const problem = evidenceProblem(e, sha, 'simulator');
+    assert.ok(problem, `${overall} with an empty summary is a problem`);
+    assert.match(problem, new RegExp(`overall status is ${overall}`));
+  }
 });
