@@ -45,13 +45,13 @@ On macOS arm64, Node 24.22.2, during concurrent test/agent activity on 2026-11-0
 | Last 100 events | 0.14 ms | 0.41 ms |
 | Queue admission | 26.4 ms | 41.5 ms |
 
-End-of-run RSS was 245 MiB. These are in-process API dispatch measurements, excluding HTTP, browser rendering, provider latency and cold startup. This separate API stress run has no paired baseline; the scheduler comparison above uses a different fixture. Neither establishes a cross-machine performance guarantee. Raw measurement is retained in the hillclimb evidence; rerun on the target machine for a meaningful comparison.
+End-of-run RSS was 245 MiB. These are in-process API dispatch measurements, excluding HTTP, browser rendering, provider latency and cold startup. This separate API stress run has no paired baseline; the scheduler comparison above uses a different fixture. Neither establishes a cross-machine performance guarantee. The raw measurements are not in this repository; rerun on the target machine for a meaningful comparison.
 
 Registry history and passive machine/session inventories are bounded; live runs remain visible. SSE refreshes coalesce and serialize. Cleanup removes up to 1,000 expired project events per pass, using `cleanup.eventRetentionDays` (30 by default, `null` to retain indefinitely). Unfinished and process-held task evidence survives retention and stale cleanup plans. Accepted artifact refs are pruned only after terminal integration, ancestry validation and compare-and-delete; unmerged artifacts remain reachable.
 
 ## Historical measurements
 
-These earlier measurements are retained for context and have not been requalified by the current hillclimb. The current stress check above has a different dataset and load; it is not a direct regression comparison.
+These earlier measurements are kept for context and have not been rechecked since. The current stress check above has a different dataset and load; it is not a direct regression comparison.
 
 Goal: Yardmaster should never be the thing an agent waits on, and it should remove waiting agents would
 otherwise do. Measured on an M-series MacBook (2026-11-03). Reproduce with the scripts in `bench/`.
@@ -90,7 +90,7 @@ AGENTS.md, hooks and permission rules still apply in lean runs. `"full"` restore
 Also cheaper by default:
 - **Effort follows the tier**: cheap work runs at low reasoning effort, standard at medium, strong at high (Claude Code `--effort`, Codex `model_reasoning_effort`). Override per agent with `effort`.
 - **Escalation after the second failure**, not the first: the same model usually fixes its first failure once it sees the error, especially with its session resumed. A retry escalated to a stronger model no longer triggers a review by itself.
-- **Claude receives its native budget flag** with the reserved allowance; reported usage drives reactive stops. These are not a guaranteed hard cap; see BUDGETS.md.
+- **Claude receives its native budget flag** with the reserved allowance; reported usage drives reactive stops. These are not a guaranteed hard cap; see [BUDGETS.md](BUDGETS.md).
 - **Reviews are capped**: read-only tools, 15 turns, $1 (`review.maxTurns`, `review.budgetUsd`).
 - **Spend is counted once per message.** Claude Code repeats a message's usage once per content block; counting each copy doubled the mid-run estimate, so budgets tripped at about half the real spend.
 - **The brief says which checks matter**: with `verifyQuick`, agents are told to run the quick checks on their changes rather than the whole suite.
@@ -191,7 +191,7 @@ Every benchmark ran under a wrapper-owned `mkdtemp` TMPDIR removed in `finally`;
 
 Validation for this bounded change: typecheck, build and all 299 tests passed; the full test process exited naturally in 98.8 seconds without force-exit.
 
-The production test command now logs its executable, Node/platform, arguments and completion code and exits naturally; `npm test` no longer uses `--test-force-exit`. Package smoke verification (`node scripts/package-smoke.mjs`, after building) creates a temporary tarball install and checks version, help, packaged dashboard and doctor without a personal hub. `YM_SMOKE_NODE=/path/to/node` selects the installed runtime to test. Both Node22.23.4 and24.22.2 passed this check. Test directories are removed in finally cleanup.
+The production test command now logs its executable, Node/platform, arguments and completion code and exits naturally; `npm test` no longer uses `--test-force-exit`. Package smoke verification (`node scripts/package-smoke.mjs`, after building) creates a temporary tarball install and checks version, help, packaged dashboard and doctor without a personal hub. `YM_SMOKE_NODE=/path/to/node` selects the installed runtime to test. Both Node 22.23.4 and 24.22.2 passed this check. Test directories are removed in finally cleanup.
 
 A separate stress-fixture failure exposed collisions in millisecond/three-character IDs. New short IDs use 64 bits of cryptographic randomness, retaining existing prefixes; a fixed-clock/fixed-weak-RNG regression exercises tight creation without duplicate IDs.
 
@@ -213,6 +213,6 @@ A separate real paired HTTP test held the integration lock while uploading a ver
 
 ## 0.9.1 process-supervision cost
 
-Inherited ownership inspection adds OS process lookups and durable private receipts to ordinary supervised launches. This fixes detached descendants surviving completion/cancellation/restart, and is not performance-neutral. Run `node bench/process-lifetime.mjs 20804726d66f1a66564aaef8858b65d022027a66` for a no-inference, source-hashed comparison: one warmup/five ordinary Node exit0 calls per process, two alternating pairs at width1 and width3, with every fixture removed. The baseline has weaker descendant cleanup, so this measures the cost of the stronger guarantee, not equivalent containment.
+Inherited ownership inspection adds OS process lookups and durable private receipts to ordinary supervised launches. This fixes detached descendants surviving completion/cancellation/restart, and is not performance-neutral. Run `node bench/process-lifetime.mjs 20804726d66f1a66564aaef8858b65d022027a66` for a no-inference, source-hashed comparison: one warmup and five ordinary Node `exit 0` calls per process, two alternating pairs at width 1 and width 3, with every fixture removed. The baseline has weaker descendant cleanup, so this measures the cost of the stronger guarantee, not equivalent containment.
 
 Candidate filtering first reads bounded PID/UID/start metadata, then inspects environment only for possible descendants born after launch (with rounding tolerance). Queued metadata requests share a snapshot only before that OS call begins; completed/in-flight snapshots are never reused. Two separate quiet observations remain necessary. Process environments are neither logged nor retained. Linux/macOS timing differs; these checks do not measure real-agent inference, network or end-to-end project throughput. Earlier scheduler-only wins above do not establish zero overhead for this new lifetime mechanism.

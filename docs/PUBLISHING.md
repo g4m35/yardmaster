@@ -1,17 +1,17 @@
 # Releasing Yardmaster
 
-Every release goes out two ways:
+A release can go out two ways. npm publishing is not set up yet: until an `NPM_TOKEN` secret is added, the release workflow skips npm and only the standalone binaries are published.
 
 | Channel | Who it's for | Needs |
 |---|---|---|
-| **Standalone binary** (GitHub Releases + `install.sh`) | Anyone on macOS (Apple Silicon) or Linux, no Node required | Nothing: the release workflow builds and attaches it |
-| **npm** (`npm install -g yardmaster`, `npx yardmaster`) | People who already have Node (most Claude Code / Codex users) | An `NPM_TOKEN` repository secret, once |
+| **Standalone binary** (GitHub Releases + `install.sh`) | Anyone on macOS (Apple Silicon) or Linux (x64, arm64), no Node required | Nothing: the release workflow builds and attaches it |
+| **npm** (`npm install -g yardmaster`, `npx yardmaster`), not set up yet | People who already have Node (most Claude Code / Codex users) | An `NPM_TOKEN` repository secret, once |
 
 ## Cut a release
 
 1. Bump `version` in `package.json` and `src/version.ts`, and add a section to `CHANGELOG.md`.
-2. Merge to `main` through a pull request (main only accepts pull requests whose `done` check passed), then tag: `git tag v0.3.0 && git push origin v0.3.0`.
-3. The **release** workflow builds the binaries on macOS and Linux, smoke-tests them, attaches them with `install.sh` to a GitHub release, and publishes to npm if the token is set.
+2. Merge to `main` through a pull request (main only accepts pull requests whose `done` check passed), then tag: `git tag v1.2.3 && git push origin v1.2.3`.
+3. The **release** workflow builds the binaries (macOS arm64, Linux x64 and Linux arm64), smoke-tests them, attaches them with `install.sh` to a GitHub release, and publishes to npm if the token is set.
 
 The workflow checks the tag first and stops before building anything if the tag doesn't look like `v1.2.3`, doesn't match `package.json` and `src/version.ts`, or points at a commit that isn't on `main`. Tags are protected, so a wrong tag can't be deleted and would burn its version number. A pre-release tag such as `v1.2.3-rc.1` makes a GitHub pre-release that never becomes "latest" (so `install.sh` keeps serving the stable one) and publishes to npm under the `next` tag. npm publishes only after the GitHub release succeeds. If a run fails after creating a draft release, re-running it finishes that draft; a published release is never changed.
 

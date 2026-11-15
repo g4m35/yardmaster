@@ -54,7 +54,7 @@ Decision: a small, new core (zero native dependencies; Node's built-in SQLite) t
 
 ## Production hardening research, 2026-11-07
 
-The independent round-4 mean reached 8.1 using the unchanged quality rubric. These primary sources inform the next batch; they do not certify Yardmaster or supply comparable performance measurements.
+An internal quality review (average score 8.1 of 10 against the rubric in [QUALITY-GATES.md](QUALITY-GATES.md)) prompted this research. These primary sources inform the next batch; they do not certify Yardmaster or supply comparable performance measurements.
 
 | Primary source | Observed property and Yardmaster decision | Boundary |
 |---|---|---|
@@ -66,4 +66,4 @@ The independent round-4 mean reached 8.1 using the unchanged quality rubric. The
 
 [Anthropic's caching documentation](https://platform.claude.com/docs/en/build-with-claude/prompt-caching) describes prefix-based reuse and separately reported cache reads/writes. The launch fingerprint is only a compatibility guard: it is not a cache-hit claim. Native settings and provider cache residency remain unknown unless reported. This batch reads installed CLI versions/help without changing settings or running paid inference: Claude Code 2.1.319 exposes effort, resume, streaming JSON and a budget option; Codex CLI 0.167.0 exposes model/config and JSON output. That qualifies available launch syntax, not actual provider behavior.
 
-The resulting bounded changes are control-aware pre-launch rejection, returning-worker identity checks, supported remote planning recovery, independent owned quarantine imports, visible integration process failures and recorded utility facts in the registry. Bundle imports use unique refs and retain generation checks; they do not need the integration worktree lock. Latency and correctness are measured locally rather than borrowing another tool's benchmark. Raw benchmark conditions, source binding, natural-exit tests and rendered artifacts are kept with the hillclimb evidence; no cross-product speed claim is made.
+The resulting bounded changes are control-aware pre-launch rejection, returning-worker identity checks, supported remote planning recovery, independent owned quarantine imports, visible integration process failures and recorded utility facts in the registry. Bundle imports use unique refs and retain generation checks; they do not need the integration worktree lock. Latency and correctness are measured locally rather than borrowing another tool's benchmark. Raw benchmark conditions, source binding and natural-exit test logs are kept outside this repository (rendered dashboard artifacts are in `design-verification/`); no cross-product speed claim is made.
