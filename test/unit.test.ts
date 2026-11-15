@@ -428,6 +428,26 @@ test('changed files keep the first path intact when it is an unstaged edit', asy
   assert.deepEqual(await changedFiles(repo, base), ['new file.ts', 'src.ts']);
 });
 
+test('while a task merges newer work in, the merged-in files are not counted as its changes', async () => {
+  const { changedFiles } = await import('../src/git.ts');
+  const repo = tempDir('ym-merging-');
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
+  git('init', '-q', '-b', 'main');
+  write(join(repo, 'shared.ts'), 'one\n'); write(join(repo, 'old name.ts'), 'moved\n');
+  git('add', '.'); git('commit', '-q', '-m', 'base');
+  git('switch', '-q', '-c', 'task');
+  write(join(repo, 'shared.ts'), 'task\n'); git('mv', 'old name.ts', 'new name.ts'); git('commit', '-qam', 'task work');
+  git('switch', '-q', 'main');
+  write(join(repo, 'shared.ts'), 'main\n'); for (let i = 0; i < 20; i++) write(join(repo, `upstream-${i}.ts`), 'x\n');
+  git('add', '.'); git('commit', '-q', '-m', 'newer main');
+  const main = git('rev-parse', 'HEAD').trim();
+  git('switch', '-q', 'task');
+  // The reconcile step merges newer main in; shared.ts conflicts and the 20 upstream files are staged.
+  assert.throws(() => git('merge', '--no-edit', main));
+  write(join(repo, 'scratch.md'), 'notes\n');
+  assert.deepEqual(await changedFiles(repo, main), ['new name.ts', 'old name.ts', 'scratch.md', 'shared.ts']);
+});
+
 test('board rows carry what a status row needs: phase, times, budget and the approval flag', async () => {
   const { sandbox } = await import('./helpers.ts');
   const { Coordinator } = await import('../src/coordinator.ts');

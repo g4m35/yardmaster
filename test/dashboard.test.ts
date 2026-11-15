@@ -618,3 +618,25 @@ test('a change read for an earlier version of a task is never shown next to a ne
   await new Promise(resolve => setImmediate(resolve)); await new Promise(resolve => setImmediate(resolve));
   assert.match(h.$('d-change').textContent, /from the saved commit/);
 });
+
+test('live data stays readable: counted projects, short feed names, plain machine state, the real change count', async () => {
+  const h = harness();
+  const long = 'BestSpace issue #148: isolate the KaTeX stylesheet from plain assistant chat. Today src/components/ai-elements/message.tsx imports the stylesheet';
+  h.respond(method => method === 'registry.list' ? snapshot([]) : method === 'board.status' ? { ...board(),
+    projects: [{ id: 'p-one', name: 'bestspace-app' }, { id: 'p-two', name: '2026-11-03-build-an-open-source-model-321c8292' }],
+    active: [], recentDone: [{ id: 't-one', title: long, summary: 'Merged.', cost: 2.65, finishedAt: now - 60_000 }],
+    machines: [{ name: 'Laptop (hub)', online: true, running: 0, maxParallel: 1, agents: ['claude', 'codex'], diskFreeGb: 300, worktreesGb: 2 }] }
+    : method === 'task.get' ? { ...detail(), label: 'Done', runs: [{ role: 'implement', agent: 'codex', touched: Array.from({ length: 994 }, (_, i) => `f${i}.ts`) }],
+      task: { ...detail().task, status: 'done', base_sha: 'b'.repeat(40), head_sha: 'c'.repeat(40) } }
+    : method === 'task.diff' ? { source: 'artifact', files: Array.from({ length: 9 }, (_, i) => ({ path: `src/${i}.ts`, added: 1, removed: 0 })), patch: '', truncated: false, note: null } : '');
+  await h.api.refresh();
+  assert.equal(h.$('summary-sub').textContent, '2 projects · 1 task finished recently');
+  h.api.pushEvents([{ id: 1, level: 'success', ts: now, task_id: 't-one', message: `Merged "${long}" into yardmaster/trial` }, { id: 2, level: 'info', ts: now, message: 'Hub started on http://127.0.0.1:7777 (m-laptop-754067)' }]);
+  assert.equal(h.$('feed').children[1]!.children[1]!.textContent, 'Merged "BestSpace issue #148: isolate the KaTeX stylesh…" into yardmaster/trial');
+  assert.match(h.$('feed').children[0]!.textContent, /Hub started on http:\/\/127\.0\.0\.1:7777$/);
+  assert.match(h.$('machines').textContent, /Laptop \(hub\)idleclaude, codex · 1 at a time/);
+  // A conflict fix reported every merged-in file as touched; the tab counts the change the owner would merge.
+  await h.api.showTask('t-one'); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.$('tab-changes').textContent, 'Changes9');
+  assert.doesNotMatch(h.$('panel-changes').textContent, /994|f12\.ts/);
+});
