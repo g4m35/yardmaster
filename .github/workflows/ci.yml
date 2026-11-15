@@ -91,7 +91,9 @@ jobs:
         env:
           YARDMASTER_HOME_OUT: ${{ runner.temp }}/ym-device-home
         run: node scripts/device-live.mjs
+      # Evidence upload is for humans reading a failure; GitHub's artifact service timing out must not fail the check.
       - if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with: { name: device-evidence, path: '${{ runner.temp }}/ym-device-home/service-runs', if-no-files-found: ignore, retention-days: 14 }
   # One final job: the check to require, and the one that records a real pass.
