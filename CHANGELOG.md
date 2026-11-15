@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.3
+- Fixed: while a task merged newer work in to resolve a conflict, every merged-in file counted as changed by the task (994 files for a 9-file change). Those counts feed live overlap checks and the file reservations that keep tasks apart, so a conflict fix could block or pause unrelated work. Uncommitted edits now count only where they differ from the task's base, and the paths are compared in memory so very large merges cannot exceed the command-line limit.
+- Dashboard: the Changes tab counts the change itself once read; the status line counts projects instead of listing folder names; feed events name tasks briefly; machines say "idle" or how many are busy; agents and connections sit above the feed.
+
+No database migration.
+
 ## 0.9.2
 - Dashboard rebuilt as a three-pane console after the owner rejected the first redesign as looking the same: a left rail with the stage counts, machines and today's spend; the work list in the middle with a filter; and on the right either an overview (what needs you, what just happened, cleanup, connections) or the selected task beside the list. Dark scheme. On narrow screens it becomes one column with what needs you first, and a task opens full screen. See [docs/DASHBOARD.md](docs/DASHBOARD.md).
 - The selected task has tabs: Changes, Activity, Request, History and Details. Changes shows the actual diff, file by file, read from the hub with the new owner-only `task.diff` method: the saved commit once it exists (what approval merges), or the live working copy while the attempt runs. Large changes are cut at a line and say so.
