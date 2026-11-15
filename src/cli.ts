@@ -170,7 +170,7 @@ const HELP = `${bold('Yardmaster')} ${VERSION}: run many coding agents at once w
 ${bold('Get started')}
   ym setup [--agent codex]     guided repo setup; --dry-run previews without changing configs
   ym init                      set up this repo (detects your agents and test command)
-  ym verify [--json]            run committed-artifact checks and configured service verification; save receipts
+  ym verify [--dry-run]         run committed-artifact checks and configured service verification (JSON output)
   ym connect [agent|all]       add Yardmaster tools + skill to Claude Code, Codex, Cursor, OpenCode, Gemini
                                (also installs zero-token hooks for Claude Code and Codex; --no-hooks to skip)
   ym add "what you want"       queue work (--files, --after, --agent, --tier cheap|standard|strong)
@@ -197,12 +197,12 @@ ${bold('Manage work')}
 ${bold('CI costs')} (GitHub Actions)
   ym ci audit [owner/repo]     where your Actions minutes went and what to fix (--owner, --days)
   ym ci init                   push gate: checks before push, once per file tree; prints the workflow guard
-  ym ci budget | status | ship push finished agent work as one PR (ym ci help for all)
+  ym ci budget | status | ship spend, gate status, one PR for finished work (ym ci help for all)
 
 ${bold('Machines')}
-  ym hub start|stop|status|run [--host 0.0.0.0] [--port 7777]
+  ym hub start|stop|restart|status|run [--host 0.0.0.0] [--port 7777]
   ym service install|uninstall keep the hub running across crashes and reboots
-  ym pair invite --project ID  create a one-use, expiring worker invitation (owner only)
+  ym pair invite [--project ID] create a one-use, expiring worker invitation (owner only)
   ym pair list                 list paired device/invitation metadata (owner only)
   ym pair revoke ID [--invitation]  revoke a worker credential or unused invitation
   ym pair join CODE --hub URL  save a project-scoped credential on this machine
@@ -217,6 +217,7 @@ ${bold('Extend')}
   ym providers list [--json]              configured service providers and routing
   ym providers plan <capability> [--input file.json] [--json]  explain selection without dispatch
   ym providers run <capability> [--input file.json] [--json]  explicitly execute once
+  ym providers pending | resolve <id> --note "..."  inspect or settle interrupted provider requests
   ym devices status|evidence [--task id] [--json]  machine-wide device/build leases and device evidence
   ym devices reap | release <lease-id> --note "..."  free leases of crashed holders; resolve a failed cleanup
   ym devices recover <lease-id> --note "..."  free a stale claim whose holder cannot be identified
@@ -240,7 +241,7 @@ async function cmdInit(a: Args) {
   const agents = detectAgents(loadConfig(root));
   console.log(green(`✔ ${project.name} is ready`) + dim(` (base branch ${project.base_branch}, id ${project.id})`));
   console.log(agents.length ? `Agents found: ${agents.map((x) => bold(x)).join(', ')}` : yellow('No coding agents found on PATH. Install Claude Code, Codex, OpenCode, Cursor CLI or Gemini CLI.'));
-  console.log(`\nNext:\n  ${cyan('ym connect all')}      so your agents can use Yardmaster from where you already work\n  ${cyan('ym add "..."')}        or ask your agent to "split this into parallel tasks with yardmaster"`);
+  console.log(`\nNext:\n  ${cyan('ym connect codex')}    (or claude, cursor, opencode, gemini) so your agent can use Yardmaster where you already work\n  ${cyan('ym add "..."')}        or ask your agent to "split this into parallel tasks with yardmaster"`);
 }
 
 async function cmdAdd(a: Args) {

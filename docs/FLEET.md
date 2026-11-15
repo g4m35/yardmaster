@@ -68,7 +68,7 @@ Usage can be actual, estimated, mixed or unknown. Unknown usage is not free. Cla
 
 `node --test --test-timeout=30000 test/onboarding.test.ts` uses isolated homes/repos and a loopback fake hub with real PairingStore, authorization and RPC dispatch. It covers CLI invitation/join/list/revoke, a saved-credential worker heartbeat/claim, revocation refusal, one-project and machine identity checks, owner legacy compatibility, unsafe URL/storage rejection, redirects, expiration, first-run setup/dry-run and doctor. It exits naturally without `--test-force-exit`; no real provider, private hub or installed native configuration is accessed.
 
-This is bounded onboarding evidence. Parent integration owns real TLS/overlay routing, two physical machines, artifact transfer/reconnect, process shutdown after revocation, supported native-host qualification, budget reservations, global tests/build/review and release. See [QUALITY-GATES.md](QUALITY-GATES.md); no complete-product readiness score follows from these tests.
+This is bounded onboarding evidence. These tests do not cover real TLS/overlay routing, two physical machines, artifact transfer/reconnect, process shutdown after revocation, supported native-host qualification, budget reservations, global tests/build/review and release. See [QUALITY-GATES.md](QUALITY-GATES.md); no complete-product readiness score follows from these tests.
 
 ## Remote CLI and hook credentials
 

@@ -36,8 +36,9 @@ Design rules that keep the MCP layer cheap:
   until tasks settle instead of the agent polling.
 - **Text, not JSON dumps.** Replies are a few plain lines; full detail is one `yard_task` call away.
 - **Read-only annotations** on status/who/task/inbox/wait so clients can auto-approve them.
-- **Identity without setup.** Background agents identify as their task (via `YARDMASTER_TASK_ID`), interactive
-  sessions by folder and parent process, so nobody has to pass an id.
+- **Identity without setup.** Background agents identify as their task (via `YARDMASTER_TASK_ID`). Each interactive
+  MCP connection and hook session gets its own project- and machine-scoped identity; share one deliberately with
+  `YARDMASTER_SESSION` (see [Native session identity](#native-session-identity)).
 
 ## Why not ACP or A2A?
 
