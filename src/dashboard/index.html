@@ -922,12 +922,14 @@
     if (wideQuery?.matches) { drawerModal = false; drawer.show(); return; }
     drawerModal = true; drawer.showModal(); $('d-close').focus();
   }
+  // Crossing the breakpoint changes how the task is shown, not which task is open. The close event that
+  // follows arrives later, so it is marked as a re-presentation rather than the owner closing the task.
+  let representing = false;
   wideQuery?.addEventListener('change', () => {
     const drawer = $('drawer');
     if (!drawer.open || drawerModal === !wideQuery.matches) return;
-    const id = openTask, entryId = openEntry;
+    representing = true;
     drawer.close();
-    if (id) showTask(id); else if (entryId) showEntry(entryId);
   });
   function showEntry(id, quiet = false) {
     const entry = registry?.entries.find(e => e.id === id);
@@ -1266,7 +1268,7 @@
   function changeView(t, touched, finished) {
     const cached = diffCache.get(t.id);
     const box = el('div', { id: 'd-change', 'data-task': t.id });
-    if (cached && cached.data) renderChange(box, cached.data, touched, finished);
+    if (cached && cached.key === diffKey(t) && cached.data) renderChange(box, cached.data, touched, finished);
     else renderTouched(box, touched, finished, t.base_sha ? 'Loading the change…' : 'Nothing changed yet. The change appears here once an agent starts.');
     return box;
   }
@@ -1285,15 +1287,17 @@
     const patch = el('div', { class: 'patch', tabindex: '0', 'aria-label': 'Line changes' });
     const heads = [];
     const lines = String(data.patch || '').split('\n');
-    let file = -1;
+    let file = -1, inHunk = false;
     for (const line of lines.slice(0, PATCH_LINES)) {
       if (line.startsWith('diff --git ')) {
-        file++;
+        file++; inHunk = false;
         const head = el('div', { class: 'fh', id: 'd-file-' + file }, data.files[file]?.path || line.replace(/^diff --git a\/(.*?) b\/.*$/, '$1'));
         heads.push(head); patch.append(head); continue;
       }
-      if (/^(index |--- |\+\+\+ |similarity index |rename from |rename to )/.test(line)) continue;
-      const cls = line.startsWith('@@') ? 'hk' : line.startsWith('+') ? 'ad' : line.startsWith('-') ? 'dl' : /^(new|deleted) file mode|^Binary files|^\\ No newline/.test(line) ? 'mt' : '';
+      if (line.startsWith('@@')) inHunk = true;
+      // Header lines only exist between "diff --git" and the first hunk; inside a hunk "+++ x" is an added line.
+      else if (!inHunk && /^(index |--- |\+\+\+ |similarity index |rename from |rename to )/.test(line)) continue;
+      const cls = line.startsWith('@@') ? 'hk' : !inHunk ? (line ? 'mt' : '') : line.startsWith('+') ? 'ad' : line.startsWith('-') ? 'dl' : line.startsWith('\\') ? 'mt' : '';
       patch.append(el('div', cls ? { class: cls } : {}, line || ' '));
     }
     if (lines.length > PATCH_LINES || data.truncated) patch.append(el('div', { class: 'mt' }, 'The change is longer than this view shows. Read the rest with the command under Details.'));
@@ -1311,18 +1315,24 @@
     ].filter(Boolean));
   }
   let lastDetail = null;
+  const diffPending = new Map();
+  // A read belongs to one version of a task (status, saved commit, attempt). A response for an older
+  // version never renders next to a newer one's actions; the newer version is read instead.
   async function loadDiff(t) {
+    if (!t.base_sha) return;
+    const key = diffKey(t);
     const cached = diffCache.get(t.id);
     const live = t.status === 'running' || t.status === 'verifying';
-    if (!t.base_sha) return;
-    if (cached && cached.key === diffKey(t) && (!live || Date.now() - cached.at < 10000)) return;
-    if (cached?.pending) return;
-    diffCache.set(t.id, { ...cached, pending: true });
+    if (cached && cached.key === key && (!live || Date.now() - cached.at < 10000)) return;
+    if (diffPending.get(t.id) === key) return;
+    diffPending.set(t.id, key);
     let data = null;
     try { data = await rpc('task.diff', { id: t.id }); } catch (e) { data = { files: [], patch: '', note: 'Could not read the change. ' + e.message }; }
-    diffCache.set(t.id, { key: diffKey(t), at: Date.now(), data: data || null, pending: false });
+    if (diffPending.get(t.id) === key) diffPending.delete(t.id);
+    diffCache.set(t.id, { key, at: Date.now(), data: data || null });
     const box = $('d-change');
     if (!box || box.dataset.task !== t.id || openTask !== t.id) return;
+    if (lastDetail?.id !== t.id || diffKey(lastDetail) !== key) { if (lastDetail?.id === t.id) loadDiff(lastDetail); return; }
     const run = lastDetail?.id === t.id ? lastDetail.touched : [];
     if (data) renderChange(box, data, run, ['done', 'ready', 'merging'].includes(t.status));
     else renderTouched(box, run, ['done', 'ready', 'merging'].includes(t.status), '');
@@ -1362,6 +1372,13 @@
     else { openTask = null; openEntry = null; ++detailSequence; clearInterval(logTimer); }
   }
   $('drawer').addEventListener('close', () => {
+    if (representing) {
+      representing = false;
+      const origin = drawerOrigin;
+      presentDrawer();
+      drawerOrigin = origin;
+      return;
+    }
     saveDraft(); openTask = null; openEntry = null; ++detailSequence; clearInterval(logTimer);
     $('overview').hidden = false; drawerModal = false; markSelected();
     restoreFocus(drawerOrigin);
@@ -1427,6 +1444,8 @@
       if (!note) return;
       event.preventDefault(); selectTab(openTask, 'activity'); $('d-note').focus();
     } else if (key === 'a' && openTask) {
+      // A held key repeats; only a fresh press counts, so holding A can never merge.
+      if (event.repeat) { event.preventDefault(); return; }
       const approve = [...$('d-acts').querySelectorAll('[data-focus]')].find((node) => node.textContent === 'Approve and merge');
       if (!approve) return;
       event.preventDefault();

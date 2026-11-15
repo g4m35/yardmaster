@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { sandbox } from './helpers.ts';
 import { openDb } from '../src/db.ts';
@@ -62,5 +62,11 @@ test('the owner reads a task change: the saved artifact once it exists, its work
     coord.updateTask(task!.id, { status: 'running', head_sha: 'f'.repeat(40) });
     assert.match((await dispatch(methods, 'task.diff', { id: task!.id }) as Diff).note!, /^This hub cannot read the change/);
     await assert.rejects(dispatch(methods, 'task.diff', { id: 't-missing' }), /No task t-missing/);
+    // Workers can write these fields; a value Git would read as an option is refused before Git runs.
+    const target = join(box.home, 'written-by-git');
+    coord.updateTask(task!.id, { status: 'ready', base_sha: `--output=${target}`, head_sha: head });
+    assert.match((await dispatch(methods, 'task.diff', { id: task!.id }) as Diff).note!, /Not a commit id: --output=/);
+    await assert.rejects(changeSince(box.repo, base, '--output=x'), /Not a commit id/);
+    assert.equal(existsSync(target), false);
   } finally { db.close(); }
 });

@@ -214,6 +214,8 @@ export interface Change { files: ChangeFile[]; patch: string; truncated: boolean
  * the working copy at `cwd` against `base` (tracked files only: untracked files have no diff until saved).
  */
 export async function changeSince(cwd: string, base: string, head: string | null, maxBytes = 400_000): Promise<Change> {
+  // Workers can write these fields. Anything but a full commit id could be read by Git as an option.
+  for (const sha of [base, head]) if (sha !== null && !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(sha)) throw new Error(`Not a commit id: ${sha.slice(0, 80)}`);
   const range = head ? [base, head] : [base];
   const opts = ['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', '--find-renames'];
   const stat = (await git(cwd, [...opts, '--numstat', '-z', ...range, '--'], { timeoutMs: 30_000 })).stdout;

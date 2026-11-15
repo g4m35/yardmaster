@@ -120,7 +120,7 @@ function entry(overrides = {}) {
 function snapshot(entries = [entry()]) { return { generatedAt: now, entries, coverage: { historyLimit: 100, unknownSignals: ['native process liveness'], sessionsTruncated: false, machinesTruncated: false } }; }
 function board() { return { projects: [{ id: 'p-one', name: 'Fixture' }], active: [{ id: 't-one', title: 'Exact fixture task', status: 'running' }], attention: [], recentDone: [], machines: [], sessions: [], paused: { paused: false }, warnings: [], spentToday: 0, dailyBudget: 10 }; }
 function detail(id = 't-one') { return { task: { id, title: 'Exact ' + id, status: 'running', scope: [], attempts: 1, max_attempts: 3, cost_usd: 0 }, runs: [], deps: [], label: 'Working' }; }
-function harness(options: { token?: string | null; hash?: string; wide?: boolean } = {}) {
+function harness(options: { token?: string | null; hash?: string; wide?: boolean; media?: { matches: boolean; listeners: Function[] } } = {}) {
   const doc = new Document();
   for (const id of ['app', 'toast']) { const n = doc.createElement('div'); n.setAttribute('id', id); doc.body.append(n); }
   for (const id of ['tpl-main', 'tpl-gate']) {
@@ -133,6 +133,7 @@ function harness(options: { token?: string | null; hash?: string; wide?: boolean
   let respond: (method: string, params: any) => any = method => method === 'board.status' ? board() : method === 'registry.list' ? snapshot() : method === 'task.get' ? detail() : '';
   const context: any = { document: doc, Node: Element, URLSearchParams, Date, console,
     ...(options.wide ? { matchMedia: () => ({ matches: true, addEventListener() {} }) } : {}),
+    ...(options.media ? { matchMedia: () => ({ get matches() { return options.media!.matches; }, addEventListener: (_: string, fn: Function) => options.media!.listeners.push(fn) }) } : {}),
     location: { hash: options.hash || '', pathname: '/' }, history: { replaceState() { context.location.hash = ''; } },
     localStorage: { getItem: (k: string) => storage.get(k) || null, setItem: (k: string, v: string) => storage.set(k, v), removeItem: (k: string) => storage.delete(k) },
     setTimeout(fn: Function, ms: number) { const id = nextTimer++; timers.set(id, { fn, ms }); return id; }, clearTimeout(id: number) { timers.delete(id); },
@@ -278,16 +279,17 @@ test('the change tab shows each changed file and its lines, read once from the h
   const h = harness(); await h.api.refresh();
   const ready = { ...detail(), label: 'Ready to merge', runs: [{ role: 'implement', agent: 'claude', touched: ['src/a.ts'] }],
     task: { ...detail().task, status: 'ready', attention: 'Checks and review passed. Waiting for your approval.', base_sha: 'b'.repeat(40), head_sha: 'c'.repeat(40), branch: 'yardmaster/t-one' } };
-  const patch = 'diff --git a/src/a.ts b/src/a.ts\nindex 1111111..2222222 100644\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,2 +1,2 @@\n keep\n-old line\n+new line\n';
+  const patch = 'diff --git a/src/a.ts b/src/a.ts\nindex 1111111..2222222 100644\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,3 +1,3 @@\n keep\n-old line\n--- counter;\n+new line\n+++ counter;\n';
   h.respond(method => method === 'task.get' ? ready : method === 'task.diff' ? { source: 'artifact', files: [{ path: 'src/a.ts', added: 1, removed: 1 }], patch, truncated: false, note: null } : method === 'registry.list' ? snapshot() : board());
   await h.api.showTask('t-one'); await new Promise(resolve => setImmediate(resolve));
   // A finished change opens on the change itself, next to the approval it is waiting for.
   assert.equal(h.$('panel-changes').hidden, false);
   assert.ok(h.$('d-acts').querySelectorAll('[data-focus]').some(node => node.textContent === 'Approve and merge'));
   const change = h.$('d-change');
-  assert.match(change.textContent, /^1 file · \+1 −1src\/a\.ts\+1 −1src\/a\.ts@@ -1,2 \+1,2 @@ keep-old line\+new line/);
-  assert.deepEqual(all(change, 'ad').map(node => node.textContent), ['+new line']);
-  assert.deepEqual(all(change, 'dl').map(node => node.textContent), ['-old line']);
+  assert.match(change.textContent, /^1 file · \+1 −1src\/a\.ts\+1 −1src\/a\.ts@@ -1,3 \+1,3 @@ keep-old line/);
+  // Inside a hunk, lines that look like file headers are changed source lines.
+  assert.deepEqual(all(change, 'ad').map(node => node.textContent), ['+new line', '+++ counter;']);
+  assert.deepEqual(all(change, 'dl').map(node => node.textContent), ['-old line', '--- counter;']);
   assert.doesNotMatch(change.textContent, /index 1111111|\+\+\+ b\//);
   await h.api.showTask('t-one', true); await new Promise(resolve => setImmediate(resolve));
   assert.equal(h.calls.filter(c => c.method === 'task.diff').length, 1);
@@ -555,4 +557,46 @@ test('default registry view retains unconfirmed main and utility exits without o
   h.api.showEntry('held-2');
   assert.match(h.$('d-facts').textContent, /succeeded/);
   assert.doesNotMatch(h.$('d-acts').textContent, /Request stop/);
+});
+
+test('a held A key never approves, and resizing across the breakpoint keeps the open task', async () => {
+  const media = { matches: true, listeners: [] as Function[] };
+  const h = harness({ media });
+  const ready = { id: 't-one', title: 'Approval fixture', status: 'ready', needsApproval: true };
+  h.respond((method, params) => method === 'board.status' ? { ...board(), active: [ready], attention: [{ id: 't-one', title: 'Approval fixture', status: 'ready', why: 'Waiting.' }] }
+    : method === 'registry.list' ? snapshot([]) : method === 'task.get' ? { ...detail(params.id), label: 'Ready to merge', task: { ...detail(params.id).task, status: 'ready', attention: 'Waiting.' } } : method === 'task.diff' ? null : '');
+  await h.api.refresh();
+  const press = async (key: string, repeat = false) => { for (const fn of h.doc.listeners.get('keydown') || []) await fn({ key, repeat, target: h.doc.body, preventDefault() {} }); await new Promise(resolve => setImmediate(resolve)); };
+  await press('j');
+  await press('a'); await press('a', true); await press('a', true);
+  assert.equal(h.calls.filter(c => c.method === 'task.control').length, 0);
+  // Narrowing the window re-presents the same task full screen instead of closing it.
+  media.matches = false;
+  for (const fn of media.listeners) fn();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.$('drawer').open, true); assert.equal(h.api.state().openTask, 't-one'); assert.equal(h.$('overview').hidden, false);
+  // Keys now belong to the full-screen task, not the list behind it.
+  await press('a'); await press('a');
+  assert.equal(h.calls.filter(c => c.method === 'task.control').length, 0);
+});
+
+test('a change read for an earlier version of a task is never shown next to a newer one', async () => {
+  const h = harness(); await h.api.refresh();
+  const base = 'b'.repeat(40);
+  let version: any = { ...detail(), label: 'Working', runs: [{ role: 'implement', agent: 'claude', touched: ['src/a.ts'] }], task: { ...detail().task, status: 'needs_human', base_sha: base, attempts: 1 } };
+  const replies: ((value: unknown) => void)[] = [];
+  h.respond(method => method === 'task.get' ? version : method === 'task.diff' ? new Promise(resolve => replies.push(resolve)) : method === 'registry.list' ? snapshot() : board());
+  await h.api.showTask('t-one');
+  assert.equal(replies.length, 1);
+  // The task finishes with a saved commit while the first read is still pending.
+  version = { ...version, label: 'Ready to merge', task: { ...version.task, status: 'ready', attention: 'Waiting.', head_sha: 'c'.repeat(40), attempts: 2 } };
+  await h.api.showTask('t-one', true);
+  const file = (path: string, line: string) => ({ source: 'artifact', files: [{ path, added: 1, removed: 0 }], patch: `diff --git a/${path} b/${path}\n@@ -0,0 +1 @@\n${line}\n`, truncated: false, note: null });
+  replies[0]!(file('src/old.ts', '+from the working copy'));
+  await new Promise(resolve => setImmediate(resolve)); await new Promise(resolve => setImmediate(resolve));
+  assert.doesNotMatch(h.$('d-change').textContent, /from the working copy/);
+  assert.equal(replies.length, 2);
+  replies[1]!(file('src/a.ts', '+from the saved commit'));
+  await new Promise(resolve => setImmediate(resolve)); await new Promise(resolve => setImmediate(resolve));
+  assert.match(h.$('d-change').textContent, /from the saved commit/);
 });
