@@ -98,13 +98,15 @@ export async function isClean(cwd: string): Promise<boolean> {
 }
 
 export async function changedFiles(cwd: string, base: string): Promise<string[]> {
-  const names = async (args: string[]) => (await git(cwd, ['--literal-pathspecs', ...args])).stdout.split('\0').filter(Boolean);
+  const names = async (args: string[]) => (await git(cwd, args)).stdout.split('\0').filter(Boolean);
   const committed = await names(['diff', '--name-only', '--no-renames', '-z', `${base}...HEAD`]);
   // Uncommitted edits count only where they differ from the base. While a merge brings in newer work, every
   // merged-in file is staged against HEAD but identical to the base: those files are not this task's changes,
   // and counting them made one reconciling task reserve the whole upstream diff.
-  const dirty = await names(['diff', '--name-only', '--no-renames', '-z', 'HEAD']);
-  const working = dirty.length ? await names(['diff', '--name-only', '--no-renames', '-z', base, '--', ...dirty]) : [];
+  // Both lists are read whole and intersected here: passing the dirty paths to Git as arguments can exceed the
+  // operating system's argument limit when a merge brings in thousands of files.
+  const dirty = new Set(await names(['diff', '--name-only', '--no-renames', '-z', 'HEAD']));
+  const working = dirty.size ? (await names(['diff', '--name-only', '--no-renames', '-z', base])).filter(path => dirty.has(path)) : [];
   const untracked = await names(['ls-files', '--others', '--exclude-standard', '-z']);
   return [...new Set([...committed, ...working, ...untracked])].sort();
 }
