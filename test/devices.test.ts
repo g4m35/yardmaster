@@ -753,10 +753,12 @@ test('a long run of overlapping matches streams in bounded memory and time', () 
   const started = Date.now();
   assert.equal(scrubFile(file, ['aa', 'aaa'], 64 * 1024), true);
   const elapsed = Date.now() - started;
+  // Measured before the test reads the result back: that read allocates a file-sized buffer of its own.
+  const grown = process.memoryUsage().arrayBuffers - before;
   assert.equal(readFileSync(file, 'utf8'), 'start [redacted] end');
   assert(elapsed < 10_000, `streamed in ${elapsed} ms`);
   // Nothing proportional to the file stays allocated: buffers in use stay far below its size.
-  assert(process.memoryUsage().arrayBuffers - before < size / 4, 'no file-sized buffer was retained');
+  assert(grown < size / 4, `no file-sized buffer was retained (grew ${grown} bytes)`);
   assert.equal(artifactSha256(file), fileSha256(file));
 });
 
