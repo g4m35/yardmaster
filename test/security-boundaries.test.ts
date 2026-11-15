@@ -127,7 +127,7 @@ test('agents keep cloud-provider sign-in, and region, profile and user-only URLs
   const restore = envFixture({ CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_USE_VERTEX: undefined, AWS_PROFILE: 'dev', AWS_REGION: 'us-east-1',
     AWS_BEARER_TOKEN_BEDROCK: 'bedrock-fixture', AWS_SECRET_ACCESS_KEY: 'aws-fixture', AZURE_OPENAI_API_KEY: 'azure-fixture',
     GOOGLE_APPLICATION_CREDENTIALS: '/fixture/adc.json', REPO_URL: 'ssh://git@github.com/acme/app.git', DB_URL: 'postgres://app:hunter2@db/app',
-    MIRROR_URL: 'https://deploy@git.example/acme/app.git', ORIGIN_URL: 'https://ghp_0123456789abcdefghijABCDEFGHIJ012345@github.com/acme/app.git' });
+    MIRROR_URL: 'https://deploy@git.example/acme/app.git', AZURE_OPENAI_ENDPOINT: 'https://svc:hunter2@gateway.example', ORIGIN_URL: 'https://ghp_0123456789abcdefghijABCDEFGHIJ012345@github.com/acme/app.git' });
   try {
     const claude = cleanEnv({}, { agent: 'claude' });
     // Bedrock is switched on, so AWS credentials are Claude Code's own sign-in.
@@ -138,6 +138,8 @@ test('agents keep cloud-provider sign-in, and region, profile and user-only URLs
     assert.equal(codex.AWS_SECRET_ACCESS_KEY, undefined); assert.equal(codex.AWS_BEARER_TOKEN_BEDROCK, undefined);
     const check = cleanEnv();
     assert.equal(check.AWS_PROFILE, 'dev'); assert.equal(check.AWS_REGION, 'us-east-1');
+    // An endpoint name is not a secret, but a password in its value still is.
+    assert.equal(check.AZURE_OPENAI_ENDPOINT, undefined); assert.equal(codex.AZURE_OPENAI_ENDPOINT, undefined);
     assert.equal(check.REPO_URL, 'ssh://git@github.com/acme/app.git');
     assert.equal(check.DB_URL, undefined); assert.equal(check.AWS_SECRET_ACCESS_KEY, undefined);
     // A token written as the URL user is a secret; a short account name is not.

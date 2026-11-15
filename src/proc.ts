@@ -39,7 +39,8 @@ function cloudAuth(agent: string, name: string, env: NodeJS.ProcessEnv): boolean
 }
 
 function secretEnv(name: string, value: string): boolean {
-  if (NOT_SECRET.has(name)) return false;
+  // The name says region/profile/endpoint, but the value can still carry a password (https://user:pass@gateway).
+  if (NOT_SECRET.has(name)) return secretUrl(value);
   return /(?:^|_)(?:TOKEN|SECRET|KEY)(?:_|$)|PASSWORD|CREDENTIAL|^(?:AWS|AZURE)_|^(?:GH|GITHUB|NPM)_TOKEN$/i.test(name) ||
     secretUrl(value);
 }
