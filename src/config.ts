@@ -198,9 +198,34 @@ export const ConfigSchema = z.object({
   liveOverlapIntervalSeconds: z.number().min(0.2).default(10),
   /** Where task worktrees live. Empty means <YARDMASTER_HOME>/worktrees. */
   worktreeRoot: z.string().default(''),
+  /** Admission for new tasks, checked before the first one too. Other programs on the machine count. */
   resources: z
-    .object({ maxLoadPerCpu: z.number().default(0.9), minFreeMemMb: z.number().default(1024) })
-    .default({ maxLoadPerCpu: 0.9, minFreeMemMb: 1024 }),
+    .object({
+      maxLoadPerCpu: z.number().default(0.9), minFreeMemMb: z.number().default(1024),
+      /** Hold new tasks at or above this macOS memory-pressure level ("off" to ignore it). */
+      holdAtPressure: z.enum(['warn', 'critical', 'off']).default('critical'),
+    })
+    .default({ maxLoadPerCpu: 0.9, minFreeMemMb: 1024, holdAtPressure: 'critical' }),
+  /**
+   * Machine-wide simulator, physical-device and build slots (docs/DEVICES.md). Put limits in the global config so
+   * every project on this machine shares them; a project setting can only make its own requests wait longer.
+   */
+  devices: z
+    .object({
+      limits: z.object({
+        build: z.number().int().min(1).max(16).default(1),
+        simulator: z.number().int().min(1).max(16).default(1),
+        physical: z.number().int().min(1).max(16).default(1),
+      }).prefault({}),
+      /** Heavy device work waits at or above this pressure level: stricter than ordinary task admission. */
+      holdAtPressure: z.enum(['warn', 'critical', 'off']).default('warn'),
+      minFreeMemMb: z.number().min(0).default(2048),
+      /** A holder renews its lease well within this; a crashed holder's slot frees after it at the latest. */
+      leaseMinutes: z.number().min(1).max(240).default(5),
+      /** How long a request waits in the queue for a slot or for memory before reporting unknown. */
+      waitMinutes: z.number().min(0).max(24 * 60).default(30),
+    })
+    .prefault({}),
   cleanup: z
     .object({ auto: z.boolean().default(true), logRetentionDays: z.number().default(14), eventRetentionDays: z.number().int().min(1).max(3650).nullable().default(30), deleteMergedBranches: z.boolean().default(true) })
     .default({ auto: true, logRetentionDays: 14, eventRetentionDays: 30, deleteMergedBranches: true }),

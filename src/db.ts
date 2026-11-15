@@ -120,6 +120,21 @@ const MIGRATIONS: string[] = [
   `,
   budgetMigrationDDL,
   `ALTER TABLE tasks ADD COLUMN native_handoff TEXT;`,
+  // Machine-wide device/build leases (src/leases.ts) and portable device evidence (src/device-evidence.ts).
+  `
+  CREATE TABLE resource_leases (
+    id TEXT PRIMARY KEY, pool TEXT NOT NULL, state TEXT NOT NULL, holder TEXT NOT NULL,
+    project_id TEXT, task_id TEXT, request_id TEXT, host TEXT NOT NULL, pid INTEGER NOT NULL, proc_started INTEGER,
+    queued_at INTEGER NOT NULL, acquired_at INTEGER, expires_at INTEGER NOT NULL, owned TEXT NOT NULL DEFAULT '[]', note TEXT
+  );
+  CREATE INDEX resource_leases_pool ON resource_leases(pool, state, queued_at);
+  CREATE TABLE device_evidence (
+    id TEXT PRIMARY KEY, project_id TEXT, task_id TEXT, sha TEXT, requirement TEXT NOT NULL, status TEXT NOT NULL,
+    evidence TEXT NOT NULL, receipt_path TEXT, created_at INTEGER NOT NULL
+  );
+  CREATE INDEX device_evidence_task ON device_evidence(task_id, created_at);
+  CREATE INDEX device_evidence_project ON device_evidence(project_id, created_at);
+  `,
 ];
 
 export type Db = DatabaseSync;
