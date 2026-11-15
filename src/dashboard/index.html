@@ -93,9 +93,7 @@
   .machine { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 2px 8px; align-items: center; }
   .machine .n { font-weight: 560; overflow-wrap: anywhere; }
   .machine .a { grid-column: 2 / -1; font-size: 12px; color: var(--ink-2); overflow-wrap: anywhere; }
-  .slots { display: flex; gap: 3px; flex-wrap: wrap; max-width: 80px; }
-  .slots i { width: 7px; height: 12px; border-radius: 2px; border: 1px solid var(--ink-3); }
-  .slots i.used { background: var(--run); border-color: var(--run); }
+  .machine .busy { font: 11.5px var(--mono); color: var(--ink-3); white-space: nowrap; }
   .disk { grid-column: 2 / -1; display: grid; gap: 4px; font-size: 11.5px; color: var(--ink-3); }
   .disk .track-bar { height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; }
   .disk .fill { height: 100%; background: var(--ink-3); }
@@ -466,19 +464,6 @@
           <h2 id="hu-h">Heads up</h2>
           <ul id="hu-list"></ul>
         </section>
-        <div class="two">
-          <section class="card" aria-labelledby="feed-h">
-            <h2 id="feed-h">What just happened</h2>
-            <ol class="feed" id="feed" aria-live="polite"></ol>
-            <button class="btn" id="feed-more" type="button" hidden></button>
-          </section>
-          <section class="card" aria-labelledby="clean-h">
-            <h2 id="clean-h">Cleanup</h2>
-            <p class="muted">Finished worktrees, merged branches and expired reservations are removed. Review the plan first. Changed or unmerged work is kept when the hub cannot confirm it is safe to remove.</p>
-            <div id="clean"></div>
-            <div class="registry-actions"><button class="btn" id="clean-preview" type="button">Check what can be removed</button><button class="btn go" id="clean-run" type="button" hidden>Clean up now</button></div>
-          </section>
-        </div>
         <details class="card connections" id="conn-details">
           <summary><h2 id="agents-h">Agents and connections</h2><span class="muted" id="conn-summary"></span></summary>
           <div class="connections-body">
@@ -493,6 +478,19 @@
             </details>
           </div>
         </details>
+        <div class="two">
+          <section class="card" aria-labelledby="feed-h">
+            <h2 id="feed-h">What just happened</h2>
+            <ol class="feed" id="feed" aria-live="polite"></ol>
+            <button class="btn" id="feed-more" type="button" hidden></button>
+          </section>
+          <section class="card" aria-labelledby="clean-h">
+            <h2 id="clean-h">Cleanup</h2>
+            <p class="muted">Finished worktrees, merged branches and expired reservations are removed. Review the plan first. Changed or unmerged work is kept when the hub cannot confirm it is safe to remove.</p>
+            <div id="clean"></div>
+            <div class="registry-actions"><button class="btn" id="clean-preview" type="button">Check what can be removed</button><button class="btn go" id="clean-run" type="button" hidden>Clean up now</button></div>
+          </section>
+        </div>
         <p class="privacy">Personal hub · Data and logs come from this hub only. No cloud telemetry. Remote access needs your own private HTTPS or encrypted network; this page does not configure it.</p>
       </div>
 
@@ -588,6 +586,8 @@
     return clip(line, max);
   };
   const shortQuoted = (message) => String(message || '').replace(/"([^"]{97,})"/g, (_, title) => '"' + shortTitle(title) + '"');
+  // The feed names a task in passing; a few words identify it, and the full name is one click away.
+  const feedText = (message) => String(message || '').replace(/"([^"]{49,})"/g, (_, title) => '"' + clip(shortTitle(title), 48) + '"').replace(/ \(m-[a-z0-9-]+\)$/, '');
   const elapsed = (from) => {
     if (!from || from > Date.now()) return '';
     const m = Math.floor((Date.now() - from) / 60000);
@@ -781,9 +781,10 @@
     if (!parts.length) parts.push(!board.projects.length ? 'No project yet.' : board.paused.paused ? 'Paused. Nothing is waiting.' : 'All quiet. Nothing is running.');
     else if (!needs) parts.push('Nothing needs you.');
     $('summary-line').textContent = parts.join(' ');
-    const names = board.projects.map((p) => p.name);
-    const scope = projectId ? names.filter((_, i) => board.projects[i].id === projectId) : names;
-    $('summary-sub').textContent = [scope.length ? clip(scope.join(', '), 80) : '', board.recentDone.length ? n(board.recentDone.length, 'task', 'tasks') + ' finished recently' : ''].filter(Boolean).join(' · ');
+    // One project is named; several are counted (their folder names are long and say little).
+    const chosen = board.projects.find((p) => p.id === projectId);
+    const scope = chosen ? chosen.name : board.projects.length === 1 ? board.projects[0].name : board.projects.length ? n(board.projects.length, 'project', 'projects') : '';
+    $('summary-sub').textContent = [clip(scope, 60), board.recentDone.length ? n(board.recentDone.length, 'task', 'tasks') + ' finished recently' : ''].filter(Boolean).join(' · ');
   }
 
   function track(status) {
@@ -867,12 +868,12 @@
     $('machines').replaceChildren(...(ms.length ? ms.map((m) => el('div', { class: 'machine' },
       el('span', { class: 'lamp' + (m.online ? ' on' : ''), 'aria-hidden': 'true' }),
       el('span', { class: 'n' }, m.name, m.online ? '' : ' (offline)'),
-      el('span', { class: 'slots', title: `${m.running} of ${m.maxParallel} agent slots in use`, 'aria-label': `${m.running} of ${m.maxParallel} slots in use` }, Array.from({ length: m.maxParallel }, (_, i) => el('i', { class: i < m.running ? 'used' : '' }))),
-      el('span', { class: 'a' }, m.agents.length ? 'Agents: ' + m.agents.join(', ') : 'No coding agents found on this machine'),
+      el('span', { class: 'busy num' }, m.online ? (m.running ? `${m.running} of ${m.maxParallel} busy` : 'idle') : ''),
+      el('span', { class: 'a' }, m.agents.length ? m.agents.join(', ') + ` · ${m.maxParallel} at a time` : 'No coding agents found on this machine'),
       m.diskFreeGb === null ? null : diskBar(m),
     )) : [el('p', { class: 'muted' }, 'No machine heartbeat yet. Check “ym doctor” on the hub; start a configured worker to connect another machine.')]));
     const ss = board.sessions;
-    $('sessions').textContent = ss.length ? `Connected agent sessions: ${ss.map((s) => s.id.replace('session:', '')).join(', ')}` : 'No interactive agent sessions connected. Run “ym connect all” to use Yardmaster from Claude Code, Codex, Cursor and others.';
+    $('sessions').textContent = ss.length ? `Connected sessions: ${ss.map((s) => s.id.replace('session:', '')).join(', ')}` : 'No connected sessions. “ym connect all” links Claude Code, Codex and others.';
   }
 
   function canStopTask(id) {
@@ -1040,7 +1041,7 @@
     more.textContent = feedAll ? 'Show fewer' : `Show ${feed.length - FEED_RECENT} older`;
     $('feed').replaceChildren(...(feedAll ? feed : feed.slice(0, FEED_RECENT)).map((e) => el('li', { 'data-l': e.level },
       el('time', { datetime: new Date(e.ts).toISOString() }, time(e.ts)),
-      el('span', {}, e.task_id ? el('a', { href: '#', onclick: (ev) => { ev.preventDefault(); showTask(e.task_id); } }, shortQuoted(e.message)) : shortQuoted(e.message)),
+      el('span', { title: e.message }, e.task_id ? el('a', { href: '#', onclick: (ev) => { ev.preventDefault(); showTask(e.task_id); } }, feedText(e.message)) : feedText(e.message)),
     )));
   }
 
@@ -1187,7 +1188,7 @@
       t.worktree ? ['Working copy', t.worktree] : null,
     ].filter(Boolean);
     const tabs = [
-      ['changes', 'Changes', touched.length || null, changes],
+      ['changes', 'Changes', changeCount(t, touched), changes],
       ['activity', 'Activity', null, activity],
       ['request', 'Request', null, asked],
       ['history', 'History', history.length || null, [history.length ? el('ol', { class: 'history' }, history.map((e) => el('li', {}, el('time', { datetime: new Date(e.ts).toISOString() }, clock(e.ts)), el('span', {}, shortQuoted(e.message))))) : el('p', { class: 'change-note' }, 'Nothing recorded yet.')]],
@@ -1267,11 +1268,24 @@
   }
   // The change itself. Before the hub answers (or when it cannot), the files the agent reported touching.
   const diffKey = (t) => [t.status, t.head_sha, t.attempts].join(':');
+  // How many files the change has. The agent's own report counts what it touched while working, which during a
+  // conflict fix includes everything merged in; once the change has been read, that count is the truth.
+  const changeCount = (t, touched) => {
+    const cached = diffCache.get(t.id);
+    if (cached && cached.key === diffKey(t) && cached.data && cached.data.files) return cached.data.files.length || null;
+    return t.status === 'running' || t.status === 'verifying' ? touched.length || null : null;
+  };
+  function showChangeCount(count) {
+    const tab = $('tab-changes');
+    if (!tab) return;
+    tab.replaceChildren('Changes', ...(count ? [el('span', {}, String(count))] : []));
+  }
   function changeView(t, touched, finished) {
     const cached = diffCache.get(t.id);
     const box = el('div', { id: 'd-change', 'data-task': t.id });
     if (cached && cached.key === diffKey(t) && cached.data) renderChange(box, cached.data, touched, finished);
-    else renderTouched(box, touched, finished, t.base_sha ? 'Loading the change…' : 'Nothing changed yet. The change appears here once an agent starts.');
+    // A finished task's report can include files merged in while fixing a conflict; wait for the change itself.
+    else renderTouched(box, finished ? [] : touched, finished, t.base_sha ? 'Loading the change…' : 'Nothing changed yet. The change appears here once an agent starts.');
     return box;
   }
   function renderTouched(box, touched, finished, note) {
@@ -1283,7 +1297,8 @@
   }
   const PATCH_LINES = 6000;
   function renderChange(box, data, touched, finished) {
-    if (!data.files || !data.files.length) { renderTouched(box, touched, finished, data.note || 'No differences from where it started.'); return; }
+    showChangeCount(data.files ? data.files.length : 0);
+    if (!data.files || !data.files.length) { renderTouched(box, finished ? [] : touched, finished, data.note || 'No differences from where it started.'); return; }
     const added = data.files.reduce((n, f) => n + (f.added || 0), 0);
     const removed = data.files.reduce((n, f) => n + (f.removed || 0), 0);
     const patch = el('div', { class: 'patch', tabindex: '0', 'aria-label': 'Line changes' });

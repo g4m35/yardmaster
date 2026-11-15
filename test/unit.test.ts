@@ -428,6 +428,47 @@ test('changed files keep the first path intact when it is an unstaged edit', asy
   assert.deepEqual(await changedFiles(repo, base), ['new file.ts', 'src.ts']);
 });
 
+test('while a task merges newer work in, the merged-in files are not counted as its changes', async () => {
+  const { changedFiles } = await import('../src/git.ts');
+  const repo = tempDir('ym-merging-');
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
+  git('init', '-q', '-b', 'main');
+  write(join(repo, 'shared.ts'), 'one\n'); write(join(repo, 'old name.ts'), 'moved\n');
+  git('add', '.'); git('commit', '-q', '-m', 'base');
+  git('switch', '-q', '-c', 'task');
+  write(join(repo, 'shared.ts'), 'task\n'); git('mv', 'old name.ts', 'new name.ts'); git('commit', '-qam', 'task work');
+  git('switch', '-q', 'main');
+  write(join(repo, 'shared.ts'), 'main\n'); for (let i = 0; i < 20; i++) write(join(repo, `upstream-${i}.ts`), 'x\n');
+  git('add', '.'); git('commit', '-q', '-m', 'newer main');
+  const main = git('rev-parse', 'HEAD').trim();
+  git('switch', '-q', 'task');
+  // The reconcile step merges newer main in; shared.ts conflicts and the 20 upstream files are staged.
+  assert.throws(() => git('merge', '--no-edit', main));
+  write(join(repo, 'scratch.md'), 'notes\n');
+  assert.deepEqual(await changedFiles(repo, main), ['new name.ts', 'old name.ts', 'scratch.md', 'shared.ts']);
+});
+
+test('a merge that brings in more paths than fit on a command line still reports only the task changes', async () => {
+  const { changedFiles } = await import('../src/git.ts');
+  const repo = tempDir('ym-huge-merge-');
+  const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, encoding: 'utf8', env, maxBuffer: 64 * 1024 * 1024 });
+  git('init', '-q', '-b', 'main');
+  write(join(repo, 'task.ts'), 'one\n'); git('add', '.'); git('commit', '-q', '-m', 'base');
+  const base = git('rev-parse', 'HEAD').trim();
+  // 10,000 upstream files with 240-character names: about 2.5 MB of paths, past argv limits on macOS and Linux.
+  const name = (i: number) => `upstream/${String(i).padStart(5, '0')}-${'x'.repeat(230)}.ts`;
+  let stream = `commit refs/heads/main\ncommitter t <t@t> 0 +0000\ndata 6\nnewer\nfrom ${base}\n`;
+  for (let i = 0; i < 10_000; i++) stream += `M 100644 inline ${name(i)}\ndata 2\nx\n`;
+  execFileSync('git', ['fast-import', '--quiet'], { cwd: repo, input: stream, env });
+  const main = git('rev-parse', 'main').trim();
+  git('switch', '-q', '-c', 'task', base);
+  write(join(repo, 'task.ts'), 'task\n'); git('commit', '-qam', 'task work');
+  git('merge', '--no-commit', '--no-ff', main);
+  assert.ok(git('diff', '--cached', '--name-only').split('\n').filter(Boolean).length >= 10_000);
+  assert.deepEqual(await changedFiles(repo, main), ['task.ts']);
+});
+
 test('board rows carry what a status row needs: phase, times, budget and the approval flag', async () => {
   const { sandbox } = await import('./helpers.ts');
   const { Coordinator } = await import('../src/coordinator.ts');
