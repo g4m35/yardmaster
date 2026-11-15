@@ -26,7 +26,7 @@ const AGENT_AUTH: Record<string, readonly string[]> = {
 
 function secretEnv(name: string, value: string): boolean {
   return /(?:^|_)(?:TOKEN|SECRET|KEY)(?:_|$)|PASSWORD|CREDENTIAL|^(?:AWS|AZURE)_|^(?:GH|GITHUB|NPM)_TOKEN$/i.test(name) ||
-    /[a-z][a-z0-9+.-]*:\/\/[^/\s@]+:[^/\s@]*@/i.test(value);
+    /[a-z][a-z0-9+.-]*:\/\/[^/\s@]*@/i.test(value);
 }
 
 export function cleanEnv(extra: NodeJS.ProcessEnv = {}, opts: { agent?: string; pass?: readonly string[] } = {}): NodeJS.ProcessEnv {
@@ -35,7 +35,7 @@ export function cleanEnv(extra: NodeJS.ProcessEnv = {}, opts: { agent?: string; 
   for (const [name, value] of Object.entries(env)) {
     const auth = opts.agent && (AGENT_AUTH[opts.agent]?.includes(name) ||
       (opts.agent === 'codex' && name.startsWith('CODEX_')) || (opts.agent === 'opencode' && name.startsWith('OPENCODE_')));
-    if (value !== undefined && secretEnv(name, value) && !auth && !pass.has(name)) delete env[name];
+    if (value !== undefined && (secretEnv(name, value) || name.startsWith('CODEX_')) && !auth && !pass.has(name)) delete env[name];
   }
   for (const k of LEAKY_GIT_VARS) delete env[k];
   delete env.CLAUDECODE;

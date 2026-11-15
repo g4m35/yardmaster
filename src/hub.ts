@@ -468,28 +468,31 @@ export class Hub {
     const branch = this.coord.configFor(projectId).integration.branch;
     this.baseBundles++;
     if (workerId) this.workerBaseBundles.set(workerId, (this.workerBaseBundles.get(workerId) ?? 0) + 1);
-    const file = join(paths.tmp(), `${shortId('b')}.bundle`);
+    let file: string | undefined;
     try {
+      const bundleFile = file = join(paths.tmp(), `${shortId('b')}.bundle`);
       await this.integrator.head(projectId);
       // Bundle under the integration lock so an unverified merge is never shipped.
       await this.integrator.withLock(projectId, async () => {
         if (res.destroyed) throw new Error('Base-bundle download disconnected.');
-        const args = ['bundle', 'create', file, `refs/heads/${branch}`];
+        const args = ['bundle', 'create', bundleFile, `refs/heads/${branch}`];
         if (have && /^[0-9a-f]{7,40}$/.test(have) && (await revParse(project.root, have))) args.push(`^${have}`);
         const r = await git(project.root, args, { allowFail: true });
-        if (r.code !== 0 || !existsSync(file)) await git(project.root, ['bundle', 'create', file, `refs/heads/${branch}`]);
+        if (r.code !== 0 || !existsSync(bundleFile)) await git(project.root, ['bundle', 'create', bundleFile, `refs/heads/${branch}`]);
       });
       guard();
       if (res.destroyed) throw new Error('Base-bundle download disconnected.');
-      res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': statSync(file).size, 'x-yardmaster-branch': branch });
-      await pipeline(createReadStream(file), res);
+      res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': statSync(bundleFile).size, 'x-yardmaster-branch': branch });
+      await pipeline(createReadStream(bundleFile), res);
     } finally {
-      rmSync(file, { force: true });
-      this.baseBundles--;
-      if (workerId) {
-        const remaining = (this.workerBaseBundles.get(workerId) ?? 1) - 1;
-        if (remaining) this.workerBaseBundles.set(workerId, remaining);
-        else this.workerBaseBundles.delete(workerId);
+      try { if (file) rmSync(file, { force: true }); }
+      finally {
+        this.baseBundles--;
+        if (workerId) {
+          const remaining = (this.workerBaseBundles.get(workerId) ?? 1) - 1;
+          if (remaining) this.workerBaseBundles.set(workerId, remaining);
+          else this.workerBaseBundles.delete(workerId);
+        }
       }
     }
   }

@@ -18,8 +18,12 @@ export function validatePattern(pattern: string): boolean {
   return pattern.length <= MAX_PATTERN_LENGTH && (pattern.match(/[*?{]/g)?.length ?? 0) <= MAX_WILDCARDS;
 }
 
+export function validPatterns(patterns: string[], limit = MAX_SCOPE_PATTERNS): boolean {
+  return Array.isArray(patterns) && patterns.length <= limit && patterns.every(validatePattern);
+}
+
 function boundedPatterns(patterns: string[]): void {
-  if (patterns.length > MAX_SCOPE_PATTERNS || patterns.some(p => !validatePattern(p))) {
+  if (!validPatterns(patterns)) {
     throw new Error('Scope exceeds limits: 4096 patterns, 1024 characters and 64 wildcards per pattern.');
   }
 }
@@ -91,15 +95,15 @@ function hasGlob(pattern: string): boolean {
 }
 
 export function patternsOverlap(a: string, b: string): boolean {
-  boundedPatterns([a, b]);
+  if (!validPatterns([a, b])) return true;
   const pa = normalizePattern(a);
   const pb = normalizePattern(b);
   if (pa === '**' || pb === '**' || pa === pb) return true;
-  if (!hasGlob(pa) && matches(pa, pb)) return true;
-  if (!hasGlob(pb) && matches(pb, pa)) return true;
   if (!hasGlob(pa) && !hasGlob(pb)) {
     return pa.startsWith(pb + '/') || pb.startsWith(pa + '/');
   }
+  if (!hasGlob(pa) && matches(pa, pb)) return true;
+  if (!hasGlob(pb) && matches(pb, pa)) return true;
   // Two globs: overlap unless their literal prefixes diverge.
   const sa = staticPrefix(pa);
   const sb = staticPrefix(pb);
@@ -107,7 +111,8 @@ export function patternsOverlap(a: string, b: string): boolean {
 }
 
 export function scopesOverlap(a: string[], b: string[]): string[] {
-  boundedPatterns(a); boundedPatterns(b);
+  // Legacy declarations above today's limits must conservatively overlap, never stall the shared scheduler.
+  if (!validPatterns(a) || !validPatterns(b)) return ['scope exceeds safe matching limits'];
   const hits: string[] = [];
   for (const x of a) for (const y of b) if (patternsOverlap(x, y)) hits.push(x === y ? x : `${x} ~ ${y}`);
   return hits;

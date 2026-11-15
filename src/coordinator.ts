@@ -9,7 +9,7 @@ import { chooseAgent, inferTier, isSmallCheckedTask, type AgentStats, type Route
 import { applyPolicies } from './policies.ts';
 import { coupling, type ImportGraph } from './imports.ts';
 import { addLesson, widenScope } from './lessons.ts';
-import { inferScope, normalizePattern, scopesOverlap } from './scope.ts';
+import { inferScope, normalizePattern, scopesOverlap, validPatterns } from './scope.ts';
 import { clip, sha1, shortId, taskFingerprint } from './text.ts';
 import {
   ACTIVE_STATUSES,
@@ -683,6 +683,7 @@ export class Coordinator {
   }
 
   effectiveScope(task: Task): string[] {
+    if (!validPatterns(task.scope, 200)) return ['**'];
     if (task.scope.length) return task.scope;
     return this.configFor(task.project_id).unknownScope === 'exclusive' ? ['**'] : [];
   }
@@ -766,6 +767,7 @@ export class Coordinator {
 
   /** Why a queued task is not running yet, in plain language. Null means it can start now. */
   blocker(task: Task, now = Date.now(), reservationHolder?: string): string | null {
+    if (!validPatterns(task.scope, 200)) return 'Stored scope exceeds safe matching limits. Edit this task to at most 200 patterns of 1024 characters and 64 wildcards each.';
     const service = serviceHold(this.db, `task:${task.id}`);
     if (service) return `Provider request ${service.requestId} needs inspection. Use ym providers pending/resolve before retrying.`;
     const hold = this.processHold(task.id);

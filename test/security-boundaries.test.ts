@@ -4,12 +4,13 @@ import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { createServer, get, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
-import { chmodSync, readdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { hookClient } from '../src/hookclient.ts';
 import { remoteClient } from '../src/rpc.ts';
 import { saveWorkerCredential } from '../src/fleet-client.ts';
+import { httpTransport } from '../src/transport.ts';
 import { paths, machineId } from '../src/paths.ts';
 import { buildMethods, dispatch, localClient } from '../src/api.ts';
 import { Coordinator } from '../src/coordinator.ts';
@@ -17,6 +18,9 @@ import { openDb } from '../src/db.ts';
 import { Hub } from '../src/hub.ts';
 import { cleanEnv, runShell } from '../src/proc.ts';
 import { loadConfig } from '../src/config.ts';
+import { checkCommit } from '../src/ci/gate.ts';
+import { runReview } from '../src/review.ts';
+import { verifyArtifact } from '../src/verification.ts';
 import { runOneShot } from '../src/oneshot.ts';
 import { matches, scopesOverlap } from '../src/scope.ts';
 import { sandbox, sh } from './helpers.ts';
@@ -35,8 +39,8 @@ test('remote hook and CLI never fall back to the local owner token', async () =>
     assert.throws(() => hookClient(), /Remote hubs require an explicit credential/);
     process.env.YARDMASTER_HUB = 'http://remote.invalid';
     assert.throws(() => hookClient(), /Non-loopback HTTP requires/);
-    for (const hub of ['https://remote.invalid', 'http://remote.invalid']) {
-      assert.throws(() => execFileSync(process.execPath, ['src/cli.ts', 'status', '--hub', hub], {
+    for (const hub of ['https://remote.invalid', 'http://remote.invalid']) for (const command of ['status', 'mcp']) {
+      assert.throws(() => execFileSync(process.execPath, ['src/cli.ts', command, '--hub', hub], {
         cwd: join(import.meta.dirname, '..'), env: { ...process.env }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10000,
       }), hub.startsWith('https') ? /No saved worker credential|Remote hubs require an explicit credential/ : /Non-loopback HTTP requires/);
     }
@@ -150,7 +154,7 @@ test('glob matching stays bounded for repeated stars and preserves scope semanti
   ] as const) assert.equal(matches(path, pattern), expected, `${pattern} on ${path}`);
   assert.throws(() => matches('x', '*'.repeat(65)), /limits/);
   assert.throws(() => matches('x', 'a'.repeat(1025)), /limits/);
-  assert.throws(() => scopesOverlap(Array(4097).fill('a'), ['b']), /limits/);
+  assert.deepEqual(scopesOverlap(Array(4097).fill('a'), ['b']), ['scope exceeds safe matching limits']);
 });
 
 test('worker paths are literal and scope RPCs reject oversized or wildcard-heavy input', async () => {
@@ -169,13 +173,13 @@ test('worker paths are literal and scope RPCs reject oversized or wildcard-heavy
 test('child environments remove unrelated secrets and retain only the selected adapter authentication', () => {
   const secrets = { SERVICE_TOKEN: 'fixture', PRIVATE_SECRET: 'fixture', SIGNING_KEY: 'fixture', PASSWORD: 'fixture', MY_CREDENTIAL: 'fixture',
     AWS_ACCESS_KEY_ID: 'fixture', AZURE_TENANT_ID: 'fixture', GOOGLE_APPLICATION_CREDENTIALS: 'fixture', GH_TOKEN: 'fixture', GITHUB_TOKEN: 'fixture', NPM_TOKEN: 'fixture',
-    DATABASE_URL: 'postgres://user:pass@db.test/app', OPAQUE_URL: 'redis://user:pass@cache.test', YARDMASTER_TOKEN: 'fixture', YARDMASTER_HUB: 'https://hub.invalid',
-    ANTHROPIC_API_KEY: 'anthropic', OPENAI_API_KEY: 'openai', CODEX_AUTH_TOKEN: 'codex', CURSOR_API_KEY: 'cursor', GEMINI_API_KEY: 'gemini' };
+    DATABASE_URL: 'postgres://user:pass@db.test/app', OPAQUE_URL: 'redis://:pass@cache.test', YARDMASTER_TOKEN: 'fixture', YARDMASTER_HUB: 'https://hub.invalid',
+    ANTHROPIC_API_KEY: 'anthropic', OPENAI_API_KEY: 'openai', CODEX_AUTH_TOKEN: 'codex', CODEX_HOME: '/tmp/fixture-codex', CURSOR_API_KEY: 'cursor', GEMINI_API_KEY: 'gemini' };
   const restore = envFixture({ ...secrets, HTTPS_PROXY: 'http://proxy.test', LANG: 'en_CA.UTF-8', NODE_EXTRA_CA_CERTS: '/tmp/fixture-ca', PATH: process.env.PATH });
   try {
     for (const key of Object.keys(secrets)) assert.equal(cleanEnv()[key], undefined, key);
     const safe = cleanEnv(); assert.equal(safe.HTTPS_PROXY, 'http://proxy.test'); assert.equal(safe.LANG, 'en_CA.UTF-8'); assert.equal(safe.NODE_EXTRA_CA_CERTS, '/tmp/fixture-ca'); assert.ok(safe.PATH);
-    for (const [agent, allowed] of Object.entries({ claude: ['ANTHROPIC_API_KEY'], codex: ['OPENAI_API_KEY', 'CODEX_AUTH_TOKEN'], cursor: ['CURSOR_API_KEY'], gemini: ['GEMINI_API_KEY', 'GOOGLE_APPLICATION_CREDENTIALS'] })) {
+    for (const [agent, allowed] of Object.entries({ claude: ['ANTHROPIC_API_KEY'], codex: ['OPENAI_API_KEY', 'CODEX_AUTH_TOKEN', 'CODEX_HOME'], cursor: ['CURSOR_API_KEY'], gemini: ['GEMINI_API_KEY', 'GOOGLE_APPLICATION_CREDENTIALS'] })) {
       const env = cleanEnv({}, { agent });
       for (const key of Object.keys(secrets)) assert.equal(env[key], allowed.includes(key) ? secrets[key as keyof typeof secrets] : undefined, `${agent}: ${key}`);
     }
@@ -198,6 +202,8 @@ test('agent and check config pass lists reach real subprocesses independently', 
       cwd: box.repo, timeoutMs: 10000, env: cleanEnv({ CI: '1' }, { pass: config.env.checks.pass }),
     });
     assert.equal(check.code, 0); assert.deepEqual(JSON.parse(check.stdout), [false, true, false, false]);
+    const verified = await verifyArtifact(box.repo, [`${process.execPath} -e 'process.exit(!process.env.AGENT_SECRET && !!process.env.CHECK_SECRET && !process.env.UNRELATED_TOKEN && !process.env.OPENAI_API_KEY ? 0 : 1)'`], 1, undefined, undefined, { envPass: config.env.checks.pass });
+    assert.equal(verified.ok, true, verified.output);
     assert.throws(() => loadConfig(box.repo, { env: { pass: ['INVALID=NAME'] } }));
   } finally { restore(); }
 });
@@ -291,4 +297,78 @@ test('base-bundle requests are bounded per hub and per worker until finally rele
     for (const response of await Promise.all(pending)) { assert.equal(response.status, 200); await response.arrayBuffer(); }
     const retry = await fetch(`${url}/worker-1`); assert.equal(retry.status, 200); await retry.arrayBuffer();
   } finally { release(); await Promise.allSettled(pending); await f.done(); server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())); f.hub.coord.db.close(); }
+});
+
+
+test('base-bundle clients retry 429 without losing task preparation and cancel during backoff', async () => {
+  const box = sandbox();
+  const local = join(box.root, 'worker'); mkdirSync(local);
+  sh(local, 'git', ['init', '-q', '-b', 'main']);
+  writeFileSync(join(box.repo, 'new.txt'), 'remote commit');
+  sh(box.repo, 'git', ['add', '.']); sh(box.repo, 'git', ['commit', '-qm', 'remote base']);
+  const sha = sh(box.repo, 'git', ['rev-parse', 'HEAD']);
+  const bundle = join(box.root, 'base.bundle'); sh(box.repo, 'git', ['bundle', 'create', bundle, 'refs/heads/main']);
+  const project = { id: 'p-test', name: 'test', root: box.repo, base_branch: 'main', created_at: Date.now() };
+  const original = globalThis.fetch;
+  let requests = 0;
+  globalThis.fetch = async (_input, init) => {
+    assert.equal(init?.redirect, 'error');
+    requests++;
+    return requests === 1 ? new Response('busy', { status: 429, headers: { 'retry-after': '0' } })
+      : new Response(readFileSync(bundle), { headers: { 'x-yardmaster-branch': 'main' } });
+  };
+  try {
+    const transport = httpTransport('http://127.0.0.1:7777', 'fixture', 'm-test');
+    await transport.fetchBase(project, local, sha);
+    assert.equal(requests, 2);
+    assert.equal(sh(local, 'git', ['rev-parse', 'refs/yardmaster/hub/main']), sha);
+    const abort = new AbortController();
+    globalThis.fetch = async () => { requests++; queueMicrotask(() => abort.abort()); return new Response('busy', { status: 429, headers: { 'retry-after': '60' } }); };
+    const started = performance.now();
+    await assert.rejects(transport.fetchBase(project, local, sha, abort.signal), /abort/i);
+    assert.equal(requests, 3); assert.ok(performance.now() - started < 1000);
+  } finally { globalThis.fetch = original; }
+});
+
+
+test('legacy oversized scopes hold their task without breaking unrelated claims', async () => {
+  const f = await runFixture();
+  try {
+    const bad = f.coord.addTasks(f.project.id, [{ title: 'Legacy oversized scope', agent: 'mock', priority: 10 }], 'test').created[0]!;
+    f.coord.updateTask(bad.id, { scope: Array(4097).fill('legacy/file') });
+    const good = f.coord.addTasks(f.project.id, [{ title: 'Unrelated valid scope', agent: 'mock', files: ['docs/**'] }], 'test').created[0]!;
+    assert.match(f.coord.blocker(f.coord.getTask(bad.id)!)!, /Stored scope exceeds/);
+    assert.equal(f.coord.claimNext({ machineId: 'm-two', agents: ['mock'], repos: { [f.project.id]: f.box.repo }, runningByAgent: {} })!.task.id, good.id);
+    f.coord.updateTask(f.task.id, { scope: ['*'.repeat(100)] });
+    assert.deepEqual(f.coord.activeScopes(f.project.id).find(a => a.task.id === f.task.id)!.scope, ['**']);
+  } finally { f.coord.db.close(); }
+});
+
+test('CLI verify and both CI check paths honor check-only secret exceptions', async () => {
+  const box = sandbox();
+  const command = `${process.execPath} -e 'process.exit(!!process.env.CHECK_SECRET && !process.env.UNRELATED_TOKEN ? 0 : 1)'`;
+  writeFileSync(join(box.repo, 'yardmaster.json'), JSON.stringify({ verify: [command], env: { checks: { pass: ['CHECK_SECRET'] } }, worktree: { warmStart: 'off' } }));
+  sh(box.repo, 'git', ['add', '.']); sh(box.repo, 'git', ['commit', '-qm', 'check env config']);
+  const sha = sh(box.repo, 'git', ['rev-parse', 'HEAD']);
+  const restore = envFixture({ CHECK_SECRET: 'fixture', UNRELATED_TOKEN: 'fixture' });
+  try {
+    const config = loadConfig(box.repo);
+    assert.equal((await checkCommit(box.repo, box.repo, sha, [command], config)).ok, true);
+    writeFileSync(join(box.repo, 'untracked.txt'), 'force isolated check');
+    assert.equal((await checkCommit(box.repo, box.repo, sha, [command], config)).ok, true);
+    sh(box.repo, 'git', ['clean', '-f', '--', 'untracked.txt']);
+    const result = JSON.parse(execFileSync(process.execPath, [join(import.meta.dirname, '../src/cli.ts'), 'verify', '--json'], { cwd: box.repo, env: { ...process.env }, encoding: 'utf8', timeout: 15000 }));
+    assert.equal(result.ok, true);
+  } finally { restore(); }
+});
+
+test('oversized review output follows the unreadable result path before run persistence', async () => {
+  const f = await runFixture();
+  try {
+    const script = join(f.box.root, 'review.mjs');
+    writeFileSync(script, `for await (const c of process.stdin) {} console.log(JSON.stringify({verdict:'approve',issues:Array(201).fill({severity:'minor',note:'fixture issue'})}));`);
+    const config = loadConfig(f.box.repo, { agents: { 'review-fixture': { command: `${process.execPath} ${script}` } }, review: { reviewers: ['review-fixture'], crossFamily: false } });
+    const result = await runReview({ task: f.task, config, implementer: 'mock', installed: ['review-fixture'], cwd: f.box.repo, base: sh(f.box.repo, 'git', ['rev-parse', 'HEAD']) });
+    assert.ok('reason' in result && result.reason === 'unreadable');
+  } finally { f.coord.db.close(); }
 });

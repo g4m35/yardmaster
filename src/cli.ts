@@ -673,7 +673,7 @@ async function cmdPair(a: Args) {
     const explicit = flag(a, 'token') ?? process.env.YARDMASTER_TOKEN;
     const local = readHubInfo();
     const localUrl = local ? normalizeHubUrl(local.url, { privateNetwork }) : null;
-    const token = explicit ?? (hub === localUrl ? hubToken() : die('Remote owner operations require an explicit owner credential. Prefer running ym pair invite/list/revoke on the owner hub machine.'));
+    const token = explicit ?? (isLoopbackHub(hub) && hub === localUrl ? hubToken() : die('Remote owner operations require an explicit owner credential. Prefer running ym pair invite/list/revoke on the owner hub machine.'));
     client = fleetClient(hub, token, { privateNetwork });
   } else client = await getClient(a);
   const identity = await client['fleet.identity']({});
@@ -801,7 +801,7 @@ async function cmdMcp(a: Args) {
   // The MCP server needs a hub to run background work; start one quietly if needed.
   const remote = flag(a, 'hub') ?? process.env.YARDMASTER_HUB;
   let client: Client;
-  if (remote) client = remoteClient(remote, flag(a, 'token') ?? process.env.YARDMASTER_TOKEN ?? hubToken());
+  if (remote) client = await getClient(a);
   else {
     // Inside a background task the hub is whoever launched it; never start a stray one (on a remote worker there is
     // no local hub, and the agent's tools then just say so).
@@ -974,7 +974,7 @@ async function cmdVerify(a: Args) {
   try {
     const receipts: string[] = [];
     const result = await verifyArtifact(cwd, config.verify, config.verifyTimeoutMinutes, stop.signal, undefined, {
-      services: config.services, onServiceResult: run => { receipts.push(run.receiptPath); },
+      envPass: config.env.checks.pass, services: config.services, onServiceResult: run => { receipts.push(run.receiptPath); },
     });
     console.log(JSON.stringify({ ...result, receipts }, null, 2));
     if (!result.ok) process.exitCode = 1;
@@ -1024,7 +1024,7 @@ async function cmdDoctor(a: Args) {
       if (remote) {
         const explicit = flag(a, 'token') ?? process.env.YARDMASTER_TOKEN;
         const local = readHubInfo();
-        if (explicit || (local && normalizeHubUrl(local.url, { privateNetwork }) === url)) client = fleetClient(url, explicit ?? hubToken(), { privateNetwork });
+        if (explicit || (isLoopbackHub(url) && local && normalizeHubUrl(local.url, { privateNetwork }) === url)) client = fleetClient(url, explicit ?? hubToken(), { privateNetwork });
         else {
           const projectId = flag(a, 'project') ?? (root ? await projectIdFor(root) : undefined);
           if (!projectId) throw new Error('Pass --project ID or run from the paired repo to check this worker channel.');

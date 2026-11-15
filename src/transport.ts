@@ -2,6 +2,7 @@ import { createReadStream, createWriteStream, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import { git, revParse } from './git.ts';
 import { paths } from './paths.ts';
@@ -35,7 +36,15 @@ export function httpTransport(baseUrl: string, token: string, machineId: string)
         const ownedSignal = transferSignal(signal);
         ownedSignal.throwIfAborted();
         const have = await revParse(repoPath, 'HEAD');
-        const res = await fetch(`${url}/api/projects/${project.id}/base-bundle${have ? `?have=${have}` : ''}`, { headers: auth, redirect: 'error', signal: ownedSignal });
+        let res: Response;
+        do {
+          res = await fetch(`${url}/api/projects/${project.id}/base-bundle${have ? `?have=${have}` : ''}`, { headers: auth, redirect: 'error', signal: ownedSignal });
+          if (res.status !== 429) break;
+          await res.body?.cancel();
+          const retry = res.headers.get('retry-after');
+          const milliseconds = retry && /^\d+$/.test(retry) ? Number(retry) * 1000 : retry ? Date.parse(retry) - Date.now() : 1000;
+          await delay(Number.isFinite(milliseconds) ? Math.max(100, Math.min(30000, milliseconds)) : 1000, undefined, { signal: ownedSignal });
+        } while (true);
         if (!res.ok || !res.body) throw new Error(`Hub refused the base bundle (${res.status}).`);
         const branch = res.headers.get('x-yardmaster-branch') ?? 'yardmaster/integration';
         const file = join(paths.tmp(), `${shortId('b')}.bundle`);
