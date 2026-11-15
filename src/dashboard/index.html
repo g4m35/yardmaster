@@ -1246,6 +1246,7 @@
         ['Commit', e.commit ? e.commit.slice(0, 12) : 'uncommitted'],
         e.artifact ? ['Artifact', `${e.artifact.path.split('/').pop()} · sha256 ${e.artifact.sha256.slice(0, 12)}` + (e.artifact.source === 'reused' ? ` · reused from ${(e.artifact.builtFromCommit || '').slice(0, 12) || 'an earlier build'}` : '')] : null,
         e.checks.length ? ['Checks', e.checks.map((c) => `${c.name} ${word[c.status] || c.status}`).join(' · ')] : null,
+        e.omitted && e.omitted.length ? ['Omitted', e.omitted.map((o) => `${o.path.split('/').pop()} (${o.reason})`).join(' · ')] : null,
         receiptPath ? ['Receipt', receiptPath] : null,
       ].filter(Boolean);
       return el('div', { class: 'device', 'data-overall': e.status.overall },

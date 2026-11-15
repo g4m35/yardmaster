@@ -4,7 +4,7 @@ import { arch, platform, release } from 'node:os';
 import { basename, join, relative, resolve } from 'node:path';
 import * as z from 'zod/v4';
 import { loadConfig, type Config } from './config.ts';
-import { artifactSha256, fileSha256, scrubFile, type DeviceEvidence } from './device-evidence.ts';
+import { artifactSha256, fileSha256, redactText, sanitizeEvidenceFile, type DeviceEvidence } from './device-evidence.ts';
 import { mainRepoRoot, projectIdFor } from './git.ts';
 import { acquireLease, type LeaseHandle, type LeaseOutcome, type OwnedResource } from './leases.ts';
 import { memoryHold, sampleMemory, type MemorySampler } from './machine-pressure.ts';
@@ -104,9 +104,13 @@ export async function runAppleSimulator(options: AppleSimulatorOptions, ctx: Dev
   const track = (r: ExecResult) => { if (!r.reaped) reaped = false; return r; };
   // Declared credentials never reach saved logs or evidence text; tests and builds can echo their environment.
   const secrets = options.requiredEnv.map(name => ctx.env[name]).filter((v): v is string => !!v).sort((a, b) => b.length - a.length);
-  const redact = (text: string) => secrets.reduce((out, secret) => out.split(secret).join('[redacted]'), text);
+  const redact = (text: string) => redactText(text, secrets);
   /** Reports, screenshots and app logs written during tests can echo credentials too; no size is exempt. */
-  const scrub = (file: string) => { scrubFile(file, secrets); };
+  const omitted: DeviceEvidence['omitted'] = [];
+  const keep = (file: string, kind: Files[number]['kind']) => {
+    if (sanitizeEvidenceFile(file, secrets) === 'omitted') omitted.push({ path: file, reason: 'omitted: contains a declared credential' });
+    else files.push({ path: file, sha256: fileSha256(file), kind });
+  };
   const saveLog = (name: string, text: string) => {
     const file = join(ctx.evidenceDir, name);
     writeFileSync(file, redact(text), { mode: 0o600 });
@@ -191,7 +195,7 @@ export async function runAppleSimulator(options: AppleSimulatorOptions, ctx: Dev
     } else {
       const held = slot.lease;
       leaseRecord = { id: held.id, pool: 'simulator', queuedAt: held.queuedAt, acquiredAt: held.acquiredAt, releasedAt: null, waitedMs: slot.waitedMs, cleanup: 'released' };
-      const outcome = await onSimulator(options, ctx, { ...tool, signal: AbortSignal.any([held.lost, ...(ctx.signal ? [ctx.signal] : [])]) }, held, artifact, installPath, sha, checks, files, saveLog, track, scrub);
+      const outcome = await onSimulator(options, ctx, { ...tool, signal: AbortSignal.any([held.lost, ...(ctx.signal ? [ctx.signal] : [])]) }, held, artifact, installPath, sha, checks, saveLog, track, keep);
       device = outcome.device;
       problem = outcome.problem;
       const cleanup = await finishLease(held, tool, outcome.owned);
@@ -224,15 +228,15 @@ export async function runAppleSimulator(options: AppleSimulatorOptions, ctx: Dev
   const evidence: DeviceEvidence = { kind: 'yardmaster.device-evidence', version: 1, requestId: ctx.requestId,
     projectId: ctx.context.projectId ?? null, taskId: ctx.context.taskId ?? null, commit: sha, requirement,
     status: { code: ctx.context.codeChecks === 'passed' ? 'passed' : 'not-run', simulator, physical, overall },
-    artifact, environment, device, checks, files: files.slice(0, 100), lease: leaseRecord, startedAt, completedAt: new Date().toISOString(), summary };
+    artifact, environment, device, checks, files: files.slice(0, 100), omitted: omitted.slice(0, 100), lease: leaseRecord, startedAt, completedAt: new Date().toISOString(), summary };
   writeFileSync(join(ctx.evidenceDir, 'device-evidence.json'), JSON.stringify(evidence, null, 2), { mode: 0o600 });
   return { dispatched: !!xcrun && parsedInput.success, execution: { end: canceled ? 'aborted' : 'exit', code: canceled ? null : 0, reaped },
     result: { status: overall, summary, artifacts: [join(ctx.evidenceDir, 'device-evidence.json'), ...files.map(f => f.path)].slice(0, 100), costUsd: null, data: { evidence } } };
 }
 
 async function onSimulator(options: AppleSimulatorOptions, ctx: DeviceRunContext, tool: ToolContext, lease: LeaseHandle, artifact: NonNullable<DeviceEvidence['artifact']>,
-  installPath: string, sha: string | null, checks: Check[], files: Files, saveLog: (name: string, text: string) => string, track: (r: ExecResult) => ExecResult,
-  scrub: (file: string) => void) {
+  installPath: string, sha: string | null, checks: Check[], saveLog: (name: string, text: string) => string, track: (r: ExecResult) => ExecResult,
+  keep: (file: string, kind: Files[number]['kind']) => void) {
   const owned: OwnedResource[] = [];
   const result = { device: null as DeviceEvidence['device'], problem: null as string | null, owned };
   const step = (name: string, runner: string, r: ExecResult, detail: string) => {
@@ -244,7 +248,7 @@ async function onSimulator(options: AppleSimulatorOptions, ctx: DeviceRunContext
   const screenshot = async (sim: OwnedSimulator, name: string) => {
     const file = join(ctx.evidenceDir, `${name}.png`);
     const r = track(await sim.screenshot(file));
-    if (r.ok && existsSync(file)) files.push({ path: file, sha256: fileSha256(file), kind: 'screenshot' });
+    if (r.ok && existsSync(file)) keep(file, 'screenshot');
   };
   try {
     const target = chooseTarget(await listSimulators(tool), options.simulator);
@@ -294,12 +298,11 @@ async function onSimulator(options: AppleSimulatorOptions, ctx: DeviceRunContext
       await sim.terminate(options.bundleId);
       for (const name of ['app-stdout.log', 'app-stderr.log']) {
         const file = join(ctx.evidenceDir, name);
-        if (existsSync(file)) { scrub(file); files.push({ path: file, sha256: fileSha256(file), kind: 'log' }); }
+        if (existsSync(file)) keep(file, 'log');
       }
     }
     for (const file of walkFiles(join(ctx.evidenceDir, 'tests'))) {
-      scrub(file);
-      files.push({ path: file, sha256: fileSha256(file), kind: file.endsWith('.png') ? 'screenshot' : 'report' });
+      keep(file, /\.(png|jpe?g|heic)$/i.test(file) ? 'screenshot' : 'report');
     }
   } catch (error) {
     result.problem = `Simulator setup failed: ${(error as Error).message}.`;

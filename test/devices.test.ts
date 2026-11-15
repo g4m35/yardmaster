@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -15,11 +15,12 @@ import { linuxAvailableMb, meminfoAvailableMb, memoryHold, type MemorySample } f
 import { builtinProviders } from '../src/provider-builtins.ts';
 import { planService } from '../src/providers.ts';
 import { ServicesConfigSchema } from '../src/provider-contract.ts';
-import { DeviceEvidenceSchema, evidenceProblem, scrubFile } from '../src/device-evidence.ts';
+import { DeviceEvidenceSchema, evidenceProblem, redactText, scrubFile } from '../src/device-evidence.ts';
 import { verifyArtifact } from '../src/verification.ts';
 import { WorkerLoop } from '../src/worker.ts';
 import { runAttempt, Semaphore } from '../src/runner.ts';
 import { Hub } from '../src/hub.ts';
+import { machineId } from '../src/paths.ts';
 import type { Client } from '../src/api.ts';
 
 const cli = join(import.meta.dirname, '../src/cli.ts');
@@ -528,7 +529,7 @@ test('acceptance enforces the requested device level and device consistency, not
   for (const [payload, input, expect] of [
     [{ status: 'passed', summary: 'ok', data: { evidence: claimed(s.sha, {}) } }, { requires: 'physical' }, /requires physical/],
     [{ status: 'passed', summary: 'ok', data: { evidence: claimed(s.sha, { requirement: 'physical', status: { physical: 'passed' } }) } }, { requires: 'physical' }, /physical-device pass on a simulator/],
-    [{ status: 'passed', summary: 'ok' }, { requires: 'physical' }, /needs device evidence/],
+    [{ status: 'passed', summary: 'ok' }, { requires: 'physical' }, /requires a physical device pass; local reported a pass without device evidence/],
     [{ status: 'passed', summary: 'ok', data: { evidence: claimed(s.sha, { requirement: 'physical', status: { simulator: 'not-run', physical: 'passed' }, device: physicalDevice }) } }, { requires: 'physical' }, null],
   ] as const) {
     const services = deviceProvider(payload, input);
@@ -601,4 +602,119 @@ test('evidence that is not a pass is never accepted, even with an empty summary'
     assert.ok(problem, `${overall} with an empty summary is a problem`);
     assert.match(problem, new RegExp(`overall status is ${overall}`));
   }
+});
+
+test('a stated device requirement needs device evidence whatever service the provider declares', async () => {
+  const s = appRepo();
+  for (const service of ['ci', 'browser', 'device'] as const) for (const requires of ['physical', 'simulator'] as const) {
+    const script = `let s='';process.stdin.on('data',c=>s+=c).on('end',()=>console.log(JSON.stringify({status:'passed',summary:'trust me'})))`;
+    const services = ServicesConfigSchema.parse({ local: { 'device.test': { service, command: [process.execPath, '-e', script], protocol: 'json', locality: 'local', cost: 'free' } },
+      verify: [{ capability: 'device.test', input: { requires } }] });
+    const gate = await verifyArtifact(s.repo, [], 1, undefined, undefined, { services });
+    assert.equal(gate.ok, false, `${service}/${requires}`); assert.equal(gate.serviceStatus, 'unknown');
+    assert.match(gate.output, new RegExp(`requires a ${requires} device pass`));
+  }
+  // With no stated requirement, a provider without device evidence keeps working as before.
+  const plain = ServicesConfigSchema.parse({ local: { 'device.test': { service: 'ci', command: [process.execPath, '-e', 'process.exit(0)'], protocol: 'command', locality: 'local', cost: 'free' } },
+    verify: [{ capability: 'device.test' }] });
+  assert.equal((await verifyArtifact(s.repo, [], 1, undefined, undefined, { services: plain })).ok, true);
+});
+
+const runCli = (cwd: string, args: string[], env: NodeJS.ProcessEnv) => new Promise<{ code: number | null; out: string; err: string }>(resolve => {
+  const child = spawn(process.execPath, [cli, ...args], { cwd, env });
+  let out = '', err = '';
+  child.stdout.on('data', chunk => { out += chunk; }); child.stderr.on('data', chunk => { err += chunk; });
+  child.once('exit', code => resolve({ code, out, err }));
+});
+function insertLease(over: { pid: number; procStarted: number | null; bootId: string | null; expiresAt: number; owned?: unknown[] }) {
+  const db = openDb();
+  try {
+    db.prepare(`INSERT INTO resource_leases (id, pool, state, holder, host, pid, proc_started, boot_id, queued_at, acquired_at, expires_at, owned)
+      VALUES (?, 'simulator', 'held', 'old-holder', ?, ?, ?, ?, ?, ?, ?, ?)`).run(`l-${randomUUID()}`, machineId(), over.pid, over.procStarted, over.bootId,
+      Date.now(), Date.now(), over.expiresAt, JSON.stringify(over.owned ?? []));
+  } finally { db.close(); }
+  return leasesNow().at(-1)!;
+}
+
+test('no lease is granted without a readable holder start time', async () => {
+  const s = appRepo();
+  const bin = tempDir('ym-no-lstart-');
+  writeFileSync(join(bin, 'ps'), '#!/bin/sh\nif [ "$1" = "-o" ] && [ "$2" = "lstart=" ]; then exit 1; fi\nexec /bin/ps "$@"\n', { mode: 0o755 });
+  const r = await runCli(s.repo, ['devices', 'lease', 'build', '--wait-minutes', '0', '--', process.execPath, '-e', ''], { ...process.env, PATH: `${bin}:${process.env.PATH}`, YARDMASTER_HOME: s.home });
+  assert.equal(r.code, 1);
+  assert.match(r.err, /Cannot read this process's start time, so it cannot hold a device lease safely/);
+  assert.equal(leasesNow().length, 0, 'nothing was recorded without an identity');
+});
+
+test('a holder PID from an earlier boot is never treated as alive, even if the PID is in use now', async () => {
+  appRepo(); const m = fakeMachine();
+  const { selfIdentity } = await import('../src/leases.ts');
+  const me = await selfIdentity();
+  assert.ok(me.bootId, 'this platform reports a boot identity');
+  const name = 'ym-old-boot-0001';
+  execFileSync(join(m.bin, 'xcrun'), ['simctl', 'create', name, 'com.apple.CoreSimulator.SimDeviceType.iPhone-17', 'com.apple.CoreSimulator.SimRuntime.iOS-26-5']);
+  // Same PID and start time as a live process (this one), but recorded during a previous boot.
+  insertLease({ pid: me.pid, procStarted: me.startedAt, bootId: 'previous-boot', expiresAt: Date.now() + 60_000, owned: [{ kind: 'simulator', name, udid: null }] });
+  const results = await reapLeases(hostCleanup({ PATH: m.PATH }));
+  assert.deepEqual(results.map(r => r.outcome), ['released']);
+  assert.deepEqual(m.state().devices.map(d => d.udid), [FOREIGN.udid]);
+  assertForeignUntouched(m);
+});
+
+test('owners can recover a stale claim whose holder cannot be identified; verifiable holders are refused', async () => {
+  const s = appRepo(), m = fakeMachine();
+  const env = { ...process.env, PATH: m.PATH, YARDMASTER_HOME: s.home };
+  const name = 'ym-unidentified-01';
+  execFileSync(join(m.bin, 'xcrun'), ['simctl', 'create', name, 'com.apple.CoreSimulator.SimDeviceType.iPhone-17', 'com.apple.CoreSimulator.SimRuntime.iOS-26-5']);
+  // A legacy claim with no start identity on a PID that is in use (this test process): never presumed dead.
+  const stale = insertLease({ pid: process.pid, procStarted: null, bootId: null, expiresAt: Date.now() - 1000, owned: [{ kind: 'simulator', name, udid: null }] });
+  assert.deepEqual(await reapLeases(hostCleanup({ PATH: m.PATH })), [], 'an unverifiable holder is not reaped automatically');
+  const short = await runCli(s.repo, ['devices', 'recover', stale.id, '--note', 'short'], env);
+  assert.equal(short.code, 1);
+  const recovered = await runCli(s.repo, ['devices', 'recover', stale.id, '--note', 'host rebooted; old controller is gone', '--json'], env);
+  assert.equal(recovered.code, 0, recovered.err);
+  assert.equal(JSON.parse(recovered.out).outcome, 'released');
+  assert.equal(leasesNow().length, 0);
+  assert.deepEqual(m.state().devices.map(d => d.udid), [FOREIGN.udid], 'only the recorded simulator was deleted');
+  assertForeignUntouched(m);
+  // A verifiable live holder, and a lease still being renewed, are refused.
+  const { selfIdentity } = await import('../src/leases.ts');
+  const me = await selfIdentity();
+  const live = insertLease({ pid: me.pid, procStarted: me.startedAt, bootId: me.bootId, expiresAt: Date.now() - 1000 });
+  assert.match((await runCli(s.repo, ['devices', 'recover', live.id, '--note', 'trying to take a live slot'], env)).err, /is alive with the recorded identity; stop it first/);
+  const fresh = insertLease({ pid: process.pid, procStarted: null, bootId: null, expiresAt: Date.now() + 60_000 });
+  assert.match((await runCli(s.repo, ['devices', 'recover', fresh.id, '--note', 'trying to take a renewed slot'], env)).err, /still being renewed/);
+});
+
+test('overlapping secrets are redacted as one span, within a chunk and across chunk boundaries', () => {
+  const secrets = ['ab', 'b0123456789'];
+  assert.equal(redactText('xab0123456789y', secrets), 'x[redacted]y');
+  assert.equal(redactText('abcd', ['ab', 'bc', 'cd']), '[redacted]', 'a chain of overlaps is one span');
+  const dir = tempDir('ym-overlap-'), file = join(dir, 'log.txt');
+  for (let chunk = 1; chunk <= 16; chunk++) for (const body of ['xab0123456789y', 'ab0123456789', 'zzzzzzab0123456789ab0123456789', 'abcd--abcd']) {
+    writeFileSync(file, body);
+    scrubFile(file, [...secrets, 'bc', 'cd'], chunk);
+    const kept = readFileSync(file, 'utf8');
+    for (const fragment of ['ab', '0123456789', 'bc', 'cd']) assert(!kept.includes(fragment), `chunk ${chunk}: "${body}" kept "${fragment}" in "${kept}"`);
+    assert.equal(kept, redactText(body, [...secrets, 'bc', 'cd']), `chunk ${chunk}: streaming agrees with in-memory redaction`);
+  }
+});
+
+test('binary evidence is kept byte-identical or omitted when it holds a credential, never rewritten', async () => {
+  const s = appRepo(), m = fakeMachine(), secret = 'png-embedded-credential-77';
+  const write = `const fs=require('node:fs'),d=process.env.YARDMASTER_ARTIFACT_DIR;const png=Buffer.from('89504e470d0a1a0a0000000d49484452','hex');
+fs.writeFileSync(d+'/clean.png',Buffer.concat([png,Buffer.from([0,1,2,3,0,255])]));
+fs.writeFileSync(d+'/leaky.png',Buffer.concat([png,Buffer.from([0]),Buffer.from(process.env.LAB_TOKEN),Buffer.from([0,9])]));`;
+  const run = await runAppleSimulator(options({ requiredEnv: ['LAB_TOKEN'], tests: [{ name: 'shots', runner: 'command', command: [process.execPath, '-e', write] }] }),
+    context(s, m, { env: { PATH: m.PATH, HOME: s.home, LAB_TOKEN: secret } }));
+  assert.equal(run.result.status, 'passed', run.result.summary);
+  const e = run.result.data.evidence;
+  const clean = e.files.find(f => f.path.endsWith('clean.png'))!;
+  assert.deepEqual(readFileSync(clean.path), Buffer.concat([Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'), Buffer.from([0, 1, 2, 3, 0, 255])]), 'a screenshot without secrets is byte-identical');
+  assert.equal(artifactSha256(clean.path), clean.sha256);
+  assert(!e.files.some(f => f.path.endsWith('leaky.png')), 'a binary holding a credential is not kept as evidence');
+  const leaky = e.omitted.find(o => o.path.endsWith('leaky.png'))!;
+  assert.equal(leaky.reason, 'omitted: contains a declared credential');
+  assert.equal(existsSync(leaky.path), false);
+  assert(e.files.some(f => f.path.endsWith('launch.png')), 'simulator screenshots stay');
 });

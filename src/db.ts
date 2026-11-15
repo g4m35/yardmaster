@@ -135,6 +135,8 @@ const MIGRATIONS: string[] = [
   CREATE INDEX device_evidence_task ON device_evidence(task_id, created_at);
   CREATE INDEX device_evidence_project ON device_evidence(project_id, created_at);
   `,
+  // The holder's boot: a PID recorded before a reboot never names a live holder afterwards.
+  `ALTER TABLE resource_leases ADD COLUMN boot_id TEXT;`,
 ];
 
 export type Db = DatabaseSync;

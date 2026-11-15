@@ -93,10 +93,10 @@ export async function verifyArtifact(cwd: string, commands: string[], timeoutMin
       const device = evidenceState(run.result);
       if (device.kind === 'invalid') return { ...fail(command, `The provider attached malformed device evidence; it cannot establish a pass.\nReceipt: ${run.receiptPath}`), serviceStatus: 'unknown' };
       // The requirement comes from this check's input or the project's provider options, not from the provider's report.
-      const deviceCheck = plan.candidates.find(c => c.provider === plan.selected)?.service === 'device';
+      // A stated requirement needs matching evidence whatever service the provider declares itself to be.
       const required = requiredDeviceLevel(check.input, services.providers[plan.selected]?.options);
-      if (device.kind === 'absent' && deviceCheck && required === 'physical') {
-        return { ...fail(command, `A physical-device requirement needs device evidence; ${plan.selected} reported a pass without any.\nReceipt: ${run.receiptPath}`), serviceStatus: 'unknown' };
+      if (device.kind === 'absent' && required) {
+        return { ...fail(command, `This check requires a ${required} device pass; ${plan.selected} reported a pass without device evidence.\nReceipt: ${run.receiptPath}`), serviceStatus: 'unknown' };
       }
       const problem = device.kind === 'valid' ? evidenceProblem(device.evidence, sha, required ?? 'simulator') : null;
       if (problem) return { ...fail(command, `Device evidence does not establish a pass for commit ${sha}: ${problem}\nReceipt: ${run.receiptPath}`), serviceStatus: 'unknown' };

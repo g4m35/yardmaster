@@ -210,6 +210,7 @@ ${bold('Extend')}
   ym providers run <capability> [--input file.json] [--json]  explicitly execute once
   ym devices status|evidence [--task id] [--json]  machine-wide device/build leases and device evidence
   ym devices reap | release <lease-id> --note "..."  free leases of crashed holders; resolve a failed cleanup
+  ym devices recover <lease-id> --note "..."  free a stale claim whose holder cannot be identified
   ym devices lease <build|simulator|physical> -- <command...>  run any tool while holding a machine-wide slot
 `;
 
@@ -969,8 +970,8 @@ async function cmdDevices(a: Args) {
   const { LEASE_POOLS, acquireLease, listLeases, queuePosition, reapLeases, resolveLease } = await import('./leases.ts');
   const { hostCleanup } = await import('./simctl.ts');
   const sub = a._[1] ?? 'status';
-  const allowed: Record<string, string[]> = { status: ['json'], evidence: ['json', 'task', 'limit'], reap: ['json'], release: ['note', 'json'], lease: ['wait-minutes'] };
-  if (!allowed[sub]) die('ym devices status|evidence|reap|release|lease');
+  const allowed: Record<string, string[]> = { status: ['json'], evidence: ['json', 'task', 'limit'], reap: ['json'], release: ['note', 'json'], recover: ['note', 'json'], lease: ['wait-minutes'] };
+  if (!allowed[sub]) die('ym devices status|evidence|reap|release|recover|lease');
   for (const name of Object.keys(a.flags)) if (!allowed[sub]!.includes(name)) die(`Unknown devices option --${name}`);
   const cwd = process.cwd();
   const config = loadConfig((await mainRepoRoot(cwd).catch(() => null)) ?? undefined).devices;
@@ -1020,6 +1021,15 @@ async function cmdDevices(a: Args) {
     if (!id || !note || a._.length !== 3) die('ym devices release <lease-id> --note "how the leftover simulator was inspected and removed"');
     const lease = resolveLease(id, note);
     return console.log(a.flags.json ? JSON.stringify(lease, null, 2) : green(`✔ Recorded your inspection and freed ${lease.pool} lease ${lease.id}. No device was touched.`));
+  }
+  if (sub === 'recover') {
+    const id = a._[2], note = flag(a, 'note');
+    if (!id || !note || a._.length !== 3) die('ym devices recover <lease-id> --note "how you confirmed the holder is gone"');
+    const { recoverStaleLease } = await import('./leases.ts');
+    const r = await recoverStaleLease(id, note, hostCleanup());
+    if (a.flags.json) return console.log(JSON.stringify(r, null, 2));
+    return console.log(r.outcome === 'released' ? green(`✔ Recovered ${r.pool} lease ${r.id}: ${r.detail}. Only simulators it recorded were touched.`)
+      : yellow(`! Cleanup of ${r.id} failed (${r.detail}); the slot stays held. Inspect, then "ym devices release ${r.id} --note ...".`));
   }
   const pool = a._[2] as (typeof LEASE_POOLS)[number];
   const command = a._.slice(3);

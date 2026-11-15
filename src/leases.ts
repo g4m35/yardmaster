@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import * as z from 'zod/v4';
 import { openDb, tx, type Db } from './db.ts';
 import { machineId } from './paths.ts';
-import { isAlive, processStartTime } from './proc.ts';
+import { readFileSync } from 'node:fs';
+import { isAlive, processStartTime, run } from './proc.ts';
 
 /**
  * Machine-wide leases for scarce, heavy resources: build slots, simulators and physical devices. Rows live in the
@@ -28,15 +29,18 @@ export interface Lease {
   host: string; pid: number; procStarted: number | null;
   queuedAt: number; acquiredAt: number | null; expiresAt: number;
   owned: OwnedResource[]; note: string | null;
+  /** Boot the holder ran in; null on rows written before boot identity was recorded. */
+  bootId: string | null;
 }
 interface Row {
   id: string; pool: string; state: string; holder: string; project_id: string | null; task_id: string | null; request_id: string | null;
   host: string; pid: number; proc_started: number | null; queued_at: number; acquired_at: number | null; expires_at: number; owned: string; note: string | null;
+  boot_id: string | null;
 }
 
 const toLease = (r: Row): Lease => ({ id: r.id, pool: r.pool as LeasePool, state: r.state as LeaseState, holder: r.holder,
   projectId: r.project_id, taskId: r.task_id, requestId: r.request_id, host: r.host, pid: r.pid, procStarted: r.proc_started,
-  queuedAt: r.queued_at, acquiredAt: r.acquired_at, expiresAt: r.expires_at, owned: z.array(OwnedResourceSchema).parse(JSON.parse(r.owned)), note: r.note });
+  queuedAt: r.queued_at, acquiredAt: r.acquired_at, expiresAt: r.expires_at, owned: z.array(OwnedResourceSchema).parse(JSON.parse(r.owned)), note: r.note, bootId: r.boot_id });
 
 export function listLeases(db: Db, pool?: LeasePool): Lease[] {
   const rows = (pool ? db.prepare('SELECT * FROM resource_leases WHERE pool = ? ORDER BY queued_at, id').all(pool)
@@ -50,22 +54,53 @@ function withDb<T>(fn: (db: Db) => T): T {
   try { return fn(db); } finally { db.close(); }
 }
 
-export interface ProcessId { pid: number; startedAt: number | null }
-let self: Promise<ProcessId> | null = null;
-export function selfIdentity(): Promise<ProcessId> {
-  self ??= processStartTime(process.pid).then(startedAt => ({ pid: process.pid, startedAt }));
-  return self;
+export interface ProcessId { pid: number; startedAt: number | null; bootId: string | null }
+
+/** Identifies the current boot, so a PID recorded before a reboot can never match a process after it. */
+async function readBootId(): Promise<string | null> {
+  if (process.platform === 'linux') {
+    try { return readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim() || null; } catch { return null; }
+  }
+  if (process.platform === 'darwin') {
+    const r = await run('sysctl', ['-n', 'kern.boottime'], { timeoutMs: 5000 }).catch(() => null);
+    const sec = r?.code === 0 ? r.stdout.match(/sec\s*=\s*(\d+)/)?.[1] : undefined;
+    return sec ? `darwin-boot-${sec}` : null;
+  }
+  return null;
+}
+let boot: Promise<string | null> | null = null;
+export function bootId(): Promise<string | null> {
+  boot ??= readBootId();
+  return boot;
 }
 
-/** A holder whose PID is gone, or reused by a process with a different start time, has crashed. */
-export async function holderAlive(pid: number, startedAt: number | null): Promise<boolean> {
-  if (!isAlive(pid)) return false;
+let self: ProcessId | null = null;
+/**
+ * This process's identity as a lease holder. A lease is never granted without a readable start time: a row with no
+ * start identity could later be matched by any process that reuses the PID. Retried, since one ps can miss a deadline.
+ */
+export async function selfIdentity(): Promise<ProcessId> {
+  if (self) return self;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const startedAt = await processStartTime(process.pid).catch(() => null);
+    if (startedAt !== null) return self = { pid: process.pid, startedAt, bootId: await bootId() };
+    await new Promise(resolve => setTimeout(resolve, 200 * (attempt + 1)));
+  }
+  throw new Error('Cannot read this process\'s start time, so it cannot hold a device lease safely. Check that ps works, then retry.');
+}
+
+/** A holder is dead when it ran in another boot, its PID is gone, or the PID now belongs to a later process. */
+export async function holderAlive(lease: Pick<Lease, 'pid' | 'procStarted' | 'bootId'>): Promise<boolean> {
+  const currentBoot = await bootId();
+  if (lease.bootId && currentBoot && lease.bootId !== currentBoot) return false;
+  if (!isAlive(lease.pid)) return false;
   // This process is alive by definition; skip the ps call (waiters poll this often).
   const me = await selfIdentity();
-  if (pid === me.pid && startedAt === me.startedAt) return true;
-  if (startedAt === null) return true;
-  const now = await processStartTime(pid).catch(() => null);
-  return now === null || Math.abs(now - startedAt) <= 2000;
+  if (lease.pid === me.pid && lease.procStarted === me.startedAt) return true;
+  // Unverifiable (rows from before start identity was required): never presumed dead; see recoverStaleLease.
+  if (lease.procStarted === null) return true;
+  const now = await processStartTime(lease.pid).catch(() => null);
+  return now === null || Math.abs(now - lease.procStarted) <= 2000;
 }
 
 export type ResourceCleanup = (owned: OwnedResource[]) => Promise<{ ok: boolean; detail: string }>;
@@ -81,7 +116,7 @@ export async function reapLeases(cleanup: ResourceCleanup, now = Date.now()): Pr
   // The dead holder as inspected. Another reaper may claim the row meanwhile; then it is no longer this holder's.
   const crashed = new Map<string, string>();
   const identity = (l: Lease) => `${l.state}:${l.pid}:${l.procStarted}`;
-  for (const lease of candidates) if (!(await holderAlive(lease.pid, lease.procStarted))) crashed.set(lease.id, identity(lease));
+  for (const lease of candidates) if (!(await holderAlive(lease))) crashed.set(lease.id, identity(lease));
   const results: ReapResult[] = [];
   // Expiry alone never frees capacity a live process holds: a stalled holder may still be building or testing.
   // Only a dead holder's slot is reclaimed. A queued waiter holds nothing and may expire; a live holder's
@@ -95,8 +130,8 @@ export async function reapLeases(cleanup: ResourceCleanup, now = Date.now()): Pr
       return [];
     }
     // Claim before cleaning so two reapers never clean the same resources; a crashed reaper is detected like any holder.
-    db.prepare("UPDATE resource_leases SET state = 'reaping', pid = ?, proc_started = ?, expires_at = ? WHERE id = ?")
-      .run(me.pid, me.startedAt, now + 5 * 60_000, lease.id);
+    db.prepare("UPDATE resource_leases SET state = 'reaping', pid = ?, proc_started = ?, boot_id = ?, expires_at = ? WHERE id = ?")
+      .run(me.pid, me.startedAt, me.bootId, now + 5 * 60_000, lease.id);
     return [lease];
   })));
   for (const lease of claimed) {
@@ -109,6 +144,33 @@ export async function reapLeases(cleanup: ResourceCleanup, now = Date.now()): Pr
     results.push({ id: lease.id, pool: lease.pool, holder: lease.holder, outcome: done.ok ? 'released' : 'cleanup_failed', detail: done.detail });
   }
   return results;
+}
+
+/**
+ * Owner-only recovery for a stale claim whose holder cannot be identified (no recorded start time or boot), so it
+ * can never be proven dead. Refuses verifiable holders: a live one must be stopped, a dead one is reaped normally.
+ * Cleans only the simulators the lease recorded, then frees the slot; a failed cleanup keeps it occupied.
+ */
+export async function recoverStaleLease(id: string, note: string, cleanup: ResourceCleanup, now = Date.now()): Promise<ReapResult> {
+  if (note.trim().length < 12) throw new Error('Describe how you confirmed the holder is gone (at least 12 characters)');
+  const me = await selfIdentity();
+  const lease = withDb(db => listLeases(db)).find(l => l.id === id);
+  if (!lease) throw new Error('No lease with that ID');
+  if (lease.state !== 'held' && lease.state !== 'reaping') throw new Error(`Lease is ${lease.state}; recovery applies to held or reaping claims (use release for a failed cleanup)`);
+  if (lease.expiresAt >= now) throw new Error('Lease is still being renewed; its holder is active');
+  if (lease.procStarted !== null && lease.bootId !== null) {
+    throw new Error(await holderAlive(lease) ? `Holder pid ${lease.pid} is alive with the recorded identity; stop it first` : 'Holder is provably gone; run "ym devices reap"');
+  }
+  const claimed = withDb(db => tx(db, () => db.prepare(`UPDATE resource_leases SET state = 'reaping', pid = ?, proc_started = ?, boot_id = ?, expires_at = ?
+    WHERE id = ? AND state = ? AND pid = ? AND expires_at = ?`).run(me.pid, me.startedAt, me.bootId, now + 5 * 60_000, id, lease.state, lease.pid, lease.expiresAt).changes === 1));
+  if (!claimed) throw new Error('The lease changed while it was being recovered; inspect it again');
+  const done = lease.owned.length ? await cleanup(lease.owned).catch((error: Error) => ({ ok: false, detail: error.message })) : { ok: true, detail: 'nothing to clean' };
+  withDb(db => tx(db, () => {
+    db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(`lease-recovery:${id}`, JSON.stringify({ ...lease, recoveredAt: Date.now(), note, cleanup: done }));
+    if (done.ok) db.prepare("DELETE FROM resource_leases WHERE id = ? AND state = 'reaping' AND pid = ?").run(id, me.pid);
+    else db.prepare("UPDATE resource_leases SET state = 'cleanup_failed', note = ? WHERE id = ? AND state = 'reaping' AND pid = ?").run(done.detail.slice(0, 500), id, me.pid);
+  }));
+  return { id, pool: lease.pool, holder: lease.holder, outcome: done.ok ? 'released' : 'cleanup_failed', detail: done.detail };
 }
 
 /** Owner attestation for a slot whose cleanup failed. Records the note; never touches a device. */
@@ -159,9 +221,9 @@ export async function acquireLease(req: LeaseRequest): Promise<LeaseOutcome> {
   const id = `l-${randomUUID()}`;
   const queuedAt = Date.now();
   const deadline = queuedAt + req.waitMs;
-  withDb(db => db.prepare(`INSERT INTO resource_leases (id, pool, state, holder, project_id, task_id, request_id, host, pid, proc_started, queued_at, expires_at)
-    VALUES (?, ?, 'waiting', ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, req.pool, req.holder, req.projectId ?? null, req.taskId ?? null, req.requestId ?? null,
-    machineId(), me.pid, me.startedAt, queuedAt, queuedAt + req.ttlMs));
+  withDb(db => db.prepare(`INSERT INTO resource_leases (id, pool, state, holder, project_id, task_id, request_id, host, pid, proc_started, boot_id, queued_at, expires_at)
+    VALUES (?, ?, 'waiting', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, req.pool, req.holder, req.projectId ?? null, req.taskId ?? null, req.requestId ?? null,
+    machineId(), me.pid, me.startedAt, me.bootId, queuedAt, queuedAt + req.ttlMs));
   const leave = (reason: string): LeaseOutcome => {
     withDb(db => db.prepare("DELETE FROM resource_leases WHERE id = ? AND state = 'waiting'").run(id));
     return { lease: null, reason, waitedMs: Date.now() - queuedAt, queuedAt };
