@@ -166,3 +166,23 @@ test('concurrent quiet cleanup shares queued work but still takes two distinct f
     assert.ok(count >= 2 && count <= 5, `two fresh observations per caller, with queued sharing; saw ${count} censuses`);
   } finally { process.env.PATH = originalPath; }
 });
+
+test('a census that fails once is retried, so a slow or failed ps does not make cleanup unverified', async () => {
+  const fake = join(dir, 'census-flaky-bin'), failures = join(dir, 'census-failures.txt'); mkdirSync(fake);
+  const ps = existsSync('/bin/ps') ? '/bin/ps' : '/usr/bin/ps';
+  const quoted = `'${failures.replaceAll("'", "'\\''")}'`;
+  // The first identity census fails, as a ps that timed out on a busy machine would; later ones work.
+  // PATH holds only this directory, so the script sticks to shell builtins.
+  writeFileSync(join(fake, 'ps'), `#!/bin/sh\nif [ "$1" = "-U" ]; then n=0; [ -f ${quoted} ] && read n < ${quoted}; if [ "$n" -gt 0 ]; then echo $((n - 1)) > ${quoted}; exit 1; fi; fi\nexec "${ps}" "$@"\n`);
+  chmodSync(join(fake, 'ps'), 0o755);
+  const originalPath = process.env.PATH;
+  const owned = () => ({ pid: 123457, startedAt: null, marker: randomUUID(), uid: process.getuid!(), launchedAt: Date.now() });
+  try {
+    process.env.PATH = fake;
+    writeFileSync(failures, '1');
+    assert.equal((await terminateMarkedProcesses(owned())).status, 'exited');
+    // An inspection that keeps failing is still reported, never guessed.
+    writeFileSync(failures, '100');
+    assert.equal((await terminateMarkedProcesses(owned())).status, 'unverified');
+  } finally { process.env.PATH = originalPath; }
+});

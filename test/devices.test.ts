@@ -745,19 +745,31 @@ test('Linux start times come from /proc/<pid>/stat, even with spaces and parenth
 });
 
 test('a long run of overlapping matches streams in bounded memory and time', () => {
-  const dir = tempDir('ym-run-'), file = join(dir, 'run.log');
-  // 16 MiB of "a" with the declared value "aa": every position starts a match, so the whole run is one span.
-  const size = 16 * 1024 * 1024;
-  writeFileSync(file, Buffer.concat([Buffer.from('start '), Buffer.alloc(size, 'a'), Buffer.from(' end')]));
-  const before = process.memoryUsage().arrayBuffers;
-  const started = Date.now();
-  assert.equal(scrubFile(file, ['aa', 'aaa'], 64 * 1024), true);
-  const elapsed = Date.now() - started;
-  assert.equal(readFileSync(file, 'utf8'), 'start [redacted] end');
-  assert(elapsed < 10_000, `streamed in ${elapsed} ms`);
-  // Nothing proportional to the file stays allocated: buffers in use stay far below its size.
-  assert(process.memoryUsage().arrayBuffers - before < size / 4, 'no file-sized buffer was retained');
-  assert.equal(artifactSha256(file), fileSha256(file));
+  // A run of "a" with the declared value "aa": every position starts a match, so the whole run is one span.
+  // Memory is sampled in a fresh process after forced collection. Collection does not always hand freed buffer
+  // memory back at once, so the bound is checked the way it is meant: a file four times larger must not keep
+  // proportionally more memory (a scrubber holding the run would keep about 24 MiB more for the larger file).
+  const scrub = (size: number) => {
+    const dir = tempDir('ym-run-'), file = join(dir, 'run.log');
+    writeFileSync(file, Buffer.concat([Buffer.from('start '), Buffer.alloc(size, 'a'), Buffer.from(' end')]));
+    const probe = `const { scrubFile } = await import(${JSON.stringify(new URL('../src/device-evidence.ts', import.meta.url).href)});
+const settle = async () => { for (let i = 0; i < 3; i++) { globalThis.gc(); await new Promise(r => setImmediate(r)); } };
+await settle(); const before = process.memoryUsage().arrayBuffers;
+const started = Date.now();
+const ok = scrubFile(${JSON.stringify(file)}, ['aa', 'aaa'], 64 * 1024);
+const elapsed = Date.now() - started;
+await settle();
+console.log(JSON.stringify({ ok, elapsed, retained: process.memoryUsage().arrayBuffers - before }));`;
+    const out = JSON.parse(execFileSync(process.execPath, ['--expose-gc', '--input-type=module', '-e', probe], { encoding: 'utf8' }).trim().split('\n').at(-1)!) as { ok: boolean; elapsed: number; retained: number };
+    assert.equal(out.ok, true);
+    assert.equal(readFileSync(file, 'utf8'), 'start [redacted] end');
+    assert.equal(artifactSha256(file), fileSha256(file));
+    return out;
+  };
+  const MiB = 1024 * 1024;
+  const small = scrub(8 * MiB), large = scrub(32 * MiB);
+  assert(large.elapsed < 20_000, `streamed 32 MiB in ${large.elapsed} ms`);
+  assert(large.retained - small.retained < 8 * MiB, `memory did not grow with the file (8 MiB kept ${small.retained} bytes, 32 MiB kept ${large.retained})`);
 });
 
 /** A ps whose process census fails while `flag` holds a positive count: ownership inspection then cannot complete. */

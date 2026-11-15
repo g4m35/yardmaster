@@ -11,7 +11,10 @@ export const PROCESS_OWNER_ENV = 'YARDMASTER_PROCESS_OWNER';
 const PROBE_ENV = 'YARDMASTER_PROCESS_LOOKUP_PROBE';
 const MAX_LOOKUP_BYTES = 64 * 1024 * 1024;
 const MAX_CENSUS_BYTES = 4 * 1024 * 1024;
-const LOOKUP_TIMEOUT_MS = 2000;
+// ps can take seconds on a busy machine (a booting simulator, a parallel test suite); a slow answer is not a lost one.
+const LOOKUP_TIMEOUT_MS = 5000;
+/** Waits before retrying a failed inspection, so one slow or failed census does not turn into "unverified". */
+const INSPECTION_RETRY_MS = [250, 1000] as const;
 const MARKER = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const launchTimes = new Map<string, number>();
 
@@ -156,6 +159,21 @@ async function candidates(receipt: ProcessOwnership, env: NodeJS.ProcessEnv): Pr
  * The lookup's own random probe verifies that ps actually emitted environments, rather than silently
  * accepting an unsupported flag. Same-user UID and the random tag are checked for every signal target.
  */
+/**
+ * One inspection, retried after a failure. Each attempt is a new, complete OS observation, so a retry never reuses
+ * stale data; only an inspection that keeps failing is reported, and cleanup then stays unverified as before.
+ */
+async function inspectMarked(receipt: ProcessOwnership, target?: MarkedProcess): Promise<MarkedProcess[]> {
+  for (let attempt = 0; ; attempt++) {
+    try { return await markedProcesses(receipt, target); }
+    catch (error) {
+      const delay = INSPECTION_RETRY_MS[attempt];
+      if (delay === undefined) throw error;
+      await wait(delay);
+    }
+  }
+}
+
 async function markedProcesses(receipt: ProcessOwnership, target?: MarkedProcess): Promise<MarkedProcess[]> {
   if (!['darwin', 'linux'].includes(process.platform)) throw new Error('Inherited process ownership inspection is unsupported on this platform.');
   const probe = randomUUID();
@@ -208,18 +226,18 @@ export async function terminateMarkedProcesses(receipt: ProcessOwnership, opts: 
       const deadline = Date.now() + duration;
       const signaled = new Set<string>();
       for (;;) {
-        const found = await markedProcesses(receipt);
+        const found = await inspectMarked(receipt);
         if (!found.length) {
           // A new asynchronous OS census after an event-loop yield is a fresh observation.
           // The fixed 25 ms sleep added latency to every Git utility without strengthening
           // either snapshot. Nonempty TERM/KILL polling retains its configured wait below.
           await new Promise<void>(resolve => setImmediate(resolve));
-          if (!(await markedProcesses(receipt)).length) return lastSignal ? { status: 'terminated', signal: lastSignal } : { status: 'exited' };
+          if (!(await inspectMarked(receipt)).length) return lastSignal ? { status: 'terminated', signal: lastSignal } : { status: 'exited' };
         }
         for (const target of found) {
           if (Date.now() >= deadline && signaled.size > 0) break;
           const key = `${target.pid}:${target.startedAt}`;
-          if (signaled.has(key) || !(await markedProcesses(receipt, target)).length) continue;
+          if (signaled.has(key) || !(await inspectMarked(receipt, target)).length) continue;
           try { process.kill(target.pid, signal); lastSignal = signal; signaled.add(key); }
           catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw new Error('Could not stop an inherited owned process.'); }
         }
