@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+- Device verification for iPhone apps with no account: the built-in `apple-simulator` provider (opt-in, `device.test`) builds with your existing command, takes a machine-wide simulator lease, creates its own simulator, installs, launches, screenshots and runs your smoke tests (any command, Maestro, `xcodebuild test` or agent-device), then deletes that simulator and releases the slot. Missing or broken tools are unavailable, never a pass. See [docs/DEVICES.md](docs/DEVICES.md) and `examples/ios-smoke`.
+- Machine-wide leases for `build`, `simulator` and `physical` slots, shared by every project and Yardmaster process on the machine, in arrival order, surviving hub restarts. Holders are identified by PID and process start time; crashed or expired holders are freed by the hub, the next request or `ym devices reap`, which first delete only the simulators that lease recorded. A failed cleanup keeps the slot occupied. Simulators Yardmaster did not create are never touched.
+- Device evidence binds each run to the commit, the artifact's sha256, machine and Xcode, device model, iOS runtime and the checks that ran, with screenshots and logs in the receipt. Code, simulator and physical-device results are separate: a simulator pass never satisfies a physical-device requirement, which stays untested. Acceptance rejects device evidence for a different commit. Shown by `ym devices evidence`, the `yard_devices` MCP tool, `devices.status` and a task's Details tab in the dashboard.
+- Build reuse only on an exact compatibility key your tool reports, with the stored artifact re-hashed before use; an unreadable key builds normally.
+- Admission now checks load and memory before the first task, not only when one is already running, and holds new tasks at macOS memory pressure `critical` (`resources.holdAtPressure`). Heavy device work waits from `warn` (`devices.holdAtPressure`).
+- New `ym devices status|evidence|reap|release|lease`. `ym devices lease <pool> -- <command>` holds a slot for any tool.
+- CI runs the sample app on `macos-latest`: acceptance, two projects contending for one simulator, a physical requirement, cancellation and a crashed holder.
+
+Database migration 12 adds `resource_leases` and `device_evidence` tables; no existing data changes. Workers that run device checks need this version too.
+
 ## 0.9.3
 - Fixed: while a task merged newer work in to resolve a conflict, every merged-in file counted as changed by the task (994 files for a 9-file change). Those counts feed live overlap checks and the file reservations that keep tasks apart, so a conflict fix could block or pause unrelated work. Uncommitted edits now count only where they differ from the task's base, and the paths are compared in memory so very large merges cannot exceed the command-line limit.
 - Dashboard: the Changes tab counts the change itself once read; the status line counts projects instead of listing folder names; feed events name tasks briefly; machines say "idle" or how many are busy; agents and connections sit above the feed.
