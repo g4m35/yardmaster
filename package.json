@@ -1,6 +1,6 @@
 {
   "name": "yardmaster",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "description": "Model-independent orchestration for the coding agents you already use (Claude Code, Codex, Cursor, OpenCode, Gemini, T3 Code). Parallel work without collisions, loops, or leftover mess.",
   "type": "module",
   "license": "MIT",

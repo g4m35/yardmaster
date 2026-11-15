@@ -12,7 +12,7 @@ import { rememberChecked } from './ci/verified.ts';
 import { cleanEnv, startOwnedProcess, runShell, type OwnedProcess } from './proc.ts';
 import { escalate } from './router.ts';
 import { inScope, matches } from './scope.ts';
-import { clip, errorFingerprint, formatUsd, tail } from './text.ts';
+import { activityText, clip, errorFingerprint, formatUsd, tail } from './text.ts';
 import type { Project, Task } from './types.ts';
 import { Watchdog, type Verdict } from './watchdog.ts';
 import type { Client } from './api.ts';
@@ -222,12 +222,12 @@ class LogBuffer {
   }
 }
 
-function describe(ev: AgentEvent): string | null {
+function describe(ev: AgentEvent, worktree: string): string | null {
   switch (ev.type) {
     case 'tool': {
       const input = typeof ev.input === 'object' && ev.input ? (ev.input as Record<string, unknown>) : {};
       const target = input.file_path ?? input.path ?? input.command ?? input.pattern ?? (typeof ev.input === 'string' ? ev.input : '');
-      return `${ev.write ? 'edit' : 'tool'} ${ev.name} ${clip(String(target ?? ''), 140)}`;
+      return `${ev.write ? 'edit' : 'tool'} ${ev.name} ${clip(activityText(String(target ?? ''), worktree), 140)}`;
     }
     case 'tool_result':
       return ev.ok ? null : `error ${clip(ev.text, 200)}`;
@@ -564,7 +564,7 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
       resultText = ev.text;
       resultOk = ev.ok;
     }
-    const line = describe(ev);
+    const line = describe(ev, wt);
     if (line) {
       log.push(line);
       lastActivity = line;

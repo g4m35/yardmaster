@@ -64,6 +64,32 @@ export function clip(s: string | null | undefined, max: number): string {
   return one.length > max ? one.slice(0, max - 1) + '…' : one;
 }
 
+/**
+ * A short display title for a request: its first sentence, clipped. People write requests as paragraphs;
+ * boards, notifications and event lines need the gist, and the full text stays in the task's prompt.
+ */
+export function taskTitle(text: string, max = 96): string {
+  const line = (text.split('\n').find((l) => l.trim()) ?? '').replace(/\s+/g, ' ').trim();
+  // A sentence ends at ". " before a capital or digit, so "v1.2" and "file.ts" do not end one. A one-word
+  // lead-in ("1.", "Dr.", "e.g.") is not a sentence either.
+  for (const stop of line.matchAll(/[.!?](?=\s+[A-Z0-9"'`(\[])/g)) {
+    if (line.slice(0, stop.index).includes(' ')) return clip(line.slice(0, stop.index), max);
+  }
+  return clip(line, max);
+}
+
+/**
+ * Agent activity is shown to people: drop the "cd into the worktree first" prefix agents put on every
+ * command and the worktree path itself, so the visible part of a clipped line is the actual work.
+ */
+export function activityText(text: string, worktree: string): string {
+  if (!worktree) return text;
+  const quoted = worktree.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return text
+    .replace(new RegExp(`^\\s*cd\\s+["']?${quoted}/?["']?\\s*(?:;|&&)\\s*`), '')
+    .replaceAll(`${worktree}/`, '');
+}
+
 /** Stable JSON for fingerprinting tool-call inputs regardless of key order. */
 export function canonicalJson(v: unknown): string {
   if (v === null || typeof v !== 'object') return JSON.stringify(v) ?? 'null';

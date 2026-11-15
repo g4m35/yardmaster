@@ -3,10 +3,10 @@ import * as z from 'zod/v4';
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { checkLiveOverlap, type Coordinator, type TaskPatch } from './coordinator.ts';
-import { NewTaskSchema, STATUS_LABEL, TASK_STATUSES, TERMINAL_STATUSES, type Task, type TaskStatus } from './types.ts';
+import { ACTIVE_STATUSES, NewTaskSchema, STATUS_LABEL, TASK_STATUSES, TERMINAL_STATUSES, type Task, type TaskStatus } from './types.ts';
 import { paths } from './paths.ts';
 import { clip, formatUsd, tail } from './text.ts';
-import { revParse } from './git.ts';
+import { changeSince, revParse } from './git.ts';
 import type { Config } from './config.ts';
 import type { Supervisor } from './supervisor.ts';
 import { diskReport } from './janitor.ts';
@@ -15,6 +15,7 @@ import { addLesson, creditLessons, lessonFromFix, lessonsFor, listLessons, markU
 import { coupling, filesIn } from './imports.ts';
 import { PairingStore } from './pairing.ts';
 import { buildRegistry } from './registry.ts';
+import { normalizePattern } from './scope.ts';
 import { tx } from './transaction.ts';
 import { WORKER_ACTIVE_STATUSES, WORKER_FINALIZE_STATUSES } from './worker-policy.ts';
 import { recordUtility, runUtilityKey, utilitiesStopped, utilities, taskHasPendingUtilities } from './utility-records.ts';
@@ -87,6 +88,14 @@ function boardSummaryInPass(coord: Coordinator, projectId?: string | null, super
         machine: t.machine_id,
         assignee: t.assignee,
         cost: t.cost_usd,
+        budget: t.budget_usd,
+        attempt: t.attempts,
+        maxAttempts: t.max_attempts,
+        phase: run?.phase ?? null,
+        createdAt: t.created_at,
+        startedAt: t.started_at,
+        readyAt: t.ready_at,
+        needsApproval: t.status === 'ready' && !!t.attention,
         lastActivity: t.status === 'running' ? run?.last_activity ?? null : null,
         waiting: t.status === 'queued' ? coord.blocker(t, now) : null,
         scope: t.scope,
@@ -215,6 +224,24 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       return { status: t?.status ?? 'missing', control: t?.control ?? null, assignee: t?.assignee ?? null, attempts: t?.attempts ?? 0, generation: t?.generation ?? 0, head_sha: t?.head_sha ?? null, branch: t?.branch ?? null, lease_until: t?.lease_until ?? null };
     }),
     'task.control': method(z.object({ id: Id, action: z.enum(['retry', 'cancel', 'stop', 'approve', 'prioritize', 'redirect', 'confirm-stopped']), by: z.string().default('you'), note: z.string().max(4000).optional(), remote: z.boolean().optional() }), (p) => coord.control(p.id, p.action, p.by, p.note, { remote: p.remote })),
+    // The change itself, so the owner can read it before approving. Owner-only: workers are not allowlisted.
+    'task.diff': method(z.object({ id: TaskId }), async (p) => {
+      const task = coord.getTask(p.id);
+      if (!task) throw new Error(`No task ${p.id}`);
+      const none = (note: string) => ({ source: null, files: [], patch: '', truncated: false, note });
+      if (!task.base_sha) return none('Nothing changed yet. The change appears here once an agent starts.');
+      const copy = task.worktree && existsSync(task.worktree) ? task.worktree : null;
+      // A saved artifact is what approval merges; a live working copy is what an unfinished attempt has so far.
+      const artifact = task.head_sha && (['verifying', 'ready', 'merging', 'done', 'canceled'].includes(task.status) || !copy);
+      const root = coord.getProject(task.project_id)?.root;
+      try {
+        if (artifact && root) return { source: 'artifact', ...(await changeSince(root, task.base_sha, task.head_sha)), note: null };
+        if (copy) return { source: 'working copy', ...(await changeSince(copy, task.base_sha, null)), note: null };
+      } catch (err) {
+        return none(`This hub cannot read the change: ${clip((err as Error).message, 200)}`);
+      }
+      return none('Its working copy is on another machine or was removed, and no saved change has reached this hub.');
+    }),
     'task.logs': method(z.object({ id: Id, lines: z.number().int().min(1).max(2000).default(80) }), (p) => {
       const run = coord.latestRun(p.id);
       if (!run) return '';
@@ -226,6 +253,24 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
     ),
     // Explicit administrative writes never masquerade as a worker claim.
     'task.adminUpdate': method(z.object({ id: TaskId, patch: z.record(z.string(), z.unknown()) }), (p) => coord.updateTask(p.id, p.patch as TaskPatch, { requestEdit: true })),
+    // The owner's answer to "it changed files outside its scope": widen (or correct) what the task may touch.
+    // A running attempt keeps the list it started with; the new list applies from the next attempt.
+    'task.setScope': method(z.object({ id: TaskId, scope: z.array(z.string().trim().min(1).max(300)).max(200), by: z.string().default('you') }), (p) => tx(coord.db, () => {
+      const task = coord.getTask(p.id);
+      if (!task) throw new Error(`No task ${p.id}`);
+      if (task.status === 'done' || task.status === 'canceled') throw new Error(`"${clip(task.title, 60)}" is ${STATUS_LABEL[task.status].toLowerCase()}; its files can no longer change.`);
+      const scope = [...new Set(p.scope.map(normalizePattern))];
+      // The attempt in flight still works under the list it started with, and that list is what keeps
+      // overlapping tasks from starting. Files can be added to it now, never taken away. No declared list
+      // can mean "everything", so giving one to an active task would also take files away.
+      const narrows = task.scope.length ? task.scope.some((pattern) => !scope.includes(pattern)) : scope.length > 0;
+      if (ACTIVE_STATUSES.includes(task.status) && narrows) {
+        throw new Error(`"${clip(task.title, 60)}" is ${STATUS_LABEL[task.status].toLowerCase()}. Files can be added to its list now; remove files after this attempt ends.`);
+      }
+      const next = coord.updateTask(p.id, { scope, scope_inferred: false }, { requestEdit: true });
+      coord.event(task.project_id, task.id, 'info', 'task.scope', `${p.by} set the files "${task.title}" may change: ${scope.length ? clip(scope.join(', '), 300) : 'none declared'}`);
+      return next;
+    })),
     // A report never submits a code artifact for landing. Keep general worker `done` writes forbidden.
     'task.completeReport': method(z.object({ taskId: TaskId, runId: RunId, owner: Owner.optional(), head: z.string().regex(/^[a-f0-9]{40,64}$/), summary: z.string().max(2000) }), (p) => tx(coord.db, () => {
       const owner = p.owner && { ...p.owner, statuses: ['verifying', 'done'] as TaskStatus[] };

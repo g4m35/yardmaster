@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.9.2
+- Dashboard rebuilt as a three-pane console after the owner rejected the first redesign as looking the same: a left rail with the stage counts, machines and today's spend; the work list in the middle with a filter; and on the right either an overview (what needs you, what just happened, cleanup, connections) or the selected task beside the list. Dark scheme. On narrow screens it becomes one column with what needs you first, and a task opens full screen. See [docs/DASHBOARD.md](docs/DASHBOARD.md).
+- The selected task has tabs: Changes, Activity, Request, History and Details. Changes shows the actual diff, file by file, read from the hub with the new owner-only `task.diff` method: the saved commit once it exists (what approval merges), or the live working copy while the attempt runs. Large changes are cut at a line and say so.
+- Keyboard: J and K (or the arrow keys) move through the list and open each task, A then A (or Enter) approves, R jumps to guidance, N adds work, / filters, Esc closes the task.
+- Stopped tasks ("Needs you") are rows in the list too, not only a banner.
+- "Approve and merge" now appears in the "Needs you" banner; it was only reachable from the task detail.
+- When work is stopped for changing files outside its list, the task detail names the files and lets the owner allow them (`task.setScope`, owner-only), then retry.
+- Task names are the first sentence of the request instead of its first 200 characters, from `ym add` and the dashboard. Activity lines drop the worktree path and the "cd there first" prefix before clipping.
+- Fixed: the first changed file reported by a running task lost its first character when it was an unstaged edit (`rc/app.ts` for `src/app.ts`), so edit-time overlap checks could miss it.
+- `board.status` rows add `budget`, `attempt`, `maxAttempts`, `phase`, `createdAt`, `startedAt`, `readyAt` and `needsApproval`.
+
+No database migration. Upgrade the hub to get the new dashboard; workers are unaffected.
+
 ## 0.9.1
 - Malformed unauthenticated request targets return400; rejected asynchronous handlers no longer terminate the hub.
 - Native hooks exempt only the exact canonical session. Session identities are scoped by project and machine, including MCP connections addressing multiple repositories; matching legacy claims remain intact. Native submissions retain the checkout captured at claim time across later nested-directory or linked-checkout status calls.

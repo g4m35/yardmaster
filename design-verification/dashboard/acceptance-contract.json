@@ -4,8 +4,19 @@
   "releaseTier": "client-preview",
   "buildMode": "hybrid",
   "customerFacing": true,
-  "conditions": { "motionExists": true, "similarityGateTriggered": false },
-  "requiredArtifacts": ["desktop.png", "mobile-390.png", "console.json", "geometry.json"],
-  "viewports": { "desktopMinWidth": 1024, "mobileWidth": 390 },
-  "frozenAt": "2026-11-07T00:00:00.000Z"
+  "conditions": {
+    "motionExists": true,
+    "similarityGateTriggered": false
+  },
+  "requiredArtifacts": [
+    "desktop.png",
+    "mobile-390.png",
+    "console.json",
+    "geometry.json"
+  ],
+  "viewports": {
+    "desktopMinWidth": 1024,
+    "mobileWidth": 390
+  },
+  "frozenAt": "2026-11-09T22:40:00.000Z"
 }

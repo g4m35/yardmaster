@@ -15,7 +15,7 @@ import { clearHubInfo, Hub, readHubInfo, writeHubInfo } from './hub.ts';
 import { planCleanup, runCleanup, type CleanPlan } from './janitor.ts';
 import { currentBranch, mainRepoRoot, projectIdFor, git, revParse } from './git.ts';
 import { isAlive, run, which } from './proc.ts';
-import { ago, clip, formatUsd } from './text.ts';
+import { ago, clip, formatUsd, taskTitle } from './text.ts';
 import { STATUS_LABEL, type Task } from './types.ts';
 import { WorkerLoop } from './worker.ts';
 import { connectWorker, fleetClient, joinFleet, normalizeHubUrl, workerCredentialDirectory } from './fleet-client.ts';
@@ -238,7 +238,7 @@ async function cmdAdd(a: Args) {
     createdBy: 'cli',
     force: Boolean(a.flags.force),
     tasks: [{
-      title: clip(title.split('\n')[0], 200),
+      title: taskTitle(title),
       prompt: flag(a, 'prompt') ?? title,
       files: list(a, 'files'),
       after: list(a, 'after'),

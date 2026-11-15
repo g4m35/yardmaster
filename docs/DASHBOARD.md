@@ -1,4 +1,74 @@
-# Dashboard iteration
+# Dashboard
+
+The dashboard serves one trusted owner from their personal hub. Two iterations are recorded here, newest first. The second replaced the layout of the first after the first real trial; the data and interaction contracts of the first still hold unless this section says otherwise.
+
+## Iteration 3: console (0.9.2)
+
+**Evidence.** The owner opened the departure-board build and said it "looks the same" as the old dashboard. The structure had changed, but the colors, header, type and cards had not, so at a glance nothing had. Three rendered directions were shown (Console, Tracks, Briefing); the owner picked Console.
+
+**Direction.** A three-pane operator console, dark, with no page scrolling on wide screens. The list stays in place while the right pane switches between the hub overview and the selected task, so reading one task after another is J, J, J rather than open, close, open.
+
+**What changed.**
+- Left rail: brand, project, stage counts, machines, today's spend, pause and the live indicator.
+- Middle: the work list. Groups: Needs you (stopped work), In progress (closest to merging first), Up next, Finished. A filter matches task names, agents and ids.
+- Right: the overview (status sentence, Needs you with its buttons, heads up, what just happened, cleanup, agents and connections), or the selected task.
+- Task: status pill and stage track, the facts that decide the next click (agent, time, cost, attempt, reviews), the actions, then tabs. The default tab follows the state: Changes once there is a change or the task was stopped, Activity while it runs or is checked, Request while it waits. The chosen tab is kept per task across refreshes.
+- Changes reads `task.diff`: per-file added and removed counts, then the patch with additions and removals marked. The committed artifact is shown once it exists, so what the owner reads is what approval merges. Before that, the working copy is shown, with a note that it can still change and that new files appear once saved.
+- Narrow screens: one column in the order status, Needs you, the list, then history and housekeeping. A task opens as a full-screen dialog with the same tabs.
+
+**Contracts kept.** Every behavior covered by the iteration 2 tests stays: one row per task, approval counted once, approve from Needs you, folded connections that open on trouble, the allowed-files editor, kept drafts, log position and focus across refreshes, the feed toggle, registry rules and owner-only RPCs.
+
+## Iteration 2: departure board (0.9.2)
+
+### Evidence
+
+The first real task run through a private hub (one repository, one task at a time, approval before integration) showed what the owner actually met:
+
+- The first screen was two cards for agents that were only installed, with registry vocabulary (managed, observed, unconnected, fresh) above everything else. The one running task sat below them.
+- The task's name was 200 characters of its request, and its activity line was a shell command prefixed by the worktree path, so the visible part of both was noise.
+- A row had no elapsed time, no phase inside its stage (setup, coding, checks, review) and no cost against its budget.
+- "Approve and merge" was missing from the "Needs you" banner. The banner's items carry their reason as `why`, and the approve action looked for `attention`.
+- The attempt was rejected for changing derived files outside its declared list. Nothing on the page could allow them; it took a raw API call.
+
+### Direction
+
+Hypothesis: an owner supervising a handful of tasks should be able to answer "what is happening, does anything wait on me, what did it cost" from one sentence and one row per task, without reading connection diagnostics. Putting the stage on each row, rather than giving each stage a column, keeps that true at any width and with one task or twenty.
+
+1. **Departure board (selected).** A plain status sentence, then "Needs you", then one list of tasks. Each row carries its status and phase, a short name, who is working, a five-stop stage track, time and cost against budget. The five stages keep their counts in a compact line above the list. Connection records fold into "Agents and connections", which opens itself once when a record is stale or the registry cannot refresh. Activity, machines and cleanup sit in a side rail. Wrong if the core job becomes comparing many machines, or if stage throughput matters more than individual tasks.
+2. **Refined five-column board (rejected).** Keep a column per stage and polish the cards. With one or a few tasks, four of five columns are empty, the cards are narrow, and below 1000px it already collapsed into a list. It answers "how many are in each stage", which the count line now does in one row.
+
+The owner's earlier override stands: one framework-free HTML file, no external assets, native `button`, `dialog`, `details`, `select` and form controls; the component-library quota stays waived for this utility surface. Both colour schemes are authored (`prefers-color-scheme`), and every text and background pair is checked against WCAG AA in the rendered page.
+
+### What changed
+
+- **Status sentence.** "1 task in progress. Nothing needs you." A task waiting for approval is counted once, as needing the owner.
+- **Rows.** Ordered nearest-to-merging first, then waiting, then finished. The phase comes from the latest run (`prepare`, `setup`, `route`, `agent`, `collect`, `verify`, `review_wait`, `review`); unknown phases show nothing.
+- **Short names.** `taskTitle()` (first sentence, at most 96 characters) names new tasks from `ym add` and the dashboard; the page applies the same rule to titles stored by older versions. The full request stays in the task and in its detail.
+- **Readable activity.** New activity lines drop the "cd into the worktree" prefix and the worktree path before they are clipped. The page also tidies lines written by older versions.
+- **Task detail.** Status and phase, the five stages, then agent, time, cost against budget, attempt and files. Below: files changed so far, the full request, guidance, the activity log, history and technical details (branch, artifact SHA, working copy, and a `git diff` command for the exact change). Opened sections, the log's scroll position and unsent text survive the snapshot refreshes that rebuild the detail.
+- **Allowed files.** When work is stopped for changing files outside its list, the detail names those files, adds them to the list in one click, and saves through `task.setScope`. The owner then chooses "Try again". A running attempt keeps the list it started with, so while one is in flight files can be added to the list but not removed.
+- **Approval.** "Approve and merge" appears in the "Needs you" banner as well as in the detail.
+- **Activity feed.** The latest eight events, with older ones opened in place by a button instead of a scroll box inside the page.
+
+### Contracts added
+
+`board.status` rows gain `budget`, `attempt`, `maxAttempts`, `phase`, `createdAt`, `startedAt`, `readyAt` and `needsApproval`. All are optional to the page, which still renders against a hub that omits them. `task.setScope({id, scope, by})` is owner-only (paired workers are refused like any unlisted method), normalizes and de-duplicates patterns, refuses finished and canceled tasks, refuses to take files away from an attempt in flight (its list is what keeps overlapping tasks from starting), clears the request identity like any request edit, and records an event.
+
+Kept from iteration 1: every owner action (add, retry, approve, cancel, redirect, pause, resume, cleanup), the registry's literal states and unknown signals, stop gated on `capabilities.requestStop` and rechecked at click time, serialized refreshes with one trailing refresh per burst, stale-snapshot handling, focus containment and restoration in dialogs, and no pairing controls.
+
+### Verification
+
+`node --test test/dashboard.test.ts` runs the page's real script against a small DOM fixture: 20 tests, including row content and order, the status sentence, approval from the banner, folded connections, detail sections surviving refresh, and the allowed-files flow. Unit tests cover `taskTitle`, `activityText`, the new board fields and `task.setScope`.
+
+Rendered evidence is in `design-verification/dashboard/`: `desktop.png`, `mobile-390.png`, `console.json`, `geometry.json` and `rendered-checks.json`, plus dialog, dark-scheme and 390px captures. It was captured in a hosted Chromium against a disposable fixture hub with invented data through an ephemeral tunnel; no personal hub, key or repository was exposed. The checks cover no horizontal overflow at 1440px and exactly 390px in every state, keyboard open, focus containment and return, contrast in both schemes, reduced motion and console output. Two limits: the capture browser cannot emulate operating-system settings, so the dark and reduced-motion captures force those media rules on rather than toggling the setting; and no screen reader was run.
+
+### Still open
+
+- Review runs do not record their effort, so the detail cannot show whether a review ran at the configured floor.
+- A redirect is also stored as a repository lesson, which is more durable than a one-off instruction usually deserves.
+- The detail lists changed files and gives a diff command; it does not render the diff.
+
+## Iteration 1: registry and task detail (0.9.0)
 
 The dashboard serves one trusted owner from their personal hub. Its reader wants to find a blocker, understand which connected agent owns work, inspect that exact task, and request a supported stop. Machines advertise installed clients; that alone is not evidence of a running agent. The audit screenshots in `outputs/audit-2026-11-07/` show a useful task board with incomplete process visibility and unverified dialog keyboard behavior.
 

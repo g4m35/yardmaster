@@ -386,3 +386,100 @@ test('lockfile churn does not make a change "large" for review', async () => {
     rmrf(dir, { recursive: true, force: true });
   }
 });
+
+test('task titles are the first sentence of a request, not a clipped paragraph', async () => {
+  const { taskTitle } = await import('../src/text.ts');
+  assert.equal(taskTitle("Shop issue #148: isolate the math stylesheet from plain chat. Today src/chat/message.tsx imports 'katex/dist/katex.min.css' at module level."),
+    'Shop issue #148: isolate the math stylesheet from plain chat');
+  // Dots inside versions, file names and abbreviations do not end a sentence.
+  assert.equal(taskTitle('Upgrade to v1.2 in package.json and README.md so installs work'), 'Upgrade to v1.2 in package.json and README.md so installs work');
+  assert.equal(taskTitle('\n\n  Fix the login redirect!  Then tidy the tests.\nSecond line'), 'Fix the login redirect');
+  assert.equal(taskTitle('Add CSV export'), 'Add CSV export');
+  assert.equal(taskTitle('Fix login. Then update the docs.'), 'Fix login');
+  // A one-word lead-in is not a sentence.
+  assert.equal(taskTitle('1. Fix the header. Then the footer.'), '1. Fix the header');
+  assert.equal(taskTitle('Dr. Smith cannot sign in'), 'Dr. Smith cannot sign in');
+  assert.equal(taskTitle('x'.repeat(300)).length, 96);
+  assert.equal(taskTitle(''), '');
+});
+
+test('activity text drops the worktree prefix agents add to every command', async () => {
+  const { activityText } = await import('../src/text.ts');
+  const wt = '/home/u/work/ym-managed/shop-1a2b3c/t-0123456789abcdef';
+  assert.equal(activityText(`cd ${wt}; npm run lint`, wt), 'npm run lint');
+  assert.equal(activityText(`cd "${wt}" && git status`, wt), 'git status');
+  assert.equal(activityText(`${wt}/src/chat/message.tsx`, wt), 'src/chat/message.tsx');
+  assert.equal(activityText(`cat ${wt}/a.ts ${wt}/b.ts`, wt), 'cat a.ts b.ts');
+  // Another directory is the agent's own choice and stays visible.
+  assert.equal(activityText('cd /tmp/other; ls', wt), 'cd /tmp/other; ls');
+  assert.equal(activityText('npm test', ''), 'npm test');
+});
+
+test('changed files keep the first path intact when it is an unstaged edit', async () => {
+  const { changedFiles } = await import('../src/git.ts');
+  const repo = tempDir('ym-changed-');
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
+  git('init', '-q', '-b', 'main');
+  write(join(repo, 'src.ts'), 'one\n'); write(join(repo, 'z.ts'), 'one\n');
+  git('add', '.'); git('commit', '-q', '-m', 'base');
+  const base = git('rev-parse', 'HEAD').trim();
+  // Porcelain prints " M src.ts" first; trimming the whole output used to turn it into "rc.ts".
+  write(join(repo, 'src.ts'), 'two\n'); write(join(repo, 'new file.ts'), 'new\n');
+  assert.deepEqual(await changedFiles(repo, base), ['new file.ts', 'src.ts']);
+});
+
+test('board rows carry what a status row needs: phase, times, budget and the approval flag', async () => {
+  const { sandbox } = await import('./helpers.ts');
+  const { Coordinator } = await import('../src/coordinator.ts');
+  const { boardSummary } = await import('../src/api.ts');
+  const box = sandbox({ budget: { dailyUsd: 5, perTaskUsd: 2 }, review: { mode: 'never' } });
+  const db = openDb(join(box.home, 'board-rows.sqlite'));
+  try {
+    const coord = new Coordinator(db), project = await coord.registerProject(box.repo);
+    const [task] = coord.addTasks(project.id, [{ title: 'Row fixture', agent: 'mock', files: ['a/**'] }], 'test', { force: true }).created;
+    const queued = boardSummary(coord, project.id).active.find(row => row.id === task!.id)!;
+    assert.equal(queued.startedAt, null); assert.equal(queued.phase, null); assert.equal(queued.budget, 2);
+    assert.equal(queued.needsApproval, false); assert.equal(typeof queued.createdAt, 'number');
+    const claim = coord.claimNext({ machineId: 'm', agents: ['mock'], repos: { [project.id]: box.repo }, runningByAgent: {} })!;
+    const run = coord.startRun(claim.task, 'm', 'mock', null, '');
+    coord.updateRun(run.id, { phase: 'agent' });
+    const running = boardSummary(coord, project.id).active.find(row => row.id === task!.id)!;
+    assert.equal(running.phase, 'agent'); assert.equal(running.attempt, 1); assert.equal(typeof running.startedAt, 'number');
+    coord.updateTask(task!.id, { status: 'ready', ready_at: Date.now(), attention: 'Waiting for your approval' });
+    const ready = boardSummary(coord, project.id).active.find(row => row.id === task!.id)!;
+    assert.equal(ready.needsApproval, true); assert.equal(typeof ready.readyAt, 'number');
+  } finally { db.close(); }
+});
+
+test('the owner can widen the files a stopped task may change; finished work and bad input are refused', async () => {
+  const { sandbox } = await import('./helpers.ts');
+  const { Coordinator } = await import('../src/coordinator.ts');
+  const { buildMethods } = await import('../src/api.ts');
+  const box = sandbox({ review: { mode: 'never' } });
+  const db = openDb(join(box.home, 'set-scope.sqlite'));
+  try {
+    const coord = new Coordinator(db), project = await coord.registerProject(box.repo);
+    const methods = buildMethods(coord, { machineId: 'hub-fixture' });
+    const [task, finished] = coord.addTasks(project.id, [{ title: 'Scope fixture', agent: 'mock', files: ['src/chat/**'] }, { title: 'Finished fixture', agent: 'mock', files: ['b/**'] }], 'test', { force: true }).created;
+    const before = coord.getTask(task!.id)!.fingerprint;
+    const next = await dispatch(methods, 'task.setScope', { id: task!.id, scope: ['src/chat/**', ' ./docs/ledger.md ', 'docs\\privacy/', 'src/chat/**'], by: 'dashboard' }) as { scope: string[]; scope_inferred: boolean };
+    assert.deepEqual(next.scope, ['src/chat/**', 'docs/ledger.md', 'docs/privacy/**']);
+    assert.equal(next.scope_inferred, false);
+    // A changed request must not be deduplicated against its old identity.
+    assert.notEqual(coord.getTask(task!.id)!.fingerprint, before);
+    assert.match(coord.eventsSince(0, null, 20, task!.id).at(-1)!.message, /dashboard set the files "Scope fixture" may change: src\/chat\/\*\*, docs\/ledger\.md, docs\/privacy\/\*\*/);
+    assert.deepEqual((await dispatch(methods, 'task.setScope', { id: task!.id, scope: [] }) as { scope: string[] }).scope, []);
+    await assert.rejects(dispatch(methods, 'task.setScope', { id: task!.id, scope: ['  '] }), /Invalid input/);
+    await assert.rejects(dispatch(methods, 'task.setScope', { id: task!.id, scope: 'src/**' }), /Invalid input/);
+    await assert.rejects(dispatch(methods, 'task.setScope', { id: 't-missing', scope: [] }), /No task t-missing/);
+    // An attempt in flight keeps reserving the files it started with: its list can grow, not shrink.
+    await dispatch(methods, 'task.setScope', { id: task!.id, scope: ['src/chat/**'] });
+    coord.updateTask(task!.id, { status: 'running' });
+    await assert.rejects(dispatch(methods, 'task.setScope', { id: task!.id, scope: ['docs/**'] }), /is working\. Files can be added to its list now/);
+    assert.deepEqual((await dispatch(methods, 'task.setScope', { id: task!.id, scope: ['src/chat/**', 'docs/**'] }) as { scope: string[] }).scope, ['src/chat/**', 'docs/**']);
+    coord.updateTask(task!.id, { scope: [] });
+    await assert.rejects(dispatch(methods, 'task.setScope', { id: task!.id, scope: ['docs/**'] }), /Files can be added to its list now/);
+    coord.updateTask(finished!.id, { status: 'done' });
+    await assert.rejects(dispatch(methods, 'task.setScope', { id: finished!.id, scope: ['c/**'] }), /is done; its files can no longer change/);
+  } finally { db.close(); }
+});
