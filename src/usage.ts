@@ -208,3 +208,24 @@ export class UsageMeter {
 export function emptyUsage(): UsageSnapshot {
   return { costUsd: 0, actualUsd: 0, estimatedUsd: 0, provenance: 'unknown', tokensIn: 0, tokensOut: 0, cacheReadTokens: null, cacheWriteTokens: null, events: 0, sessionTotalUsd: 0, limitations: [] };
 }
+
+/** Serialize reports and remember only acknowledged values, so an outage never suppresses a retry. */
+export class UsageReporter {
+  private acknowledged: string | null = null;
+  private sequence = 0;
+  private pending: Promise<void> = Promise.resolve();
+  private readonly send: (sequence: number, usage: UsageSnapshot) => Promise<unknown>;
+
+  constructor(send: (sequence: number, usage: UsageSnapshot) => Promise<unknown>) { this.send = send; }
+
+  record(usage: UsageSnapshot): Promise<void> {
+    const key = JSON.stringify([usage.costUsd, usage.tokensIn, usage.tokensOut, usage.provenance, usage.cacheReadTokens, usage.cacheWriteTokens]);
+    const report = this.pending.then(async () => {
+      if (key === this.acknowledged) return;
+      await this.send(++this.sequence, usage);
+      this.acknowledged = key;
+    });
+    this.pending = report.catch(() => undefined);
+    return report;
+  }
+}
