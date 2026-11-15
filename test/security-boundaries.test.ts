@@ -296,7 +296,12 @@ test('base-bundle requests are bounded per hub and per worker until finally rele
     release();
     for (const response of await Promise.all(pending)) { assert.equal(response.status, 200); await response.arrayBuffer(); }
     const retry = await fetch(`${url}/worker-1`); assert.equal(retry.status, 200); await retry.arrayBuffer();
-  } finally { release(); await Promise.allSettled(pending); await f.done(); server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())); f.hub.coord.db.close(); }
+  } finally {
+    release();
+    for (const response of await Promise.allSettled(pending)) if (response.status === 'fulfilled') await response.value.body?.cancel().catch(() => undefined);
+    server.closeAllConnections(); await f.done();
+    await new Promise<void>(r => server.close(() => r())); f.hub.coord.db.close();
+  }
 });
 
 
