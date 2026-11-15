@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { availableParallelism } from 'node:os';
 import * as z from 'zod/v4';
 import { expandHome, paths, yardHome } from './paths.ts';
+import { ServicesConfigSchema } from './provider-contract.ts';
 
 export const TIERS = ['cheap', 'standard', 'strong'] as const;
 export type Tier = (typeof TIERS)[number];
@@ -126,6 +127,7 @@ export const PolicySchema = z.object({
 export type Policy = z.infer<typeof PolicySchema>;
 
 export const ConfigSchema = z.object({
+  services: ServicesConfigSchema,
   preset: z.enum(['frugal', 'balanced', 'fast', 'careful']).default('balanced'),
   baseBranch: z.string().optional(),
   integration: z

@@ -1,4 +1,5 @@
 import { parseHandoff, type NativeHandoff } from './handoff.ts';
+import { serviceHold } from './service-holds.ts';
 import { tx, type Db } from './db.ts';
 import { loadConfig, routingFor, type Config, type Tier } from './config.ts';
 import { findCycle } from './graph.ts';
@@ -264,7 +265,7 @@ export class Coordinator {
         const scope = explicit.length ? explicit : inferScope(`${input.title}\n${prompt}`);
         const inferred = inferTier(`${input.title} ${prompt}`, cfg.defaultTier ?? 'standard');
         // Cheap first for small tasks with checks; anything flagged hard, or set by hand, keeps its tier.
-        const checks = cfg.verify.length > 0 || (input.verify?.length ?? 0) > 0;
+        const checks = cfg.verify.length > 0 || cfg.services.verify.length > 0 || (input.verify?.length ?? 0) > 0;
         const guessed: Tier = input.tier ?? (cfg.cheapFirst && inferred === 'standard' && isSmallCheckedTask(scope, prompt, checks) ? 'cheap' : inferred);
         const { effects, matched } = applyPolicies(cfg, { title: input.title, prompt, scope, tier: guessed, createdBy });
         const tier: Tier = input.tier ?? effects.tier ?? guessed;
@@ -599,6 +600,7 @@ export class Coordinator {
         return next;
       }
       case 'retry': {
+        if (serviceHold(this.db, `task:${id}`)) throw new Error('Inspect and resolve the pending provider request with ym providers pending/resolve before retrying.');
         if (!['needs_human', 'failed', 'canceled', 'queued'].includes(t.status)) throw new Error(`${id} is ${t.status}; only stopped tasks can be retried.`);
         return tx(this.db, () => {
         const native = parseHandoff(t.native_handoff);
@@ -776,6 +778,8 @@ export class Coordinator {
 
   /** Why a queued task is not running yet, in plain language. Null means it can start now. */
   blocker(task: Task, now = Date.now(), reservationHolder?: string): string | null {
+    const service = serviceHold(this.db, `task:${task.id}`);
+    if (service) return `Provider request ${service.requestId} needs inspection. Use ym providers pending/resolve before retrying.`;
     const hold = this.processHold(task.id);
     if (hold === 'process') return 'An earlier owned process has not been confirmed stopped. Worktree is held for recovery.';
     if (hold === 'utility') return 'An earlier Git or copy utility has not confirmed exit. Work is held for recovery.';
@@ -838,6 +842,8 @@ export class Coordinator {
       queued.sort((a, b) => b.priority - a.priority || cp(b) - cp(a) || a.created_at - b.created_at);
       for (const task of queued) {
         if (!req.repos[task.project_id]) continue;
+        const service = serviceHold(this.db, `task:${task.id}`);
+        if (service) { this.updateTask(task.id, { status: 'needs_human', attention: `Provider request ${service.requestId} may still be running remotely. Inspect it with ym providers pending/resolve before retrying.` }); continue; }
         const native = parseHandoff(task.native_handoff);
         if (native && !native.sha) continue;
         if (native && native.machineId !== req.machineId) continue;

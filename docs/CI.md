@@ -1,5 +1,43 @@
 # Spending less on CI
 
+## Temporary hosted verification
+
+If GitHub Actions cannot start, an independently hosted Linux VM can run
+`bash scripts/hosted-verification.sh <expected-head-SHA> <baseline-SHA>` from
+a clean checkout with both commits available and Node 24 installed. This runs
+typecheck, build, the Node 24 and Node 22 suites, package/binary smoke checks
+and the interleaved benchmark. Receipts go to `/tmp/yardmaster-verification`;
+copy them out before stopping the VM. The script refuses macOS and checks the
+source identity before and after the run. It does not provision a VM itself.
+
+Use a task-owned disposable environment with a hard lifetime limit. No personal
+environment files or credentials are needed for the public source checkout.
+Pay-as-you-go usage requires an authorized budget. A Linux pass does not claim
+macOS matrix coverage and must not be relabeled as a GitHub Actions pass or used
+to bypass required checks. Existing workflow/protection settings remain intact.
+
+The script also creates `<receipt-dir>.tar.gz` and prints its byte count and
+SHA-256. Download that archive **before** shutdown. Connector previews can
+truncate base64 strings, and CLI display layers can corrupt raw binary. Use the
+text-only exporter with an already authenticated Vercel CLI:
+
+```sh
+node scripts/export-hosted-verification.mjs SESSION_ID TEAM_ID \
+  /tmp/yardmaster-verification.tar.gz REMOTE_SHA256 ./receipts.tar.gz
+```
+
+The collector rejects truncation, incorrect length and checksum mismatches
+without replacing the archive. Stop/delete the task-owned VM only after the
+collector succeeds and you have inspected its result receipt. A stopped,
+nonpersistent Sandbox returns HTTP 410 for files and logs; it cannot recover a
+download that was never saved. Remove the task-owned temporary response files
+after collection. This does not authorize creating a paid VM or restarting one.
+The exporter runs one bounded read-only Node command in the existing VM, reads
+ASCII JSON from its command log and validates the remote byte count and digest.
+It starts no VM and stops none. `collect-hosted-verification.mjs` also accepts
+a full base64 API response or a binary download from a transport that preserves
+its bytes; every path requires the same remote digest.
+
 More agents means more pushes, and every push to a pull request runs your whole GitHub Actions suite. On private
 repositories that drains the monthly allowance fast: GitHub Free includes $12 of Actions usage (2,000 Linux
 minutes), Pro and Team $18 (3,000). One Claude Code session used up a 2,000-minute allowance in under three hours
