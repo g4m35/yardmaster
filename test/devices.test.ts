@@ -380,3 +380,14 @@ test('ym verify gates on device evidence for HEAD and records it for ym devices 
   const gate = await verifyArtifact(s.repo, [], 1, undefined, undefined, { services: forged });
   assert.equal(gate.ok, false); assert.equal(gate.serviceStatus, 'unknown'); assert.match(gate.output, /does not establish a pass/);
 });
+
+test('declared credentials are redacted from saved device logs and evidence', async () => {
+  const s = appRepo(), m = fakeMachine(), secret = 'device-lab-credential-value';
+  const run = await runAppleSimulator(options({ requiredEnv: ['LAB_TOKEN'], build: { command: [process.execPath, '-e', `${BUILD}console.log('token='+process.env.LAB_TOKEN)`], app: 'build/Smoke.app' },
+    tests: [{ name: 'smoke', runner: 'command', command: [process.execPath, '-e', `console.log(process.env.LAB_TOKEN);process.exit(1)`] }] }),
+    context(s, m, { env: { PATH: m.PATH, HOME: s.home, LAB_TOKEN: secret } }));
+  assert.equal(run.result.status, 'failed');
+  for (const file of run.result.data.evidence.files.filter(f => f.kind === 'log')) assert(!readFileSync(file.path, 'utf8').includes(secret), file.path);
+  assert(!readFileSync(join(run.result.artifacts[0]!), 'utf8').includes(secret));
+  assert.match(readFileSync(run.result.data.evidence.checks.find(c => c.name === 'build')!.log!, 'utf8'), /token=\[redacted\]/);
+});

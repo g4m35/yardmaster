@@ -1021,7 +1021,7 @@ async function cmdDevices(a: Args) {
   const command = a._.slice(3);
   if (!LEASE_POOLS.includes(pool) || !command.length) die('ym devices lease <build|simulator|physical> [--wait-minutes N] -- <command> [args...]');
   const { memoryHold, sampleMemory } = await import('./machine-pressure.ts');
-  const { runOwnedProcess } = await import('./proc.ts');
+  const { cleanEnv, runOwnedProcess } = await import('./proc.ts');
   const stop = new AbortController();
   const abort = () => stop.abort('interrupted');
   process.once('SIGINT', abort); process.once('SIGTERM', abort);
@@ -1033,7 +1033,7 @@ async function cmdDevices(a: Args) {
       onWait: ({ reason }) => process.stderr.write(dim(`${reason}\n`)) });
     if (!outcome.lease) die(`No ${pool} slot: ${outcome.reason}`);
     try {
-      const r = await runOwnedProcess(command[0]!, command.slice(1), { cwd, env: { ...process.env, YARDMASTER_LEASE_ID: outcome.lease.id }, signal: AbortSignal.any([stop.signal, outcome.lease.lost]),
+      const r = await runOwnedProcess(command[0]!, command.slice(1), { cwd, env: cleanEnv({ YARDMASTER_LEASE_ID: outcome.lease.id }), signal: AbortSignal.any([stop.signal, outcome.lease.lost]),
         onStdout: chunk => process.stdout.write(chunk), onStderr: chunk => process.stderr.write(chunk) });
       process.exitCode = r.end === 'exit' && r.code !== null ? r.code : 1;
       if (!r.reaped) process.stderr.write(yellow('! The command left processes that could not be confirmed stopped.\n'));

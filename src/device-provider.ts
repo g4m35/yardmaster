@@ -98,9 +98,12 @@ export async function runAppleSimulator(options: AppleSimulatorOptions, ctx: Dev
   let failedBuild = false;
   let problem: string | null = null;
   const track = (r: ExecResult) => { if (!r.reaped) reaped = false; return r; };
+  // Declared credentials never reach saved logs or evidence text; tests and builds can echo their environment.
+  const secrets = options.requiredEnv.map(name => ctx.env[name]).filter((v): v is string => !!v).sort((a, b) => b.length - a.length);
+  const redact = (text: string) => secrets.reduce((out, secret) => out.split(secret).join('[redacted]'), text);
   const saveLog = (name: string, text: string) => {
     const file = join(ctx.evidenceDir, name);
-    writeFileSync(file, text, { mode: 0o600 });
+    writeFileSync(file, redact(text), { mode: 0o600 });
     files.push({ path: file, sha256: fileSha256(file), kind: 'log' });
     return file;
   };
@@ -192,11 +195,12 @@ export async function runAppleSimulator(options: AppleSimulatorOptions, ctx: Dev
   const summary = canceled ? 'Device verification was canceled. Owned simulators were cleaned up; inspect the receipt before retrying.'
     : failedBuild ? 'The app build failed; no device test ran.'
     : !reaped ? 'A device-test process survived cleanup. Inspect owned processes before retrying.'
-    : problem ? problem
+    : problem ? redact(problem)
     : simulator === 'failed' ? `Simulator checks failed: ${ran.filter(c => c.status === 'failed').map(c => c.name).join(', ')}.`
     : simulator !== 'passed' ? `Simulator checks did not complete: ${ran.filter(c => c.status !== 'passed').map(c => `${c.name} ${c.status}`).join(', ') || 'none configured'}.`
     : requirement === 'physical' ? 'Simulator passed; physical device untested. A simulator pass does not satisfy this physical-device requirement.'
     : 'Simulator passed. Physical device untested.';
+  for (const check of checks) check.detail = redact(check.detail);
   const evidence: DeviceEvidence = { kind: 'yardmaster.device-evidence', version: 1, requestId: ctx.requestId,
     projectId: ctx.context.projectId ?? null, taskId: ctx.context.taskId ?? null, commit: sha, requirement,
     status: { code: ctx.context.codeChecks === 'passed' ? 'passed' : 'not-run', simulator, physical, overall },
