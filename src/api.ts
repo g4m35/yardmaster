@@ -74,7 +74,6 @@ export function boardSummary(coord: Coordinator, projectId?: string | null, supe
 }
 
 function boardSummaryInPass(coord: Coordinator, projectId?: string | null, supervisor?: Supervisor) {
-  // Open work, plus the latest failures for "needs you": the board costs the same with any amount of history.
   const tasks = [...coord.openTasks(projectId ?? null), ...coord.recentlyFinished(projectId, 'failed', 20)];
   const totals = coord.taskTotals(projectId ?? null);
   const counts = totals.counts;

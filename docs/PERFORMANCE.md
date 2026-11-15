@@ -47,7 +47,7 @@ On macOS arm64, Node 24.22.2, during concurrent test/agent activity on 2026-11-0
 
 End-of-run RSS was 245 MiB. These are in-process API dispatch measurements, excluding HTTP, browser rendering, provider latency and cold startup. This separate API stress run has no paired baseline; the scheduler comparison above uses a different fixture. Neither establishes a cross-machine performance guarantee. The raw measurements are not in this repository; rerun on the target machine for a meaningful comparison.
 
-Registry history and passive machine/session inventories are bounded; live runs remain visible. Board output is bounded, but its counts and lifetime totals still aggregate retained task/run history, and budget displays aggregate retained ledger rows. A bounded response does not imply constant work as history grows. SSE refreshes coalesce and serialize. Cleanup removes up to 1,000 expired project events per pass, using `cleanup.eventRetentionDays` (30 by default, `null` to retain indefinitely). Unfinished and process-held task evidence survives retention and stale cleanup plans. Accepted artifact refs are pruned only after terminal integration, ancestry validation and compare-and-delete; unmerged artifacts remain reachable.
+Registry history and passive machine/session inventories are bounded; live runs remain visible. The board includes all open tasks plus limited terminal-task samples. Its counts and lifetime totals still aggregate retained task/run history, and budget displays aggregate retained ledger rows. Limited history samples do not imply constant work as retained history grows. SSE refreshes coalesce and serialize. Cleanup removes up to 1,000 expired project events per pass, using `cleanup.eventRetentionDays` (30 by default, `null` to retain indefinitely). Unfinished and process-held task evidence survives retention and stale cleanup plans. Accepted artifact refs are pruned only after terminal integration, ancestry validation and compare-and-delete; unmerged artifacts remain reachable.
 
 ## Historical measurements
 
@@ -101,8 +101,9 @@ gets them like task worktrees, and refreshes them when a merge changes a lockfil
 
 **Dependency reuse is lockfile-aware.** A new worktree prefers dependencies from a checkout whose lockfiles match
 it exactly: your checkout, or another Yardmaster worktree (often the one that just installed a new package). When
-none match, it can fall back to the original checkout and records that the dependencies may be stale. Setup commands
-remain necessary when reuse is skipped or the install does not match.
+none match, it can reuse dependencies from the first usable checkout anyway. With root lockfiles present,
+the reuse result is marked stale and a managed run logs a warning when it brings those dependencies over.
+Setup commands remain necessary when reuse is skipped or the install does not match.
 
 `ym report` shows the result for your own work: spend per merged task, money spent on work that never merged,
 how many retries resumed their session and what they cost compared with fresh ones, and median time per phase.
@@ -141,10 +142,13 @@ The hub reacts to every state change immediately (debounced 15 ms) instead of wa
 ## Work agents no longer redo
 
 - **Warm start.** New worktrees get installed, git-ignored dependency folders (`node_modules`, `target`, `vendor`,
-  ...) preferably from a checkout with matching lockfiles, with a potentially stale fallback when none match. Python virtualenvs are never copied, since they hard-code their
+  ...) preferably from a checkout with matching lockfiles, with a potentially stale fallback when none match.
+  Python virtualenvs are never copied, since they hard-code their
   location and a copy would still install into your real environment. Add a `worktree.setup` command such as
   `uv sync` instead. On APFS a whole folder is cloned with one `clonefile(2)` call (through macOS's built-in
-  JavaScript for Automation, so nothing extra is installed); on btrfs and XFS with reflinks. Copy-on-write shares file data initially, but metadata and later writes still consume disk; the originals are never touched. Without copy-on-write, folders under
+  JavaScript for Automation, so nothing extra is installed); on btrfs and XFS with reflinks. Copy-on-write shares
+  file data initially, but metadata and later writes still consume disk; the originals are never touched.
+  Without copy-on-write, folders under
   `worktree.maxPlainCopyMb` are copied and larger ones are skipped. Current quota accounting excludes cloned dependency paths, so reported quota usage is not physical disk usage.
 - **Quick checks.** `verifyQuick` runs change-scoped checks per task (`{files}` is replaced with the changed
   files), and the full `verify` suite runs at merge time, batched by merge trains. With `integration.mode: "none"`
