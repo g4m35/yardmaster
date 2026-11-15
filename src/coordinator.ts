@@ -814,7 +814,7 @@ export class Coordinator {
         if (hits.length) {
           const session = this.db.prepare('SELECT name FROM sessions WHERE id = ? AND project_id = ?').get(lock.holder, task.project_id) as { name: string } | undefined;
           const label = session ? `${session.name} (${lock.holder})` : lock.holder;
-          return `Waiting: ${label} has reserved ${lock.pattern}${lock.reason ? ` (${clip(lock.reason, 40)})` : ''}`;
+          return `Waiting: ${label} has reserved ${fromLiteralPattern(lock.pattern)}${lock.reason ? ` (${clip(lock.reason, 40)})` : ''}`;
         }
       }
     }
@@ -1251,7 +1251,7 @@ export class Coordinator {
       const conflicts: { pattern: string; holder: string; reason: string | null }[] = [];
       for (const lock of this.activeLocks(projectId)) {
         if (lock.holder === holder) continue;
-        if (scopesOverlap(norm, [lock.pattern]).length) conflicts.push({ pattern: lock.pattern, holder: lock.holder, reason: lock.reason });
+        if (scopesOverlap(norm, [lock.pattern]).length) conflicts.push({ pattern: fromLiteralPattern(lock.pattern), holder: lock.holder, reason: lock.reason });
       }
       for (const { task, scope } of this.activeScopes(projectId)) {
         if (task.id === holder || task.assignee === holder) continue;
@@ -1280,11 +1280,12 @@ export class Coordinator {
     return Number(this.db.prepare('DELETE FROM locks WHERE project_id = ? AND holder = ?').run(projectId, holder).changes);
   }
 
-  whoHas(projectId: string, filePaths: string[]): { path: string; holder: string; detail: string }[] {
+  /** `literal`: the inputs are real edited file names (hooks), not patterns or folders (yard_who, lock.check). */
+  whoHas(projectId: string, filePaths: string[], opts: { literal?: boolean } = {}): { path: string; holder: string; detail: string }[] {
     const out: { path: string; holder: string; detail: string }[] = [];
-    for (const path of filePaths.map(p => literalPattern(normalizePattern(p)))) {
+    for (const path of filePaths.map(p => opts.literal ? literalPattern(normalizePattern(p)) : normalizePattern(p))) {
       for (const lock of this.activeLocks(projectId)) {
-        if (scopesOverlap([path], [lock.pattern]).length) out.push({ path: fromLiteralPattern(path), holder: lock.holder, detail: `reserved ${lock.pattern}${lock.reason ? `: ${lock.reason}` : ''}` });
+        if (scopesOverlap([path], [lock.pattern]).length) out.push({ path: fromLiteralPattern(path), holder: lock.holder, detail: `reserved ${fromLiteralPattern(lock.pattern)}${lock.reason ? `: ${lock.reason}` : ''}` });
       }
       for (const { task, scope } of this.activeScopes(projectId)) {
         if (scopesOverlap([path], scope).length) out.push({ path: fromLiteralPattern(path), holder: task.assignee?.startsWith('session:') ? task.assignee : task.id, detail: `task "${clip(task.title, 50)}" (${task.status})` });

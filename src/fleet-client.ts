@@ -1,3 +1,4 @@
+import { networkInterfaces } from 'node:os';
 import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -23,6 +24,16 @@ export function normalizeHubUrl(input: string, opts: PrivateTransport = {}): str
     throw new Error('Non-loopback HTTP requires --private-network to acknowledge an existing encrypted private overlay. Otherwise use HTTPS.');
   }
   return url.href.replace(/\/+$/, '');
+}
+
+/**
+ * Loopback, or an address one of this machine's own interfaces holds right now (an overlay IP the local hub is bound
+ * to). A published hub address on any other host is not this owner's hub, whatever hub.info says.
+ */
+export function isThisMachineAddress(input: string): boolean {
+  if (isLoopbackHub(input)) return true;
+  const host = new URL(input).hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  return Object.values(networkInterfaces()).some(list => (list ?? []).some(a => a.address.toLowerCase() === host));
 }
 
 export function isLoopbackHub(input: string): boolean {

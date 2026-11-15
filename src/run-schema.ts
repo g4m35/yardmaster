@@ -1,7 +1,7 @@
 import * as z from 'zod/v4';
 import { validatePattern } from './scope.ts';
 
-export const ScopePattern = z.string().min(1).max(1024).refine(validatePattern, 'Too many scope wildcards (maximum 64).');
+export const ScopePattern = z.string().min(1).max(1024).refine(p => !p.includes('\0'), 'Patterns must not contain NUL.').refine(validatePattern, 'Too many scope wildcards (maximum 64).');
 // Real file names may contain glob characters ({{cookiecutter.slug}}/app.py); they stay literal and are matched with literalPattern.
 export const LiteralPath = z.string().min(1).max(1024).refine(p => !p.includes('\0'), 'Reported paths must not contain NUL.');
 export const TouchedSchema = z.array(LiteralPath).max(2000);

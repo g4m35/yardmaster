@@ -1,4 +1,4 @@
-import { normalizeHubUrl, type PrivateTransport } from './fleet-client.ts';
+import { isThisMachineAddress, normalizeHubUrl, type PrivateTransport } from './fleet-client.ts';
 import type { Client } from './api.ts';
 
 /**
@@ -25,7 +25,8 @@ export function rpcDeadline(name: string, params: unknown, override?: number): n
  * exists for URLs a user or environment supplies, not for the one the local hub published.
  */
 export function remoteClient(baseUrl: string, token: string, opts: { timeoutMs?: number; ownerLocal?: boolean } & PrivateTransport = {}): Client {
-  const url = normalizeHubUrl(baseUrl, opts.ownerLocal ? { privateNetwork: true } : opts);
+  // Owner-local only while the address is still one of this machine's; otherwise the normal remote gate applies.
+  const url = normalizeHubUrl(baseUrl, opts.ownerLocal && isThisMachineAddress(baseUrl) ? { privateNetwork: true } : opts);
   return new Proxy({} as Client, {
     get: (_t, name: string) =>
       name === 'then'

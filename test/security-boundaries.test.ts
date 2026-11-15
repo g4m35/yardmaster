@@ -8,6 +8,7 @@ import { createServer, get, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { networkInterfaces } from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { hookClient } from '../src/hookclient.ts';
 import { remoteClient } from '../src/rpc.ts';
@@ -94,24 +95,30 @@ test('hook credentials are exact-URL scoped and authenticated RPCs refuse redire
   } finally { server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())); }
 });
 
-test('the hub this machine published on an overlay address stays owner-local for CLI clients and hooks', async () => {
+test('the hub this machine published on its own overlay address stays owner-local; stale or foreign hub.info does not', async () => {
   const box = sandbox(); chmodSync(box.home, 0o700);
   writeFileSync(join(box.home, 'token'), 'fixture-owner');
-  // `ym hub run --host 100.64.0.5` publishes its own overlay address; local commands and hooks must keep working.
-  writeFileSync(paths.hubInfo(), JSON.stringify({ url: 'http://100.64.0.5:7777', pid: process.pid, startedAt: Date.now() }));
+  // An address this machine holds right now, like the overlay IP of `ym hub run --host 100.x`.
+  const own = Object.values(networkInterfaces()).flat().find(a => a && a.family === 'IPv4' && !a.internal)?.address ?? '127.0.0.1';
+  const publish = (url: string, pid: number) => writeFileSync(paths.hubInfo(), JSON.stringify({ url, pid, startedAt: Date.now() }));
   const restore = envFixture({ YARDMASTER_HUB: undefined, YARDMASTER_TOKEN: undefined, YARDMASTER_PROJECT_ID: undefined, YARDMASTER_PRIVATE_NETWORK: undefined });
   const original = globalThis.fetch;
   const requests: { url: string; init?: RequestInit }[] = [];
   globalThis.fetch = async (input, init) => { requests.push({ url: String(input), init }); return Response.json({ ok: true, result: {} }); };
   try {
+    publish(`http://${own}:7777`, process.pid);
     await hookClient()!['board.status']({});
-    assert.equal(requests[0]!.url, 'http://100.64.0.5:7777/api/rpc/board.status');
+    assert.equal(requests[0]!.url, `http://${own}:7777/api/rpc/board.status`);
     assert.equal((requests[0]!.init!.headers as Record<string, string>).authorization, 'Bearer fixture-owner');
-    await remoteClient('http://100.64.0.5:7777', 'fixture-owner', { ownerLocal: true })['board.status']({});
-    assert.equal(requests[1]!.init!.redirect, 'error');
-    // The same address supplied by the environment is a remote endpoint again: no owner token, overlay acknowledgment required.
-    assert.throws(() => remoteClient('http://100.64.0.5:7777', 'x'), /Non-loopback HTTP requires/);
-    process.env.YARDMASTER_HUB = 'http://100.64.0.5:7777'; process.env.YARDMASTER_PRIVATE_NETWORK = '1';
+    // A hub.info left by a crashed hub, or rewritten to a host this machine does not hold, never receives the owner token.
+    publish(`http://${own}:7777`, 2 ** 22 + 12345);
+    assert.equal(hookClient(), null);
+    publish('http://100.64.0.5:7777', process.pid);
+    assert.equal(hookClient(), null);
+    assert.throws(() => remoteClient('http://100.64.0.5:7777', 'fixture-owner', { ownerLocal: true }), /Non-loopback HTTP requires/);
+    assert.equal(requests.length, 1);
+    // The same address supplied by the environment is a remote endpoint: no owner token.
+    process.env.YARDMASTER_HUB = `http://${own}:7777`; process.env.YARDMASTER_PRIVATE_NETWORK = '1';
     assert.throws(() => hookClient(), /Remote hubs require an explicit credential/);
   } finally { globalThis.fetch = original; restore(); }
 });
@@ -119,7 +126,8 @@ test('the hub this machine published on an overlay address stays owner-local for
 test('agents keep cloud-provider sign-in, and region, profile and user-only URLs are not treated as secrets', () => {
   const restore = envFixture({ CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_USE_VERTEX: undefined, AWS_PROFILE: 'dev', AWS_REGION: 'us-east-1',
     AWS_BEARER_TOKEN_BEDROCK: 'bedrock-fixture', AWS_SECRET_ACCESS_KEY: 'aws-fixture', AZURE_OPENAI_API_KEY: 'azure-fixture',
-    GOOGLE_APPLICATION_CREDENTIALS: '/fixture/adc.json', REPO_URL: 'ssh://git@github.com/acme/app.git', DB_URL: 'postgres://app:hunter2@db/app' });
+    GOOGLE_APPLICATION_CREDENTIALS: '/fixture/adc.json', REPO_URL: 'ssh://git@github.com/acme/app.git', DB_URL: 'postgres://app:hunter2@db/app',
+    MIRROR_URL: 'https://deploy@git.example/acme/app.git', ORIGIN_URL: 'https://ghp_0123456789abcdefghijABCDEFGHIJ012345@github.com/acme/app.git' });
   try {
     const claude = cleanEnv({}, { agent: 'claude' });
     // Bedrock is switched on, so AWS credentials are Claude Code's own sign-in.
@@ -132,6 +140,8 @@ test('agents keep cloud-provider sign-in, and region, profile and user-only URLs
     assert.equal(check.AWS_PROFILE, 'dev'); assert.equal(check.AWS_REGION, 'us-east-1');
     assert.equal(check.REPO_URL, 'ssh://git@github.com/acme/app.git');
     assert.equal(check.DB_URL, undefined); assert.equal(check.AWS_SECRET_ACCESS_KEY, undefined);
+    // A token written as the URL user is a secret; a short account name is not.
+    assert.equal(check.ORIGIN_URL, undefined); assert.equal(check.MIRROR_URL, 'https://deploy@git.example/acme/app.git');
     process.env.CLAUDE_CODE_USE_BEDROCK = ''; process.env.CLAUDE_CODE_USE_VERTEX = '1';
     const vertex = cleanEnv({}, { agent: 'claude' });
     assert.equal(vertex.GOOGLE_APPLICATION_CREDENTIALS, '/fixture/adc.json'); assert.equal(vertex.AWS_SECRET_ACCESS_KEY, undefined);
@@ -218,9 +228,18 @@ test('worker paths are literal: glob characters in real file names are matched a
     const template = '{{cookiecutter.slug}}/app.py';
     await dispatch(f.methods, 'task.touched', { taskId: f.task.id, runId: f.run.id, owner: f.owner, files: [template, '*literally*.md'] });
     assert.deepEqual(f.coord.getRun(f.run.id)!.touched, [template, '*literally*.md']);
-    const held = await dispatch(f.methods, 'lock.check', { projectId: f.project.id, paths: [template] }) as { holder: string }[];
-    assert.deepEqual(held.map(h => h.holder), [f.task.id]);
-    assert.deepEqual(await dispatch(f.methods, 'lock.check', { projectId: f.project.id, paths: ['docs/app.py'] }), []);
+    const held = await dispatch(f.methods, 'hook.check', { projectId: f.project.id, paths: [template], cwd: f.box.repo, sessionId: 'session:other' }) as { holder: string } | null;
+    assert.equal(held?.holder, f.task.id);
+    assert.equal(await dispatch(f.methods, 'hook.check', { projectId: f.project.id, paths: ['docs/app.py'], cwd: f.box.repo, sessionId: 'session:other' }), null);
+    // yard_who / lock.check ask about folders and patterns, so a folder that contains someone's file is not free.
+    await dispatch(f.methods, 'lock.claim', { projectId: f.project.id, holder: 'session:a', patterns: ['lib/auth/x.ts'] });
+    const folder = await dispatch(f.methods, 'lock.check', { projectId: f.project.id, paths: ['lib/'] }) as { holder: string }[];
+    assert.deepEqual(folder.map(h => h.holder), ['session:a']);
+    // A file edited in a session that is literally named lib/*.ts reserves that one file, not every .ts in lib.
+    await dispatch(f.methods, 'hook.reserve', { projectId: f.project.id, sessionName: 'b', cwd: f.box.repo, paths: ['lib/*.ts'] });
+    assert.deepEqual((await dispatch(f.methods, 'lock.check', { projectId: f.project.id, paths: ['lib/other.ts'] }) as unknown[]).length, 0);
+    const literal = await dispatch(f.methods, 'hook.check', { projectId: f.project.id, paths: ['lib/*.ts'], cwd: f.box.repo, sessionId: 'session:c' }) as { detail: string } | null;
+    assert.match(literal!.detail, /reserved lib\/\*\.ts/);
   } finally { f.coord.db.close(); }
 });
 

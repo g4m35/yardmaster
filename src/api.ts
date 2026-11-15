@@ -16,7 +16,7 @@ import { addLesson, creditLessons, lessonFromFix, lessonsFor, listLessons, markU
 import { coupling, filesIn } from './imports.ts';
 import { PairingStore } from './pairing.ts';
 import { buildRegistry } from './registry.ts';
-import { normalizePattern } from './scope.ts';
+import { literalPattern, normalizePattern } from './scope.ts';
 import { tx } from './transaction.ts';
 import { WORKER_ACTIVE_STATUSES, WORKER_FINALIZE_STATUSES } from './worker-policy.ts';
 import { recordUtility, runUtilityKey, utilitiesStopped, utilities, taskHasPendingUtilities } from './utility-records.ts';
@@ -387,7 +387,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
 
     // Hook operations stay small; canonical session registration is a separate identity step.
     'hook.check': method(z.object({ projectId: Id, paths: z.array(z.string()).min(1).max(50), cwd: z.string(), sessionId: Id }), (p) => {
-      const holders = coord.whoHas(p.projectId, p.paths);
+      const holders = coord.whoHas(p.projectId, p.paths, { literal: true });
       if (!holders.length) return null;
       // A folder is shared workspace, not proof that two native clients are the same session.
       const registered = coord.db.prepare('SELECT id FROM sessions WHERE id = ? AND project_id = ?').get(p.sessionId, p.projectId);
@@ -395,7 +395,8 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
     }),
     'hook.reserve': method(z.object({ projectId: Id, sessionName: Id, cwd: z.string(), paths: z.array(z.string()).min(1).max(50), machineId: z.string().nullish() }), (p) => {
       const sessionId = coord.registerSession(p.sessionName, 'hooked-agent', p.projectId, p.cwd, p.machineId ?? null);
-      return coord.claimLocks(p.projectId, sessionId, p.paths, 'edited in an interactive session', 20);
+      // Edited files are names, not patterns: a file literally called src/*.ts must not reserve every .ts file.
+      return coord.claimLocks(p.projectId, sessionId, p.paths.map(literalPattern), 'edited in an interactive session', 20);
     }),
     'board.status': method(z.object({ projectId: z.string().nullish() }), (p) => boardSummary(coord, p.projectId, hooks.supervisor)),
     'board.text': method(z.object({ projectId: z.string().nullish() }), (p) => boardText(coord, p.projectId, hooks.supervisor)),
@@ -423,7 +424,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       (p) => coord.claimLocks(p.projectId, p.holder, p.patterns, p.reason ?? null, p.ttlMinutes),
     ),
     'lock.release': method(z.object({ projectId: Id, holder: Id, patterns: z.array(ScopePattern).max(200).optional() }), (p) => coord.releaseLocks(p.projectId, p.holder, p.patterns)),
-    'lock.check': method(z.object({ projectId: Id, paths: z.array(LiteralPath).min(1).max(200) }), (p) => coord.whoHas(p.projectId, p.paths)),
+    'lock.check': method(z.object({ projectId: Id, paths: z.array(ScopePattern).min(1).max(200) }), (p) => coord.whoHas(p.projectId, p.paths)),
 
     'session.register': method(z.object({ name: Id, agent: z.string().nullish(), projectId: z.string().nullish(), cwd: z.string().nullish(), machineId: z.string().nullish() }), (p) =>
       coord.registerSession(p.name, p.agent ?? null, p.projectId ?? null, p.cwd ?? null, p.machineId ?? null),

@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Client } from './api.ts';
 import { remoteClient } from './rpc.ts';
-import { isLoopbackHub, loadWorkerCredential, normalizeHubUrl, type PrivateTransport } from './fleet-client.ts';
+import { isLoopbackHub, isThisMachineAddress, loadWorkerCredential, normalizeHubUrl, type PrivateTransport } from './fleet-client.ts';
 import { machineId, paths, yardHome } from './paths.ts';
 
 /** Only an explicitly shared name links a native hook and MCP connection; a common folder proves no identity. */
@@ -20,15 +20,22 @@ export function hubCredential(input: string, explicit?: string, opts: PrivateTra
   return { hub, token: existsSync(tokenFile) ? readFileSync(tokenFile, 'utf8').trim() : '' };
 }
 
+function alive(pid: number | undefined): boolean {
+  if (!pid) return false;
+  try { process.kill(pid, 0); return true; } catch (err) { return (err as NodeJS.ErrnoException).code === 'EPERM'; }
+}
+
 export function hookClient(): Client | null {
   const remote = process.env.YARDMASTER_HUB;
   if (!remote && !existsSync(paths.hubInfo())) return null;
   if (!remote) {
-    // The hub on this machine published its own address; its token is the owner's, whatever address it is bound to.
-    const local = (JSON.parse(readFileSync(paths.hubInfo(), 'utf8')) as { url: string }).url;
+    // The owner token goes only to a hub that is still running here and listening on one of this machine's addresses.
+    // A stale or rewritten hub.info pointing anywhere else is treated like any other remote URL.
+    const info = JSON.parse(readFileSync(paths.hubInfo(), 'utf8')) as { url: string; pid?: number };
+    if (!alive(info.pid) || !isThisMachineAddress(info.url)) return null;
     const tokenFile = join(yardHome(), 'token');
     const token = process.env.YARDMASTER_TOKEN || (existsSync(tokenFile) ? readFileSync(tokenFile, 'utf8').trim() : '');
-    return token ? remoteClient(local, token, { ownerLocal: true, timeoutMs: 1500 }) : null;
+    return token ? remoteClient(info.url, token, { ownerLocal: true, timeoutMs: 1500 }) : null;
   }
   const opts = { privateNetwork: process.env.YARDMASTER_PRIVATE_NETWORK === '1', projectId: process.env.YARDMASTER_PROJECT_ID,
     machineId: process.env.YARDMASTER_PROJECT_ID ? machineId() : undefined };

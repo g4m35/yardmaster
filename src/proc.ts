@@ -40,9 +40,22 @@ function cloudAuth(agent: string, name: string, env: NodeJS.ProcessEnv): boolean
 
 function secretEnv(name: string, value: string): boolean {
   if (NOT_SECRET.has(name)) return false;
-  // A URL only carries a secret when it has a password (user:pass@host); ssh://git@host names a user, not a secret.
   return /(?:^|_)(?:TOKEN|SECRET|KEY)(?:_|$)|PASSWORD|CREDENTIAL|^(?:AWS|AZURE)_|^(?:GH|GITHUB|NPM)_TOKEN$/i.test(name) ||
-    /[a-z][a-z0-9+.-]*:\/\/[^/\s@:]*:[^/\s@]*@/i.test(value);
+    secretUrl(value);
+}
+
+/**
+ * A URL carries a secret when it has a password (user:pass@host), or when the "user" is really a token
+ * (https://ghp_...@github.com). A short plain user name (git@, deploy@) or an ssh URL names an account, not a secret.
+ */
+function secretUrl(value: string): boolean {
+  for (const m of value.matchAll(/([a-z][a-z0-9+.-]*):\/\/([^/\s@]*)@/gi)) {
+    const [, scheme, userinfo] = m as unknown as [string, string, string];
+    if (userinfo.includes(':')) return true;
+    if (/^(?:ssh|git\+ssh|ssh\+git)$/i.test(scheme)) continue;
+    if (!/^[a-z][a-z0-9_-]{0,31}$/.test(userinfo) || /^(?:gh[pousr]|github_pat|glpat|xox[a-z])[_-]/i.test(userinfo)) return true;
+  }
+  return false;
 }
 
 export function cleanEnv(extra: NodeJS.ProcessEnv = {}, opts: { agent?: string; pass?: readonly string[] } = {}): NodeJS.ProcessEnv {
