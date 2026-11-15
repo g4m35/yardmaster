@@ -16,6 +16,10 @@ export function freeGb(path: string): number {
   }
 }
 
+let sizeRevision = 0;
+
+export function diskSizeRevision(): number { return sizeRevision; }
+
 const sizeCache = new Map<string, { at: number; bytes: number }>();
 
 /** Disk used by a directory tree. Uses `du` (fast, handles hard links) with a JS fallback; cached for a minute. */
@@ -27,16 +31,17 @@ export async function dirBytes(path: string, maxAgeMs = 60_000, exclude: string[
   if (!existsSync(path)) bytes = 0;
   else if (process.platform !== 'win32') {
     // BSD du (macOS) excludes with -I, GNU du with --exclude.
-    const ex = exclude.flatMap((e) => (process.platform === 'darwin' ? ['-I', e] : [`--exclude=${e}`]));
+    const masks = exclude.map(name => name.replace(/[\\*?\[\]]/g, '\\$&'));
+    const ex = masks.flatMap((e) => (process.platform === 'darwin' ? ['-I', e] : [`--exclude=${e}`]));
     const r = await run('du', ['-sk', ...ex, path], { timeoutMs: 60_000 }).catch(() => null);
     const kb = Number(r?.stdout.trim().split(/\s+/)[0]);
-    bytes = Number.isFinite(kb) ? kb * 1024 : walkBytes(path);
-  } else bytes = walkBytes(path);
+    bytes = Number.isFinite(kb) ? kb * 1024 : walkBytes(path, exclude);
+  } else bytes = walkBytes(path, exclude);
   sizeCache.set(key, { at: Date.now(), bytes });
   return bytes;
 }
 
-function walkBytes(path: string): number {
+function walkBytes(path: string, exclude: string[] = []): number {
   let total = 0;
   const stack = [path];
   while (stack.length) {
@@ -48,7 +53,9 @@ function walkBytes(path: string): number {
       continue;
     }
     if (st.isSymbolicLink()) continue;
-    if (st.isDirectory()) for (const e of safeReaddir(p)) stack.push(join(p, e));
+    if (st.isDirectory()) {
+      for (const e of safeReaddir(p)) if (!exclude.includes(e)) stack.push(join(p, e));
+    }
     else total += st.size;
   }
   return total;
@@ -63,6 +70,7 @@ function safeReaddir(p: string): string[] {
 }
 
 export function invalidateSize(path: string): void {
+  sizeRevision++;
   for (const k of sizeCache.keys()) if (k === path || k.startsWith(path + '/') || k.startsWith(path + '\0')) sizeCache.delete(k);
 }
 

@@ -10,7 +10,7 @@ import { scanDeps } from '../src/devdeps.ts';
 import { Semaphore } from '../src/runner.ts';
 import type { Client } from '../src/api.ts';
 import { invalidateSize } from '../src/disk.ts';
-import { sandbox, sh } from './helpers.ts';
+import { sandbox, sh, until } from './helpers.ts';
 
 function dependencyFixture(nested = false) {
   const box = sandbox();
@@ -66,8 +66,11 @@ for (const change of ['changed', 'added', 'removed'] as const) test(`warm start 
   mkdirSync(join(box.worktree, 'packages/tool'), { recursive: true });
   const lock = join(box.worktree, 'packages/tool/package-lock.json');
   if (change === 'removed') rmSync(lock);
-  else writeFileSync(lock, 'different-lock');
-  assert.notEqual(lockHash(box.repo), lockHash(box.worktree));
+  else {
+    writeFileSync(lock, 'different-lock');
+    if (change === 'added') sh(box.worktree, 'git', ['add', 'packages/tool/package-lock.json']);
+  }
+  assert.notEqual(await lockHash(box.repo), await lockHash(box.worktree));
   const result = await warmStart(box.repo, box.worktree, loadConfig());
   assert.equal(result.source, null);
   assert.equal(result.stale, true);
@@ -81,7 +84,7 @@ test('matching nested installs are reused and refresh notices nested lock change
   assert.equal(result.stale, false);
   assert.equal(result.source, box.repo);
   assert.deepEqual(result.cloned.map(dir => dir.rel), ['packages/tool/node_modules']);
-  const known = lockHash(box.worktree);
+  const known = await lockHash(box.worktree);
   assert.equal(await refreshDeps(box.repo, box.worktree, config, known, []), null);
   writeFileSync(join(box.worktree, 'packages/tool/package-lock.json'), 'changed');
   const refreshed = await refreshDeps(box.repo, box.worktree, config, known, []);
@@ -97,17 +100,18 @@ test('disk accounting still counts dependencies after warm-start and an in-place
   writeFileSync(join(deps, 'installed'), Buffer.alloc(512 * 1024, 3));
   const worker = new WorkerLoop({ client: {} as Client, machineId: 'fixture', repos: () => ({}), agents: () => [],
     localConfig: () => config, verifySlots: new Semaphore(1) });
-  assert.ok((await worker.disk()).worktreesGb >= 512 * 1024 / 1e9);
+  await until(() => worker.disk(), disk => disk.worktreesGb >= 512 * 1024 / 1e9, 3000, 'rewritten dependencies to be charged');
 });
 
-test('warm start skips dependencies with no lockfiles instead of guessing compatibility', async () => {
+test('warm start records unverified reuse for a lockless project without setup', async () => {
   const box = dependencyFixture();
   rmSync(join(box.repo, 'package-lock.json'));
   rmSync(join(box.worktree, 'package-lock.json'));
+  for (const root of [box.repo, box.worktree]) sh(root, 'git', ['rm', '--cached', 'package-lock.json']);
   const result = await warmStart(box.repo, box.worktree, loadConfig());
-  assert.equal(result.source, null);
+  assert.equal(result.source, box.repo);
   assert.equal(result.stale, true);
-  assert.deepEqual(result.cloned, []);
+  assert.equal(result.cloned.length, 1);
 });
 
 test('migration 14 upgrades a v13 database without data loss and removes the global completion sort', () => {
@@ -133,7 +137,7 @@ test('nested symlink lockfiles participate in compatibility checks', async () =>
     writeFileSync(join(root, 'lock-snapshot'), root === box.repo ? 'old' : 'new');
     symlinkSync('../../lock-snapshot', join(root, 'packages/tool/package-lock.json'));
   }
-  assert.notEqual(lockHash(box.repo), lockHash(box.worktree));
+  assert.notEqual(await lockHash(box.repo), await lockHash(box.worktree));
   const result = await warmStart(box.repo, box.worktree, loadConfig());
   assert.equal(result.source, null);
   assert.deepEqual(result.cloned, []);
@@ -142,12 +146,11 @@ test('nested symlink lockfiles participate in compatibility checks', async () =>
 test('an unreadable candidate never yields a partial matching fingerprint or aborts disk scanning', async t => {
   if (process.getuid?.() === 0) { t.skip('root bypasses directory permissions'); return; }
   const box = dependencyFixture();
-  const unreadable = join(box.repo, 'unrelated-output');
-  mkdirSync(unreadable);
+  const unreadable = join(box.repo, 'package-lock.json');
   chmodSync(unreadable, 0);
   try {
-    assert.equal(lockHash(box.repo), '');
-    assert.notEqual(lockHash(box.repo), lockHash(box.worktree));
+    assert.equal(await lockHash(box.repo), null);
+    assert.notEqual(await lockHash(box.repo), await lockHash(box.worktree));
     const result = await warmStart(box.repo, box.worktree, loadConfig());
     assert.equal(result.source, null);
     assert.deepEqual(result.cloned, []);
@@ -155,7 +158,7 @@ test('an unreadable candidate never yields a partial matching fingerprint or abo
     assert.equal(scan.dirs.length, 1);
     assert.equal(scan.dirs[0]!.lock, '');
     assert.deepEqual(scan.identical, []);
-  } finally { chmodSync(unreadable, 0o755); }
+  } finally { chmodSync(unreadable, 0o644); }
 });
 
 test('repeated unreadable fingerprints never suppress dependency refresh after a lock change', async t => {
@@ -163,16 +166,15 @@ test('repeated unreadable fingerprints never suppress dependency refresh after a
   const box = dependencyFixture();
   const config = loadConfig();
   await warmStart(box.repo, box.worktree, config);
-  const unreadable = join(box.worktree, 'unrelated-output');
-  mkdirSync(unreadable); chmodSync(unreadable, 0);
+  const unreadable = join(box.worktree, 'package-lock.json');
+  chmodSync(unreadable, 0);
   try {
-    const known = lockHash(box.worktree);
-    assert.equal(known, '');
-    writeFileSync(join(box.worktree, 'package-lock.json'), 'updated-lock');
-    assert.equal(lockHash(box.worktree), known);
+    const known = await lockHash(box.worktree);
+    assert.equal(known, null);
+    assert.equal(await lockHash(box.worktree), known);
     const result = await refreshDeps(box.repo, box.worktree, config, known, []);
     assert.notEqual(result, null, 'unknown hashes must leave refresh/setup enabled');
     assert.equal(result?.stale, true);
-    assert.equal(existsSync(join(box.worktree, 'node_modules')), false);
-  } finally { chmodSync(unreadable, 0o755); }
+    assert.equal(existsSync(join(box.worktree, 'node_modules')), true, 'unreadable inputs cannot authorize deleting the install');
+  } finally { chmodSync(unreadable, 0o644); }
 });

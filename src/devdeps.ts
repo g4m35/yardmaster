@@ -131,7 +131,7 @@ export async function scanDeps(roots: string[], opts: { maxDepth?: number; onPro
     while (next < paths.length) {
       const p = paths[next++]!;
       const project = dirname(p);
-      dirs.push({ path: p, project, lock: lockHash(project), installed: installedHash(p), bytes: await dirBytes(p, 0) });
+      dirs.push({ path: p, project, lock: (await lockHash(project)) ?? '', installed: installedHash(p), bytes: await dirBytes(p, 0) });
       opts.onProgress?.(++done, paths.length);
     }
   };
@@ -198,7 +198,7 @@ export async function dedupeGroup(g: DepsGroup, opts: { dryRun?: boolean } = {})
       skipped.push({ path: d.path, why: 'on a different disk, so it cannot share blocks' });
       continue;
     }
-    if (installedHash(d.path) !== keep.installed || lockHash(d.project) !== keep.lock) {
+    if (installedHash(d.path) !== keep.installed || (await lockHash(d.project)) !== keep.lock) {
       skipped.push({ path: d.path, why: 'changed since the scan' });
       continue;
     }

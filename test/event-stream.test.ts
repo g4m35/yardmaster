@@ -92,7 +92,7 @@ test('450 real coordinator events replay in bounded oldest-first pages to client
   const old = new Response(); const recent = new Response();
   stream.connect(old.response(), 1); stream.connect(recent.response(), 400);
   t.mock.timers.tick(2100);
-  assert.equal(polls(), 3);
+  assert.equal(polls(), 6, 'each distinct replay cursor gets its own bounded read');
   const batches = (res: Response) => res.frames.filter(frame => frame.startsWith('data: ')).map(frame => JSON.parse(frame.slice(6)) as YardEvent[]);
   assert.ok(batches(old).every(batch => batch.length <= 200));
   assert.deepEqual(batches(old).flatMap(batch => batch.map(e => e.id)), Array.from({ length: 449 }, (_, i) => i + 2));
@@ -114,4 +114,17 @@ test('shared stream invalidates silent snapshots every 30 seconds, including aft
   assert.equal(slow.frames.length, 1);
   slow.blocked = false; slow.emit('drain'); t.mock.timers.tick(700);
   assert.match(slow.frames.at(-1)!, /event: refresh/);
+});
+
+test('a caught-up client receives the next live event even while another replays a large backlog', t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const { stream, add, polls } = fixture(t, 450);
+  const behind = new Response(); const live = new Response();
+  stream.connect(behind.response(), 1); stream.connect(live.response(), 450);
+  add(451); t.mock.timers.tick(700);
+  assert.match(live.frames.at(-1)!, /event 451/, 'history replay cannot hold up the live frontier');
+  assert.ok(polls() <= 2, 'each cursor group gets at most one bounded read');
+  const batch = JSON.parse(behind.frames[1]!.slice(6)) as YardEvent[];
+  assert.equal(batch.length, 200);
+  assert.equal(batch[0]!.id, 2);
 });

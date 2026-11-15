@@ -282,7 +282,10 @@ export class Integrator {
     try {
       const r = await refreshDeps(project.root, path, config, this.coord.getMeta(key), [...prefer, ...siblingWorktrees(path)]);
       if (!r) return;
-      this.coord.setMeta(key, lockHash(path));
+      const hash = await lockHash(path, config.worktree.shareDirs);
+      if (hash !== null) this.coord.setMeta(key, hash);
+      for (const skipped of r.skipped) this.coord.event(project.id, null, 'warn', 'integration.deps_skipped', skipped.why);
+      if (r.stale && r.cloned.length) this.coord.event(project.id, null, 'warn', 'integration.deps_unverified', 'Dependencies were reused without tracked lockfiles; compatibility could not be verified. Add a worktree setup command such as "npm ci".');
       for (const command of config.worktree.setup) {
         const s = await runShell(command, { cwd: path, env: cleanEnv({ CI: '1' }, { pass: config.env.checks.pass }), timeoutMs: config.verifyTimeoutMinutes * 60_000, signal: this.lifetime.signal, onSpawn: this.processGuard(project, 'setup') });
         this.processFinished(project, s.reaped);

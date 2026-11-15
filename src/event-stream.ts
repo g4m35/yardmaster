@@ -45,20 +45,25 @@ export class EventStream {
   private poll(): void {
     const ready = [...this.clients].filter(client => !client.blocked && !client.res.destroyed);
     if (!ready.length) return;
-    // One bounded read serves every writable client, including replay after a slow client drains.
-    const after = ready.reduce((last, client) => Math.min(last, client.last), Infinity);
-    const rows = this.events.all(after) as unknown as (Omit<YardEvent, 'data'> & { data: string | null })[];
-    const events = rows.map(row => ({ ...row, data: row.data ? JSON.parse(row.data) : null }));
+    // Live clients share a frontier; each older cursor gets a bounded catch-up read without holding it up.
+    const groups = new Map<number, Client[]>();
     for (const client of ready) {
-      const pending = events.filter(event => event.id > client.last);
-      if (pending.length) client.last = pending[pending.length - 1]!.id;
-      let frame = pending.length ? `data: ${JSON.stringify(pending)}\n\n` : ': keepalive\n\n';
-      // Machine/session records and time-based freshness can change without durable events.
-      if (Date.now() - client.refreshedAt >= 30_000) {
-        frame += 'event: refresh\ndata: {}\n\n';
-        client.refreshedAt = Date.now();
+      const group = groups.get(client.last) ?? [];
+      group.push(client); groups.set(client.last, group);
+    }
+    for (const [after, clients] of [...groups].sort(([a], [b]) => b - a)) {
+      const rows = this.events.all(after) as unknown as (Omit<YardEvent, 'data'> & { data: string | null })[];
+      const events = rows.map(row => ({ ...row, data: row.data ? JSON.parse(row.data) : null }));
+      for (const client of clients) {
+        if (events.length) client.last = events[events.length - 1]!.id;
+        let frame = events.length ? `data: ${JSON.stringify(events)}\n\n` : ': keepalive\n\n';
+        // Machine/session records and time-based freshness can change without durable events.
+        if (Date.now() - client.refreshedAt >= 30_000) {
+          frame += 'event: refresh\ndata: {}\n\n';
+          client.refreshedAt = Date.now();
+        }
+        client.blocked = !client.res.write(frame);
       }
-      client.blocked = !client.res.write(frame);
     }
   }
 

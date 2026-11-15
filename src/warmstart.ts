@@ -1,6 +1,9 @@
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
+import { git } from './git.ts';
+import { recordDependencyClone } from './dependency-disk.ts';
 import { createHash } from 'node:crypto';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import type { Config } from './config.ts';
 import { dirBytes, findArtifacts, gb } from './disk.ts';
 import { cloneTree, removeFast } from './fastfs.ts';
@@ -38,24 +41,20 @@ export const LOCKFILES = [
   'Podfile.lock', 'composer.lock', 'poetry.lock', 'uv.lock', 'go.sum', 'Pipfile.lock', 'mix.lock', 'pubspec.lock',
 ];
 
-/** Include package roots as well as lock contents; independent nested installs must match too. */
-export function lockHash(dir: string): string {
-  const h = createHash('sha1');
-  const excluded = new Set(['.git', 'node_modules', 'vendor', '.bundle', 'target', '.gradle', 'Pods', '.venv']);
-  let found = false;
-  const walk = (root: string, rel: string) => {
-    for (const entry of readdirSync(root, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
-      const path = join(root, entry.name);
-      const key = rel ? `${rel}/${entry.name}` : entry.name;
-      if (entry.isDirectory() && !excluded.has(entry.name)) walk(path, key);
-      else if ((entry.isFile() || entry.isSymbolicLink()) && LOCKFILES.includes(entry.name)) {
-        found = true;
-        h.update(key).update('\0').update(readFileSync(path)).update('\0');
-      }
-    }
-  };
-  try { walk(dir, ''); } catch { return ''; }
-  return found ? h.digest('hex').slice(0, 16) : '';
+/** Only tracked inputs can identify the install a fresh worktree is expected to have. */
+export async function lockHash(dir: string, shareDirs = ['node_modules', 'vendor', '.bundle', 'target', '.gradle', 'Pods']): Promise<string | null> {
+  try {
+    const listed = await git(dir, ['ls-files', '-z'], { timeoutMs: 30_000 });
+    const locks = listed.stdout.split('\0').filter(path => path && LOCKFILES.includes(basename(path)) &&
+      !path.split('/').slice(0, -1).some(part => shareDirs.includes(part))).sort();
+    if (!locks.length) return '';
+    const h = createHash('sha1');
+    for (const path of locks) h.update(path).update('\0').update(await readFile(join(dir, path))).update('\0');
+    return h.digest('hex').slice(0, 16);
+  } catch (err) {
+    if (err instanceof UtilityProcessError) throw err;
+    return null;
+  }
 }
 
 export interface WarmStartResult {
@@ -65,7 +64,7 @@ export interface WarmStartResult {
   ms: number;
   /** Where the dependencies came from. */
   source: string | null;
-  /** True when dependencies were rejected because no source had matching lockfiles. */
+  /** True when reuse was rejected, or dependencies were reused without lockfile verification. */
   stale: boolean;
 }
 
@@ -87,13 +86,15 @@ export function siblingWorktrees(worktree: string, limit = 8): string[] {
     .map((x) => x.p);
 }
 
-async function pickSource(worktree: string, sources: string[], shareDirs: string[]): Promise<{ source: string | null; stale: boolean }> {
-  const want = lockHash(worktree);
+async function pickSource(worktree: string, sources: string[], shareDirs: string[], allowUnpinned: boolean): Promise<{ source: string | null; stale: boolean }> {
+  const want = await lockHash(worktree, shareDirs);
   let stale = false;
   for (const s of sources) {
     if (!existsSync(s) || s === worktree) continue;
     if ((await findArtifacts(s, shareDirs, 3, { sizes: false })).length === 0) continue;
-    if (want && lockHash(s) === want) return { source: s, stale: false };
+    const have = await lockHash(s, shareDirs);
+    if (want && have === want) return { source: s, stale: false };
+    if (want === '' && have === '' && allowUnpinned) return { source: s, stale: true };
     stale = true;
   }
   return { source: null, stale };
@@ -104,9 +105,9 @@ export async function warmStart(repoRoot: string, worktree: string, config: Conf
   const out: WarmStartResult = { cloned: [], skipped: [], copied: [], ms: 0, source: null, stale: false };
   const cfg = config.worktree;
   if (cfg.warmStart === 'clone') {
-    const picked = await pickSource(worktree, [repoRoot, ...(opts.candidates ?? [])], cfg.shareDirs);
+    const picked = await pickSource(worktree, [repoRoot, ...(opts.candidates ?? [])], cfg.shareDirs, cfg.setup.length === 0);
     out.stale = picked.stale;
-    if (picked.stale) out.skipped.push({ rel: '*', why: 'No checkout has verifiable matching root and nested lockfiles; dependencies were not reused. Run the project setup to install them.' });
+    if (picked.stale && !picked.source) out.skipped.push({ rel: '*', why: 'No checkout has verifiable matching tracked lockfiles; dependencies were not reused. Add a worktree setup command such as "npm ci" to install them.' });
     if (picked.source) {
       out.source = picked.source;
       const dirs = await findArtifacts(picked.source, cfg.shareDirs, 3, { sizes: false });
@@ -126,7 +127,10 @@ export async function warmStart(repoRoot: string, worktree: string, config: Conf
           continue;
         }
         const r = await cloneTree(d.path, target, { allowPlainCopy: !cow });
-        if (r.ok) out.cloned.push({ rel: d.rel, bytes, method: r.method });
+        if (r.ok) {
+          await recordDependencyClone(target, r.method);
+          out.cloned.push({ rel: d.rel, bytes, method: r.method });
+        }
         else out.skipped.push({ rel: d.rel, why: `copy failed: ${r.error ?? 'unknown error'}` });
       }
     }
@@ -149,9 +153,10 @@ export async function warmStart(repoRoot: string, worktree: string, config: Conf
  * matching ones. Returns null when nothing needed doing.
  */
 export async function refreshDeps(repoRoot: string, worktree: string, config: Config, knownHash: string | null, candidates: string[]): Promise<WarmStartResult | null> {
-  const now = lockHash(worktree);
-  // Missing or unreadable lockfiles cannot prove an existing install is still compatible.
-  if (now && knownHash === now) return null;
+  const now = await lockHash(worktree, config.worktree.shareDirs);
+  if (now !== null && knownHash === now) return null;
+  // An unreadable tracked input cannot authorize removing an existing install either.
+  if (now === null) return warmStart(repoRoot, worktree, config, { candidates });
   const trash = join(dirname(dirname(worktree)), '.trash');
   for (const d of await findArtifacts(worktree, config.worktree.shareDirs, 3, { sizes: false })) removeFast(d.path, trash);
   return warmStart(repoRoot, worktree, config, { candidates });

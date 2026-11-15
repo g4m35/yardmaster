@@ -93,7 +93,7 @@ test('warm start takes dependencies from a checkout with the same lockfiles, and
   assert.equal(r.source, join(group, 'w1'));
   assert.equal(r.stale, false);
   assert.match(readFileSync(join(group, 'w2', 'node_modules', '.package-lock.json'), 'utf8'), /new/);
-  assert.equal(lockHash(join(group, 'w2')), lockHash(join(group, 'w1')));
+  assert.equal(await lockHash(join(group, 'w2')), await lockHash(join(group, 'w1')));
   // No candidate matches: leave installation to setup and explain why reuse was skipped.
   sh(box.repo, 'git', ['worktree', 'add', '-q', '-b', 'task2', join(group, 'w3'), 'newdeps']);
   const fallback = await warmStart(box.repo, join(group, 'w3'), config);
@@ -281,6 +281,9 @@ test('identical installs elsewhere on the machine can be shared, byte-identical 
     mkdirSync(join(root, p));
     writeFileSync(join(root, p, 'package-lock.json'), '{"lockfileVersion":3}');
     fakeInstall(join(root, p), 60, p === 'four' ? 'different' : 'same');
+    sh(join(root, p), 'git', ['init', '-qb', 'main']);
+    sh(join(root, p), 'git', ['add', 'package-lock.json']);
+    sh(join(root, p), 'git', ['commit', '-qm', 'tracked lockfile']);
   }
   // Same lockfile and same installed-state record, but a patched file: must never be swapped.
   writeFileSync(join(root, 'three', 'node_modules', 'pkg2', 'f2.js'), 'module.exports = "patched";\n');
