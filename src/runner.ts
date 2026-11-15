@@ -24,7 +24,7 @@ import { routeEffort, routedEffortOf } from './jev.ts';
 import { withProcessScope, UtilityProcessError, currentProcessScopeSignal } from './proc.ts';
 import { EffortPolicyError, launchEffort, launchIdentity } from './effort.ts';
 import { verifyArtifact as runVerify, hasVerification, serviceVerificationHooks } from './verification.ts';
-import { evidenceOf } from './device-evidence.ts';
+import { boundEvidence } from './device-evidence.ts';
 
 export class Semaphore {
   private queue: { grant: () => void; reject: (error: Error) => void; signal?: AbortSignal; abort: () => void }[] = [];
@@ -107,8 +107,9 @@ export function worktreePathFor(config: Config, project: Project, taskId: string
 
 /** A task's own checks run in addition to the project's: work never merges on a lower bar than the project sets. */
 /** Device evidence travels with the service result so the hub can show it beside the task. */
-function deviceEvidenceAction(result: object, receiptPath: string) {
-  const evidence = evidenceOf(result);
+function deviceEvidenceAction(run: { requestId: string; result: object; receiptPath: string }, task: Pick<Task, 'id' | 'project_id'>) {
+  const evidence = boundEvidence(run.result, { requestId: run.requestId, projectId: task.project_id, taskId: task.id });
+  const receiptPath = run.receiptPath;
   return evidence ? { evidence, receiptPath } : {};
 }
 
@@ -870,7 +871,7 @@ async function acceptArtifact(ctx: RunContext, wt: string, baseSha: string, file
           (level, kind, message, data) => event(ctx, level, kind, message, data), {
             begin: intent => api['run.service']({ runId, taskId: task.id, owner: claimOwner(task), action: { kind: 'begin', ...intent } }),
             finish: run => api['run.service']({ runId, taskId: task.id, owner: claimOwner(task), action: { kind: 'finish', requestId: run.requestId, status: run.result.status, reaped: run.execution.reaped,
-              ...deviceEvidenceAction(run.result, run.receiptPath) } }),
+              ...deviceEvidenceAction(run, task) } }),
           }),
         beforeSpawn: async () => {
           await api['run.update']({ runId, patch: { phase: 'verify:spawning' } });

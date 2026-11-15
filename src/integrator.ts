@@ -8,7 +8,7 @@ import { addWorktree, branchExists, conflictedFiles, git, isAncestor, isClean, i
 import { rememberChecked } from './ci/verified.ts';
 import { Semaphore, verifyCommands } from './runner.ts';
 import { verifyArtifact, hasVerification, serviceVerificationHooks } from './verification.ts';
-import { evidenceOf, recordDeviceEvidence } from './device-evidence.ts';
+import { boundEvidence, recordDeviceEvidence } from './device-evidence.ts';
 import { cleanEnv, runShell, terminateRecordedProcess, withProcessScope, UtilityProcessError, type OwnedRunOptions } from './proc.ts';
 import { integrationUtilityKey, utilityHooks, recoverUtilities, forgetStoppedUtilities, taskHasPendingUtilities, utilitiesStopped } from './utility-records.ts';
 import { lockHash, refreshDeps, siblingWorktrees } from './warmstart.ts';
@@ -104,8 +104,8 @@ export class Integrator {
         begin: intent => { beginService(this.coord.db, `integration:${project.id}`, intent, { projectId: project.id, taskIds: tasks.map(task => task.id) }); },
         finish: run => {
           finishService(this.coord.db, `integration:${project.id}`, run.requestId, run.result.status, run.execution.reaped);
-          const evidence = evidenceOf(run.result);
-          if (evidence) recordDeviceEvidence(this.coord.db, { ...evidence, projectId: project.id }, run.receiptPath);
+          const evidence = boundEvidence(run.result, { requestId: run.requestId, projectId: project.id, taskId: tasks.length === 1 ? tasks[0]!.id : null });
+          if (evidence) recordDeviceEvidence(this.coord.db, evidence, run.receiptPath);
         },
       });
   }

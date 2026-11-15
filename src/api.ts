@@ -24,7 +24,7 @@ import { noteControllerActivity } from './controller-activity.ts';
 import { loadPlugins } from './plugins.ts';
 import { planService, providerInventory } from './providers.ts';
 import { beginService, finishService, resolveService, serviceHolds } from './service-holds.ts';
-import { DeviceEvidenceSchema, deviceEvidence, recordDeviceEvidence } from './device-evidence.ts';
+import { DeviceEvidenceSchema, bindingProblem, deviceEvidence, recordDeviceEvidence } from './device-evidence.ts';
 import { listLeases, queuePosition } from './leases.ts';
 
 /**
@@ -175,9 +175,9 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
         coord.event(task.project_id, task.id, 'info', 'service.started', `Starting ${p.action.capability} via ${p.action.provider}; request ${p.action.requestId}`, p.action);
       } else {
         const evidence = p.action.evidence;
-        if (evidence && (evidence.taskId !== task.id || evidence.requestId !== p.action.requestId)) throw new Error('Device evidence does not belong to this task request');
+        if (evidence && bindingProblem(evidence, { requestId: p.action.requestId, projectId: task.project_id, taskId: task.id })) throw new Error('Device evidence does not belong to this task request');
         finishService(coord.db, `task:${task.id}`, p.action.requestId, p.action.status, p.action.reaped);
-        if (evidence) recordDeviceEvidence(coord.db, { ...evidence, projectId: task.project_id }, p.action.receiptPath ?? null);
+        if (evidence) recordDeviceEvidence(coord.db, evidence, p.action.receiptPath ?? null);
       }
       if (hooks.externalWorker) noteControllerActivity(coord.db, task.id, run.machine_id, p.owner.generation!);
     }, p.taskId)),

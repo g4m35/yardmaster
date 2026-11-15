@@ -11,6 +11,7 @@ import { machineId } from './paths.ts';
 import { VERSION } from './version.ts';
 import { nativeSessionName } from './hookclient.ts';
 import { evidenceLine } from './device-evidence.ts';
+import { describeOwned } from './leases.ts';
 
 /**
  * The MCP server is how Yardmaster meets people inside the agent they already use. Any MCP client
@@ -120,7 +121,7 @@ export function buildMcpServer(ctx: Ctx): McpServer {
   tool('yard_devices', 'Device verification for a task or this repo: simulator/build/physical-device leases on the hub machine and evidence (commit, artifact sha256, device, runtime). A simulator pass never counts as a physical-device pass.', z.object({ taskId: z.string().regex(/^t-[a-z0-9]+$/).optional(), ...repoArg }), async (a) => {
     const projectId = a.taskId ? undefined : (await projectIdOnly(ctx, a.repo));
     const d = await ctx.client['devices.status']({ projectId, taskId: a.taskId, limit: 5 });
-    const leases = d.leases.map((l) => `- ${l.pool} ${l.state}${l.position ? ` #${l.position}` : ''} ${l.holder}${l.owned.length ? ` (owns ${l.owned.map((o) => o.name).join(', ')})` : ''}`);
+    const leases = d.leases.map((l) => `- ${l.pool} ${l.state}${l.position ? ` #${l.position}` : ''} ${l.holder}${l.owned.length ? ` (owns ${l.owned.map(describeOwned).join(', ')})` : ''}`);
     const evidence = d.evidence.map(({ evidence: e, receiptPath }) => `${evidenceLine(e)}\n  ${clip(e.summary, 300)}${receiptPath ? `\n  receipt ${receiptPath}` : ''}`);
     return [leases.length ? `Leases on ${d.machineId}:\n${leases.join('\n')}` : `No device leases on ${d.machineId}.`,
       evidence.length ? evidence.join('\n') : 'No device evidence recorded yet.'].join('\n');

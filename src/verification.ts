@@ -5,7 +5,7 @@ import { planService, runService, type ServicePlan } from './providers.ts';
 import type { ServicesConfig } from './provider-contract.ts';
 import type { ServiceContext } from './service-receipts.ts';
 import type { ServiceIntent } from './service-holds.ts';
-import { evidenceProblem, evidenceState, requiredDeviceLevel } from './device-evidence.ts';
+import { bindingProblem, evidenceProblem, evidenceState, requiredDeviceLevel } from './device-evidence.ts';
 
 export type ServiceRun = Awaited<ReturnType<typeof runService>>;
 type VerificationLifecycle = {
@@ -99,7 +99,8 @@ export async function verifyArtifact(cwd: string, commands: string[], timeoutMin
       if (device.kind === 'absent' && required) {
         return { ...fail(command, `This check requires a ${required} device pass; ${plan.selected} reported a pass without device evidence.\nReceipt: ${run.receiptPath}`), serviceStatus: 'unknown' };
       }
-      const problem = device.kind === 'valid' ? evidenceProblem(device.evidence, sha, required ?? 'simulator') : null;
+      const problem = device.kind === 'valid' ? bindingProblem(device.evidence, { requestId: run.requestId, projectId: lifecycle.context?.projectId, taskId: lifecycle.context?.taskId })
+        ?? evidenceProblem(device.evidence, sha, required ?? 'simulator') : null;
       if (problem) return { ...fail(command, `Device evidence does not establish a pass for commit ${sha}: ${problem}\nReceipt: ${run.receiptPath}`), serviceStatus: 'unknown' };
     }
   }

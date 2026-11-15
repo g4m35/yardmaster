@@ -3,7 +3,9 @@ import * as z from 'zod/v4';
 import { openDb, tx, type Db } from './db.ts';
 import { machineId } from './paths.ts';
 import { readFileSync } from 'node:fs';
-import { isAlive, processStartTime, run } from './proc.ts';
+import { isAlive, processStartTime, run, terminateRecordedProcess } from './proc.ts';
+
+const RETAIN_RETRY_MS = 3000;
 
 /**
  * Machine-wide leases for scarce, heavy resources: build slots, simulators and physical devices. Rows live in the
@@ -15,13 +17,23 @@ export const LEASE_POOLS = ['build', 'simulator', 'physical'] as const;
 export type LeasePool = typeof LEASE_POOLS[number];
 export type LeaseState = 'waiting' | 'held' | 'reaping' | 'cleanup_failed';
 
-export const OwnedResourceSchema = z.object({
+export const SimulatorResourceSchema = z.object({
   kind: z.literal('simulator'),
   /** Unique name chosen before creation, so a crash between create and record can still be found. */
   name: z.string().regex(/^ym-[a-z0-9-]{6,80}$/),
   udid: z.string().regex(/^[0-9A-F-]{36}$/i).nullable(),
 });
+/** A command run under the lease that could not be confirmed stopped: the slot stays held until it is. */
+export const ProcessResourceSchema = z.object({
+  kind: z.literal('process'),
+  pid: z.number().int().positive(),
+  startedAt: z.number().nullable(),
+});
+export const OwnedResourceSchema = z.discriminatedUnion('kind', [SimulatorResourceSchema, ProcessResourceSchema]);
 export type OwnedResource = z.infer<typeof OwnedResourceSchema>;
+export type SimulatorResource = z.infer<typeof SimulatorResourceSchema>;
+export type ProcessResource = z.infer<typeof ProcessResourceSchema>;
+export const describeOwned = (o: OwnedResource) => o.kind === 'simulator' ? `${o.name}${o.udid ? ` ${o.udid}` : ''}` : `process ${o.pid}`;
 
 export interface Lease {
   id: string; pool: LeasePool; state: LeaseState; holder: string;
@@ -125,7 +137,25 @@ export async function holderAlive(lease: Pick<Lease, 'pid' | 'procStarted' | 'bo
   return now === null || Math.abs(now - lease.procStarted) <= 2000;
 }
 
-export type ResourceCleanup = (owned: OwnedResource[]) => Promise<{ ok: boolean; detail: string }>;
+/** Cleans simulators; processes recorded on a lease are confirmed by cleanupOwned before it is called. */
+export type ResourceCleanup = (owned: SimulatorResource[]) => Promise<{ ok: boolean; detail: string }>;
+
+/**
+ * Recorded processes first, by identity-checked termination (pid plus start time, so a reused PID is never
+ * signaled). Simulators are cleaned only once every recorded process is confirmed gone, and the slot is freed
+ * only when both succeed: an unconfirmed process may still be writing the same build output or using the device.
+ */
+async function cleanupOwned(owned: OwnedResource[], cleanup: ResourceCleanup): Promise<{ ok: boolean; detail: string }> {
+  const problems: string[] = [];
+  for (const proc of owned.filter((o): o is ProcessResource => o.kind === 'process')) {
+    const r = await terminateRecordedProcess({ pid: proc.pid, startedAt: proc.startedAt });
+    if (r.status !== 'exited' && r.status !== 'terminated') problems.push(`process ${proc.pid} not confirmed stopped (${r.status}${r.reason ? `: ${r.reason}` : ''})`);
+  }
+  if (problems.length) return { ok: false, detail: problems.join('; ') };
+  const sims = owned.filter((o): o is SimulatorResource => o.kind === 'simulator');
+  if (!sims.length) return { ok: true, detail: owned.length ? 'recorded processes confirmed stopped' : 'nothing to clean' };
+  return cleanup(sims).catch((error: Error) => ({ ok: false, detail: error.message }));
+}
 export interface ReapResult { id: string; pool: LeasePool; holder: string; outcome: 'expired-waiter' | 'released' | 'cleanup_failed'; detail: string }
 
 /**
@@ -159,11 +189,12 @@ export async function reapLeases(cleanup: ResourceCleanup, now = Date.now()): Pr
     return [lease];
   })));
   for (const lease of claimed) {
-    const done = lease.owned.length ? await cleanup(lease.owned).catch((error: Error) => ({ ok: false, detail: error.message })) : { ok: true, detail: 'nothing to clean' };
+    const done = await cleanupOwned(lease.owned, cleanup);
     withDb(db => {
       if (done.ok) db.prepare("DELETE FROM resource_leases WHERE id = ? AND state = 'reaping' AND pid = ?").run(lease.id, me.pid);
+      // A recorded process may stop any moment, and its slot should free as soon as it does; simulators retry slowly.
       else db.prepare("UPDATE resource_leases SET state = 'cleanup_failed', note = ?, expires_at = ? WHERE id = ? AND state = 'reaping' AND pid = ?")
-        .run(done.detail.slice(0, 500), Date.now() + 5 * 60_000, lease.id, me.pid);
+        .run(done.detail.slice(0, 500), Date.now() + (lease.owned.some(o => o.kind === 'process') ? RETAIN_RETRY_MS : 5 * 60_000), lease.id, me.pid);
     });
     results.push({ id: lease.id, pool: lease.pool, holder: lease.holder, outcome: done.ok ? 'released' : 'cleanup_failed', detail: done.detail });
   }
@@ -188,7 +219,7 @@ export async function recoverStaleLease(id: string, note: string, cleanup: Resou
   const claimed = withDb(db => tx(db, () => db.prepare(`UPDATE resource_leases SET state = 'reaping', pid = ?, proc_started = ?, boot_id = ?, expires_at = ?
     WHERE id = ? AND state = ? AND pid = ? AND expires_at = ?`).run(me.pid, me.startedAt, me.bootId, now + 5 * 60_000, id, lease.state, lease.pid, lease.expiresAt).changes === 1));
   if (!claimed) throw new Error('The lease changed while it was being recovered; inspect it again');
-  const done = lease.owned.length ? await cleanup(lease.owned).catch((error: Error) => ({ ok: false, detail: error.message })) : { ok: true, detail: 'nothing to clean' };
+  const done = await cleanupOwned(lease.owned, cleanup);
   withDb(db => tx(db, () => {
     db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(`lease-recovery:${id}`, JSON.stringify({ ...lease, recoveredAt: Date.now(), note, cleanup: done }));
     if (done.ok) db.prepare("DELETE FROM resource_leases WHERE id = ? AND state = 'reaping' AND pid = ?").run(id, me.pid);
@@ -230,6 +261,11 @@ export interface LeaseHandle {
   own(resource: OwnedResource): void;
   release(): void;
   cleanupFailed(detail: string): void;
+  /**
+   * Instead of releasing: keep the slot occupied because these commands were not confirmed stopped. The reaper
+   * frees it once each recorded process is confirmed gone (and any recorded simulator is cleaned).
+   */
+  retain(processes: { pid: number; startedAt: number | null }[], detail: string): void;
 }
 export type LeaseOutcome = { lease: LeaseHandle; waitedMs: number } | { lease: null; reason: string; waitedMs: number; queuedAt: number };
 
@@ -304,7 +340,8 @@ function handle(id: string, queuedAt: number, ttlMs: number, me: ProcessId): Lea
     own: resource => withDb(db => tx(db, () => {
       const row = db.prepare("SELECT owned FROM resource_leases WHERE id = ? AND state = 'held' AND pid = ?").get(id, me.pid) as { owned: string } | undefined;
       if (!row) throw new Error('This process no longer holds the lease; nothing may be created under it.');
-      const owned = z.array(OwnedResourceSchema).parse(JSON.parse(row.owned)).filter(o => o.name !== resource.name);
+      const same = (o: OwnedResource) => o.kind === resource.kind && (o.kind === 'simulator' ? o.name === (resource as SimulatorResource).name : o.pid === (resource as ProcessResource).pid);
+      const owned = z.array(OwnedResourceSchema).parse(JSON.parse(row.owned)).filter(o => !same(o));
       db.prepare('UPDATE resource_leases SET owned = ? WHERE id = ?').run(JSON.stringify([...owned, OwnedResourceSchema.parse(resource)]), id);
     })),
     release: () => { clearInterval(renew); withDb(db => db.prepare("DELETE FROM resource_leases WHERE id = ? AND state = 'held' AND pid = ?").run(id, me.pid)); },
@@ -312,6 +349,17 @@ function handle(id: string, queuedAt: number, ttlMs: number, me: ProcessId): Lea
       clearInterval(renew);
       withDb(db => db.prepare("UPDATE resource_leases SET state = 'cleanup_failed', note = ?, expires_at = ? WHERE id = ? AND state = 'held' AND pid = ?")
         .run(detail.slice(0, 500), Date.now() + ttlMs, id, me.pid));
+    },
+    retain: (processes, detail) => {
+      clearInterval(renew);
+      withDb(db => tx(db, () => {
+        const row = db.prepare("SELECT owned FROM resource_leases WHERE id = ? AND state = 'held' AND pid = ?").get(id, me.pid) as { owned: string } | undefined;
+        if (!row) return;
+        const owned = [...z.array(OwnedResourceSchema).parse(JSON.parse(row.owned)), ...processes.map(p => ProcessResourceSchema.parse({ kind: 'process', ...p }))];
+        // Retry soon: the slot is occupied only while those processes may still be running.
+        db.prepare("UPDATE resource_leases SET state = 'cleanup_failed', owned = ?, note = ?, expires_at = ? WHERE id = ?")
+          .run(JSON.stringify(owned), detail.slice(0, 500), Date.now() + RETAIN_RETRY_MS, id);
+      }));
     },
   };
 }

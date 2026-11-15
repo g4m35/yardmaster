@@ -177,9 +177,13 @@ evidence naming a physical device with `physical: passed`.
 
 Declared `requiredEnv` values never stay in evidence. Text logs and reports are
 redacted, whatever their size; overlapping values are redacted as one span.
-Binary files (screenshots, archives) are never rewritten: one that contains a
-declared value is removed and listed under `omitted`; the rest stay
-byte-identical.
+Only files confidently identified as text (a text extension such as `.log`,
+`.txt`, `.xml` or `.json`, valid UTF-8 throughout, no NUL byte) are rewritten.
+Anything else (screenshots, protobuf reports, archives) is never rewritten: one
+that contains a declared value is removed and listed under `omitted`; the rest
+stay byte-identical. Evidence is accepted and recorded only for the request
+that produced it: its request id, and its project and task when the check has
+them, must match.
 
 Where to read it:
 
@@ -225,7 +229,9 @@ project's `yardmaster.json` can lower them for its own requests, never raise the
   If that cleanup fails, the slot stays occupied and visible rather than being
   handed out again.
 - Cancelling a task or `ym verify` stops its processes, deletes its simulator and
-  releases its slot.
+  releases its slot. A build, test or `ym devices lease` command that cannot be
+  confirmed stopped keeps its slot: the lease records the process (PID and start
+  time), and the reaper frees the slot only after confirming that process is gone.
 - The built app is copied while the build slot is still held. That copy is what
   gets hashed, installed and cached, so a later build writing the same output
   path cannot change what a waiting run tests.

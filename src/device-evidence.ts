@@ -111,6 +111,23 @@ export function evidenceState(result: object): { kind: 'absent' } | { kind: 'inv
   const parsed = DeviceEvidenceSchema.safeParse((data as { evidence: unknown }).evidence);
   return parsed.success ? { kind: 'valid', evidence: parsed.data } : { kind: 'invalid' };
 }
+/** The request a piece of evidence must belong to: this dispatch, and its project and task when known. */
+export interface EvidenceExpectation { requestId: string; projectId?: string | null; taskId?: string | null }
+
+/** Why evidence was not produced for this request, or null. Earlier evidence for the same commit does not count. */
+export function bindingProblem(e: DeviceEvidence, expect: EvidenceExpectation): string | null {
+  if (e.requestId !== expect.requestId) return `it belongs to request ${e.requestId ?? 'none'}, not this check's request ${expect.requestId}`;
+  if (expect.projectId && e.projectId !== expect.projectId) return `it names project ${e.projectId ?? 'none'}, not ${expect.projectId}`;
+  if (expect.taskId && e.taskId !== expect.taskId) return `it names task ${e.taskId ?? 'none'}, not ${expect.taskId}`;
+  return null;
+}
+
+/** Well-formed evidence bound to this request, for recording; anything else is not persisted. */
+export function boundEvidence(result: object, expect: EvidenceExpectation): DeviceEvidence | null {
+  const state = evidenceState(result);
+  return state.kind === 'valid' && !bindingProblem(state.evidence, expect) ? state.evidence : null;
+}
+
 export function evidenceOf(result: object): DeviceEvidence | null {
   const state = evidenceState(result);
   return state.kind === 'valid' ? state.evidence : null;
@@ -258,21 +275,30 @@ export function fileContainsSecret(file: string, secrets: string[], chunkBytes =
   } finally { closeSync(input); }
 }
 
-const BINARY_EXTENSIONS = /\.(png|jpe?g|gif|heic|webp|tiff?|mp4|mov|zip|gz|ipa|xcresult|pdf|sqlite|db)$/i;
-/** Text is scrubbed in place; anything else would be corrupted by substitution (PNG lengths and CRCs, archives). */
-export function isTextFile(file: string): boolean {
-  if (BINARY_EXTENSIONS.test(file)) return false;
+const TEXT_EXTENSIONS = /\.(txt|log|out|err|xml|json|jsonl|html?|csv|tsv|md|ya?ml|tap|junit|plist)$/i;
+/**
+ * Only files confidently identified as text are rewritten: an allowlisted text extension, valid UTF-8 across the
+ * whole file and no NUL byte. Anything else (PNGs, protobuf reports, archives) would be corrupted by substitution.
+ */
+export function isTextFile(file: string, chunkBytes = 1024 * 1024): boolean {
+  if (!TEXT_EXTENSIONS.test(file)) return false;
+  const decoder = new TextDecoder('utf-8', { fatal: true });
   const fd = openSync(file, 'r');
   try {
-    const head = Buffer.alloc(8192);
-    const n = readSync(fd, head, 0, head.length, 0);
-    return !head.subarray(0, n).includes(0);
-  } finally { closeSync(fd); }
+    const chunk = Buffer.alloc(chunkBytes);
+    for (;;) {
+      const n = readSync(fd, chunk, 0, chunk.length, null);
+      if (n === 0) { decoder.decode(); return true; }
+      const part = chunk.subarray(0, n);
+      if (part.includes(0)) return false;
+      decoder.decode(part, { stream: true });
+    }
+  } catch { return false; } finally { closeSync(fd); }
 }
 
 /**
- * Make an evidence file safe to keep: text is redacted; a binary is kept byte-identical when it holds no declared
- * credential and otherwise removed, so evidence never contains a corrupted or unscrubbed binary.
+ * Make an evidence file safe to keep: confident text is redacted; anything else is kept byte-identical when it
+ * holds no declared credential and otherwise removed, so evidence never contains a corrupted or unscrubbed file.
  */
 export function sanitizeEvidenceFile(file: string, secrets: string[]): 'kept' | 'scrubbed' | 'omitted' {
   if (!secrets.filter(Boolean).length) return 'kept';

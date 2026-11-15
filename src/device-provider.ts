@@ -6,7 +6,7 @@ import * as z from 'zod/v4';
 import { loadConfig, type Config } from './config.ts';
 import { artifactSha256, fileSha256, redactText, sanitizeEvidenceFile, type DeviceEvidence } from './device-evidence.ts';
 import { mainRepoRoot, projectIdFor } from './git.ts';
-import { acquireLease, type LeaseHandle, type LeaseOutcome, type OwnedResource } from './leases.ts';
+import { acquireLease, type LeaseHandle, type LeaseOutcome, type SimulatorResource } from './leases.ts';
 import { memoryHold, sampleMemory, type MemorySampler } from './machine-pressure.ts';
 import { machineId, yardHome } from './paths.ts';
 import type { OwnedRunOptions } from './proc.ts';
@@ -60,7 +60,7 @@ export interface DeviceRunContext {
   cwd: string; env: NodeJS.ProcessEnv; evidenceDir: string; input: unknown; requestId: string;
   context: ServiceContext; signal?: AbortSignal; onSpawn?: OwnedRunOptions['onSpawn'];
   /** Injectable for tests; production reads the executing machine's config and memory. */
-  devices?: Config['devices']; sampleMemory?: MemorySampler; pollMs?: number;
+  devices?: Config['devices']; sampleMemory?: MemorySampler; pollMs?: number; reinspectDelayMs?: number;
 }
 export interface DeviceRun {
   dispatched: boolean;
@@ -101,7 +101,9 @@ export async function runAppleSimulator(options: AppleSimulatorOptions, ctx: Dev
   let simulator: DeviceEvidence['status']['simulator'] = 'not-run';
   let failedBuild = false;
   let problem: string | null = null;
-  const track = (r: ExecResult) => { if (!r.reaped) reaped = false; return r; };
+  // Commands not confirmed stopped, per lease phase: their slot stays held until the reaper confirms them gone.
+  let unreaped: { pid: number; startedAt: number | null }[] = [];
+  const track = (r: ExecResult) => { if (!r.reaped) { reaped = false; if (r.process) unreaped.push(r.process); } return r; };
   // Declared credentials never reach saved logs or evidence text; tests and builds can echo their environment.
   const secrets = options.requiredEnv.map(name => ctx.env[name]).filter((v): v is string => !!v).sort((a, b) => b.length - a.length);
   const redact = (text: string) => redactText(text, secrets);
@@ -164,7 +166,7 @@ export async function runAppleSimulator(options: AppleSimulatorOptions, ctx: Dev
         try {
           const exe = resolveTool(options.build.command[0]!, ctx.cwd, ctx.env);
           // A build whose slot was reclaimed must stop: another holder may already be building.
-          const r = exe ? track(await exec({ ...tool, signal: AbortSignal.any([slot.lease.lost, ...(ctx.signal ? [ctx.signal] : [])]) }, exe, options.build.command.slice(1), { timeoutMs: options.build.timeoutMinutes * 60_000 })) : null;
+          const r = exe ? track(await exec({ ...tool, signal: AbortSignal.any([slot.lease.lost, ...(ctx.signal ? [ctx.signal] : [])]) }, exe, options.build.command.slice(1), { timeoutMs: options.build.timeoutMinutes * 60_000, reinspectDelayMs: ctx.reinspectDelayMs })) : null;
           const log = saveLog('build.log', r ? transcript(r) : `${options.build.command[0]} is not installed`);
           const status = !r ? 'unavailable' : r.clean ? (r.code === 0 ? 'passed' : 'failed') : 'unknown';
           checks.push({ name: 'build', runner: 'command', status, durationMs: r?.durationMs ?? null, detail: status === 'passed' ? 'Build command passed.' : `Build ${status}${r?.code ? ` (exit ${r.code})` : ''}${r?.cleanup ? `; process cleanup ${r.cleanup}` : ''}: ${tail(r ? transcript(r) : '', 600)}`, log });
@@ -172,7 +174,12 @@ export async function runAppleSimulator(options: AppleSimulatorOptions, ctx: Dev
           else if (status !== 'passed') problem = 'The build did not complete cleanly.';
           // Copy while still holding the slot: the next build may overwrite this output before it is installed.
           else built = existsSync(appPath) ? snapshot(appPath, snapshotDir) : null;
-        } finally { slot.lease.release(); }
+        } finally {
+          // A build that may still be running keeps the slot, so no other build writes the same output meanwhile.
+          if (unreaped.length) slot.lease.retain(unreaped, 'build process not confirmed stopped');
+          else slot.lease.release();
+          unreaped = [];
+        }
       }
     }
     if (!problem && !failedBuild && !artifact) {
@@ -198,7 +205,7 @@ export async function runAppleSimulator(options: AppleSimulatorOptions, ctx: Dev
       const outcome = await onSimulator(options, ctx, { ...tool, signal: AbortSignal.any([held.lost, ...(ctx.signal ? [ctx.signal] : [])]) }, held, artifact, installPath, sha, checks, saveLog, track, keep);
       device = outcome.device;
       problem = outcome.problem;
-      const cleanup = await finishLease(held, tool, outcome.owned);
+      const cleanup = await finishLease(held, tool, outcome.owned, unreaped);
       leaseRecord = { ...leaseRecord, releasedAt: Date.now(), cleanup: cleanup.ok ? 'released' : 'cleanup_failed' };
       if (!cleanup.ok) problem = `Simulator cleanup was not confirmed (${cleanup.detail}). Its slot stays held; inspect it and run "ym devices reap" or "ym devices release".`;
     }
@@ -237,7 +244,7 @@ export async function runAppleSimulator(options: AppleSimulatorOptions, ctx: Dev
 async function onSimulator(options: AppleSimulatorOptions, ctx: DeviceRunContext, tool: ToolContext, lease: LeaseHandle, artifact: NonNullable<DeviceEvidence['artifact']>,
   installPath: string, sha: string | null, checks: Check[], saveLog: (name: string, text: string) => string, track: (r: ExecResult) => ExecResult,
   keep: (file: string, kind: Files[number]['kind']) => void) {
-  const owned: OwnedResource[] = [];
+  const owned: SimulatorResource[] = [];
   const result = { device: null as DeviceEvidence['device'], problem: null as string | null, owned };
   const step = (name: string, runner: string, r: ExecResult, detail: string) => {
     track(r);
@@ -287,7 +294,7 @@ async function onSimulator(options: AppleSimulatorOptions, ctx: DeviceRunContext
       }
       const env = { ...tool.env, YARDMASTER_DEVICE_UDID: sim.udid, YARDMASTER_DEVICE_KIND: 'simulator', YARDMASTER_APP_PATH: installPath,
         YARDMASTER_BUNDLE_ID: options.bundleId, YARDMASTER_ARTIFACT_DIR: dir, YARDMASTER_VERIFY_SHA: sha ?? '' };
-      const r = track(await exec({ ...tool, env }, exe, argv.slice(1), { timeoutMs: test.timeoutMinutes * 60_000 }));
+      const r = track(await exec({ ...tool, env }, exe, argv.slice(1), { timeoutMs: test.timeoutMinutes * 60_000, reinspectDelayMs: ctx.reinspectDelayMs }));
       const log = saveLog(`test-${test.name}.log`, transcript(r));
       const status = r.clean ? (r.code === 0 ? 'passed' : 'failed') : 'unknown';
       checks.push({ name: test.name, runner: test.runner, status, durationMs: r.durationMs, detail: status === 'passed' ? 'Passed.' : `${status}${r.code !== null ? ` (exit ${r.code})` : ` (${r.end})`}${r.cleanup ? `; process cleanup ${r.cleanup}` : ''}: ${tail(transcript(r), 600)}`, log });
@@ -311,8 +318,13 @@ async function onSimulator(options: AppleSimulatorOptions, ctx: DeviceRunContext
 }
 
 /** Clean only what this lease recorded, then release. If the lease was reclaimed, the reaper owns cleanup. */
-async function finishLease(lease: LeaseHandle, tool: ToolContext, owned: OwnedResource[]): Promise<{ ok: boolean; detail: string }> {
+async function finishLease(lease: LeaseHandle, tool: ToolContext, owned: SimulatorResource[], unreaped: { pid: number; startedAt: number | null }[]): Promise<{ ok: boolean; detail: string }> {
   if (!lease.holds()) return { ok: false, detail: 'the lease expired and was reclaimed; its reaper cleans its simulators' };
+  // A test that may still be running keeps the device: the reaper confirms it stopped, then cleans and frees.
+  if (unreaped.length) {
+    lease.retain(unreaped, 'device-test process not confirmed stopped');
+    return { ok: false, detail: `${unreaped.length} process(es) not confirmed stopped; the slot stays held until they are` };
+  }
   const cleanup = owned.length ? await cleanupOwnedSimulators(tool, owned) : { ok: true, detail: 'nothing created' };
   if (cleanup.ok) lease.release(); else lease.cleanupFailed(cleanup.detail);
   return cleanup;

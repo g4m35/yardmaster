@@ -502,7 +502,9 @@ function claimed(sha: string, over: { requirement?: string; status?: Record<stri
     checks: [], files: [], lease: null, startedAt: '', completedAt: '', summary: 'provider says ok' };
 }
 function deviceProvider(payload: unknown, input: unknown) {
-  const script = `let s='';process.stdin.on('data',c=>s+=c).on('end',()=>console.log(JSON.stringify(${JSON.stringify(payload)})))`;
+  // Like a real provider, its evidence names the request, project and task it answers.
+  const script = `let s='';process.stdin.on('data',c=>s+=c).on('end',()=>{const r=JSON.parse(s),p=${JSON.stringify(payload)};
+if(p.data&&p.data.evidence)Object.assign(p.data.evidence,{requestId:r.requestId,projectId:r.context.projectId??null,taskId:r.context.taskId??null});console.log(JSON.stringify(p))})`;
   return ServicesConfigSchema.parse({ local: { 'device.test': { service: 'device', command: [process.execPath, '-e', script], protocol: 'json', locality: 'local', cost: 'free' } },
     verify: [{ capability: 'device.test', input }] });
 }
@@ -756,4 +758,86 @@ test('a long run of overlapping matches streams in bounded memory and time', () 
   // Nothing proportional to the file stays allocated: buffers in use stay far below its size.
   assert(process.memoryUsage().arrayBuffers - before < size / 4, 'no file-sized buffer was retained');
   assert.equal(artifactSha256(file), fileSha256(file));
+});
+
+/** A ps whose process census fails while `flag` holds a positive count: ownership inspection then cannot complete. */
+function failingCensus(flag: string, failures: number) {
+  const bin = tempDir('ym-census-');
+  writeFileSync(join(bin, 'ps'), `#!/bin/sh\nfor a in "$@"; do if [ "$a" = "-U" ]; then n=$(cat "${flag}" 2>/dev/null || echo 0); if [ "$n" -gt 0 ]; then echo $((n - 1)) > "${flag}"; exit 1; fi; fi; done\nexec /bin/ps "$@"\n`, { mode: 0o755 });
+  writeFileSync(flag, String(failures));
+  return bin;
+}
+
+test('fix 1: a build not confirmed stopped keeps its build slot until the reaper confirms it gone', async () => {
+  const s = appRepo(), m = fakeMachine(), flag = join(s.home, 'census-failures');
+  const previous = process.env.PATH; process.env.PATH = `${failingCensus(flag, 1_000_000)}:${previous}`;
+  try {
+    const run = await runAppleSimulator(options(), context(s, m, { reinspectDelayMs: 10, env: { PATH: process.env.PATH, HOME: s.home } }));
+    assert.equal(run.result.status, 'unknown'); assert.equal(run.execution.reaped, false);
+    const held = leasesNow().find(l => l.pool === 'build')!;
+    assert.equal(held.state, 'cleanup_failed', 'the slot is not released');
+    assert.equal(held.owned.length, 1); assert.equal(held.owned[0]!.kind, 'process');
+    assert.equal(created(m).length, 0, 'no simulator for a build that may still be running');
+    // The recorded process is the only resource: an empty simulator list must not let the reaper free it.
+    const blocked = await acquireLease({ pool: 'build', capacity: 1, holder: 'other-project', ttlMs: 60_000, waitMs: 4000, pollMs: 250, cleanup: hostCleanup({ PATH: m.PATH }) });
+    assert.equal(blocked.lease, null, 'a contender waits while the build is not confirmed stopped');
+    // Once inspection works again the reaper confirms the process is gone, and the contender gets the slot.
+    writeFileSync(flag, '0');
+    const granted = await acquireLease({ pool: 'build', capacity: 1, holder: 'other-project', ttlMs: 60_000, waitMs: 20_000, pollMs: 250, cleanup: hostCleanup({ PATH: m.PATH }) });
+    assert(granted.lease, 'the slot is freed after the recorded process is confirmed stopped');
+    granted.lease.release();
+  } finally { process.env.PATH = previous; }
+});
+
+test('fix 1: ym devices lease keeps its slot when its command is not confirmed stopped', async () => {
+  const s = appRepo(), flag = join(s.home, 'census-failures');
+  const bin = failingCensus(flag, 1_000_000);
+  const r = await runCli(s.repo, ['devices', 'lease', 'build', '--wait-minutes', '0', '--', process.execPath, '-e', ''], { ...process.env, PATH: `${bin}:${process.env.PATH}`, YARDMASTER_HOME: s.home });
+  assert.match(r.err, /could not be confirmed stopped\. Its build slot stays held/);
+  const held = leasesNow();
+  assert.equal(held.length, 1); assert.equal(held[0]!.state, 'cleanup_failed'); assert.equal(held[0]!.owned[0]!.kind, 'process');
+  assert.deepEqual(await reapLeases(async () => ({ ok: true, detail: '' }), Date.now() + 10_000).then(rs => rs.map(x => x.outcome)), ['released'],
+    'the reaper frees it once the recorded process is confirmed gone (ps works again in this process)');
+});
+
+test('fix 2: a NUL-free binary report with a declared credential is omitted, not byte-substituted', async () => {
+  const s = appRepo(), m = fakeMachine(), secret = 'protobuf-credential-42';
+  // Length-prefixed protobuf field (tag 0x0a, length, value) with no NUL byte and invalid UTF-8 (0xff).
+  const write = `const fs=require('node:fs'),d=process.env.YARDMASTER_ARTIFACT_DIR,v=Buffer.from(process.env.LAB_TOKEN);
+fs.writeFileSync(d+'/report.pb',Buffer.concat([Buffer.from([0x0a,v.length]),v,Buffer.from([0x12,0x02,0xff,0xfe])]));
+fs.writeFileSync(d+'/clean.pb',Buffer.from([0x0a,0x03,0x61,0x62,0x63,0xff]));
+fs.writeFileSync(d+'/mislabeled.log',Buffer.concat([Buffer.from([0xff,0xfe]),v]));`;
+  const run = await runAppleSimulator(options({ requiredEnv: ['LAB_TOKEN'], tests: [{ name: 'proto', runner: 'command', command: [process.execPath, '-e', write] }] }),
+    context(s, m, { env: { PATH: m.PATH, HOME: s.home, LAB_TOKEN: secret } }));
+  assert.equal(run.result.status, 'passed', run.result.summary);
+  const e = run.result.data.evidence;
+  for (const name of ['report.pb', 'mislabeled.log']) {
+    const omitted = e.omitted.find(o => o.path.endsWith(name));
+    assert.equal(omitted?.reason, 'omitted: contains a declared credential', `${name} is omitted`);
+    assert.equal(existsSync(omitted!.path), false);
+    assert(!e.files.some(f => f.path.endsWith(name)));
+  }
+  const clean = e.files.find(f => f.path.endsWith('clean.pb'))!;
+  assert.deepEqual(readFileSync(clean.path), Buffer.from([0x0a, 0x03, 0x61, 0x62, 0x63, 0xff]), 'a binary without secrets is byte-identical');
+});
+
+test('fix 3: evidence from an earlier request for the same commit is neither accepted nor recorded', async () => {
+  const s = appRepo();
+  // A provider replaying a saved pass: right commit, right device, but another request's evidence.
+  const replay = { ...claimed(s.sha, {}), requestId: randomUUID(), projectId: null };
+  const script = `let s='';process.stdin.on('data',c=>s+=c).on('end',()=>console.log(JSON.stringify({status:'passed',summary:'ok',data:{evidence:${JSON.stringify(replay)}}})))`;
+  writeFileSync(join(s.repo, 'yardmaster.json'), JSON.stringify({ services: { local: { 'device.test': { service: 'device', command: [process.execPath, '-e', script], protocol: 'json', locality: 'local', cost: 'free' } },
+    verify: [{ capability: 'device.test', input: { requires: 'simulator' } }] } }));
+  sh(s.repo, 'git', ['commit', '-qam', 'replaying provider']);
+  const env = { ...process.env, YARDMASTER_HOME: s.home };
+  const verified = await runCli(s.repo, ['verify', '--json'], env);
+  assert.equal(verified.code, 1);
+  assert.match(JSON.parse(verified.out).output, /belongs to request .*, not this check's request/);
+  assert.deepEqual(JSON.parse((await runCli(s.repo, ['devices', 'evidence', '--json'], env)).out), [], 'mismatched evidence is not persisted');
+  // Right request but another project's evidence is rejected too.
+  const { bindingProblem } = await import('../src/device-evidence.ts');
+  const e = DeviceEvidenceSchema.parse({ ...claimed(s.sha, {}), requestId: 'r-1', projectId: 'p-other', taskId: 't-a' });
+  assert.match(bindingProblem(e, { requestId: 'r-1', projectId: 'p-this' })!, /names project p-other, not p-this/);
+  assert.match(bindingProblem(e, { requestId: 'r-1', taskId: 't-b' })!, /names task t-a, not t-b/);
+  assert.equal(bindingProblem(e, { requestId: 'r-1', projectId: 'p-other', taskId: 't-a' }), null);
 });

@@ -4,7 +4,7 @@ import { delimiter, resolve } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import * as z from 'zod/v4';
 import { cleanEnv, groupAlive, runOwnedProcess, terminateRecordedProcess, type OwnedRunOptions } from './proc.ts';
-import { OwnedResourceSchema, type OwnedResource, type ResourceCleanup } from './leases.ts';
+import { SimulatorResourceSchema, type ResourceCleanup, type SimulatorResource } from './leases.ts';
 
 /**
  * Apple simulators through Xcode's own `xcrun simctl`. Only simulators Yardmaster created under a lease are ever
@@ -16,6 +16,8 @@ export interface ExecResult {
   ok: boolean; clean: boolean; reaped: boolean; code: number | null; end: string; stdout: string; stderr: string; durationMs: number;
   /** Why process cleanup is not confirmed; empty when it is. */
   cleanup: string;
+  /** The owned command's identity, so a lease can record a process that was not confirmed stopped. */
+  process: { pid: number; startedAt: number | null } | null;
 }
 
 export function resolveTool(name: string, cwd: string, env: NodeJS.ProcessEnv): string | null {
@@ -51,7 +53,7 @@ export async function exec(ctx: Omit<ToolContext, 'xcrun'>, command: string, arg
   }
   const clean = r.end === 'exit' && reaped && r.code !== null;
   return { ok: clean && r.code === 0, clean, reaped, code: r.code, end: r.end, stdout, stderr, durationMs: Date.now() - started,
-    cleanup: reaped ? '' : `${reap.status}${reap.reason ? `: ${reap.reason}` : ''}` };
+    cleanup: reaped ? '' : `${reap.status}${reap.reason ? `: ${reap.reason}` : ''}`, process: r.pid === null ? null : { pid: r.pid, startedAt: r.startedAt } };
 }
 const REINSPECTIONS = 3;
 
@@ -70,7 +72,7 @@ function simctl(ctx: ToolContext, args: string[], timeoutMs = 60_000, cancel = t
       const e = error as (Error & { code?: number | string; killed?: boolean }) | null;
       const end = !e ? 'exit' : e.name === 'AbortError' ? 'aborted' : e.killed ? 'timeout' : typeof e.code === 'number' ? 'exit' : 'spawn_failed';
       const code = !e ? 0 : typeof e.code === 'number' ? e.code : null;
-      resolve({ ok: !e, clean: end === 'exit', reaped: true, cleanup: '', code, end, stdout: String(stdout ?? '').slice(-256 * 1024), stderr: String(stderr ?? '').slice(-64 * 1024), durationMs: Date.now() - started });
+      resolve({ ok: !e, clean: end === 'exit', reaped: true, cleanup: '', process: null, code, end, stdout: String(stdout ?? '').slice(-256 * 1024), stderr: String(stderr ?? '').slice(-64 * 1024), durationMs: Date.now() - started });
     });
   });
 }
@@ -119,8 +121,8 @@ export class OwnedSimulator {
   private constructor(ctx: ToolContext, name: string, udid: string) { this.ctx = ctx; this.name = name; this.udid = udid; }
 
   /** `own` must durably record the name before creation so a crash right after creation can still be cleaned up. */
-  static async create(ctx: ToolContext, name: string, target: Target, own: (resource: OwnedResource) => void): Promise<OwnedSimulator> {
-    own(OwnedResourceSchema.parse({ kind: 'simulator', name, udid: null }));
+  static async create(ctx: ToolContext, name: string, target: Target, own: (resource: SimulatorResource) => void): Promise<OwnedSimulator> {
+    own(SimulatorResourceSchema.parse({ kind: 'simulator', name, udid: null }));
     const r = await simctl(ctx, ['create', name, target.deviceType.identifier, target.runtime.identifier], 120_000);
     const udid = r.stdout.trim().split('\n').at(-1)?.trim() ?? '';
     if (!r.ok || !/^[0-9A-F-]{36}$/i.test(udid)) throw new Error(`could not create simulator ${name} (${r.end}${r.code !== null ? ` ${r.code}` : ''})`);
@@ -147,13 +149,13 @@ export class OwnedSimulator {
  * Shut down and delete simulators this lease recorded, after confirming each still carries the recorded unique
  * name. Runs without the cancellation signal: cleanup must finish after a cancel. Success means confirmed absent.
  */
-export async function cleanupOwnedSimulators(ctx: ToolContext, owned: OwnedResource[]): Promise<{ ok: boolean; detail: string }> {
+export async function cleanupOwnedSimulators(ctx: ToolContext, owned: SimulatorResource[]): Promise<{ ok: boolean; detail: string }> {
   const quiet = { ...ctx, signal: undefined };
   const problems: string[] = [];
   let list: SimList;
   try { list = await listSimulators(quiet); } catch (error) { return { ok: false, detail: (error as Error).message }; }
   const devices = Object.values(list.devices).flat();
-  for (const resource of owned.filter(r => r.kind === 'simulator')) {
+  for (const resource of owned) {
     const found = devices.find(d => resource.udid ? d.udid === resource.udid : d.name === resource.name);
     if (!found) continue;
     if (found.name !== resource.name || !resource.name.startsWith('ym-')) { problems.push(`${found.udid} is not named ${resource.name}; left untouched`); continue; }
