@@ -205,3 +205,29 @@ export async function hasConflictMarkers(cwd: string, files: string[]): Promise<
   }
   return bad;
 }
+
+export interface ChangeFile { path: string; added: number | null; removed: number | null }
+export interface Change { files: ChangeFile[]; patch: string; truncated: boolean }
+
+/**
+ * What a task changed, for reading before approval. With `head`, the committed artifact; without it,
+ * the working copy at `cwd` against `base` (tracked files only: untracked files have no diff until saved).
+ */
+export async function changeSince(cwd: string, base: string, head: string | null, maxBytes = 400_000): Promise<Change> {
+  const range = head ? [base, head] : [base];
+  const opts = ['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', '--find-renames'];
+  const stat = (await git(cwd, [...opts, '--numstat', '-z', ...range, '--'], { timeoutMs: 30_000 })).stdout;
+  const files: ChangeFile[] = [];
+  const parts = stat.split('\0');
+  for (let i = 0; i < parts.length; i++) {
+    const m = /^(-|\d+)\t(-|\d+)\t(.*)$/s.exec(parts[i]!);
+    if (!m) continue;
+    // A rename lists an empty path, then the old and new paths as the next two fields.
+    const path = m[3] ? m[3] : (i += 2, parts[i]!);
+    files.push({ path, added: m[1] === '-' ? null : Number(m[1]), removed: m[2] === '-' ? null : Number(m[2]) });
+  }
+  const full = (await git(cwd, [...opts, ...range, '--'], { timeoutMs: 30_000 })).stdout;
+  if (full.length <= maxBytes) return { files, patch: full, truncated: false };
+  const cut = full.lastIndexOf('\n', maxBytes);
+  return { files, patch: full.slice(0, cut > 0 ? cut : maxBytes), truncated: true };
+}

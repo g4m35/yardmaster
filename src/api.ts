@@ -6,7 +6,7 @@ import { checkLiveOverlap, type Coordinator, type TaskPatch } from './coordinato
 import { ACTIVE_STATUSES, NewTaskSchema, STATUS_LABEL, TASK_STATUSES, TERMINAL_STATUSES, type Task, type TaskStatus } from './types.ts';
 import { paths } from './paths.ts';
 import { clip, formatUsd, tail } from './text.ts';
-import { revParse } from './git.ts';
+import { changeSince, revParse } from './git.ts';
 import type { Config } from './config.ts';
 import type { Supervisor } from './supervisor.ts';
 import { diskReport } from './janitor.ts';
@@ -224,6 +224,24 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       return { status: t?.status ?? 'missing', control: t?.control ?? null, assignee: t?.assignee ?? null, attempts: t?.attempts ?? 0, generation: t?.generation ?? 0, head_sha: t?.head_sha ?? null, branch: t?.branch ?? null, lease_until: t?.lease_until ?? null };
     }),
     'task.control': method(z.object({ id: Id, action: z.enum(['retry', 'cancel', 'stop', 'approve', 'prioritize', 'redirect', 'confirm-stopped']), by: z.string().default('you'), note: z.string().max(4000).optional(), remote: z.boolean().optional() }), (p) => coord.control(p.id, p.action, p.by, p.note, { remote: p.remote })),
+    // The change itself, so the owner can read it before approving. Owner-only: workers are not allowlisted.
+    'task.diff': method(z.object({ id: TaskId }), async (p) => {
+      const task = coord.getTask(p.id);
+      if (!task) throw new Error(`No task ${p.id}`);
+      const none = (note: string) => ({ source: null, files: [], patch: '', truncated: false, note });
+      if (!task.base_sha) return none('Nothing changed yet. The change appears here once an agent starts.');
+      const copy = task.worktree && existsSync(task.worktree) ? task.worktree : null;
+      // A saved artifact is what approval merges; a live working copy is what an unfinished attempt has so far.
+      const artifact = task.head_sha && (['verifying', 'ready', 'merging', 'done', 'canceled'].includes(task.status) || !copy);
+      const root = coord.getProject(task.project_id)?.root;
+      try {
+        if (artifact && root) return { source: 'artifact', ...(await changeSince(root, task.base_sha, task.head_sha)), note: null };
+        if (copy) return { source: 'working copy', ...(await changeSince(copy, task.base_sha, null)), note: null };
+      } catch (err) {
+        return none(`This hub cannot read the change: ${clip((err as Error).message, 200)}`);
+      }
+      return none('Its working copy is on another machine or was removed, and no saved change has reached this hub.');
+    }),
     'task.logs': method(z.object({ id: Id, lines: z.number().int().min(1).max(2000).default(80) }), (p) => {
       const run = coord.latestRun(p.id);
       if (!run) return '';

@@ -68,6 +68,9 @@ class Element {
   focus() { this.doc.activeElement = this; }
   setSelectionRange(start: number, end: number, direction = 'none') { this.selectionStart = start; this.selectionEnd = end; this.selectionDirection = direction; }
   showModal() { this.open = true; }
+  show() { this.open = true; }
+  click() { void this.dispatch('click'); }
+  removeAttribute(k: string) { this.attrs.delete(k); }
   close() { this.open = false; void this.dispatch('close'); }
   cloneNode() {
     const n = new Element(this.tagName, this.doc);
@@ -117,7 +120,7 @@ function entry(overrides = {}) {
 function snapshot(entries = [entry()]) { return { generatedAt: now, entries, coverage: { historyLimit: 100, unknownSignals: ['native process liveness'], sessionsTruncated: false, machinesTruncated: false } }; }
 function board() { return { projects: [{ id: 'p-one', name: 'Fixture' }], active: [{ id: 't-one', title: 'Exact fixture task', status: 'running' }], attention: [], recentDone: [], machines: [], sessions: [], paused: { paused: false }, warnings: [], spentToday: 0, dailyBudget: 10 }; }
 function detail(id = 't-one') { return { task: { id, title: 'Exact ' + id, status: 'running', scope: [], attempts: 1, max_attempts: 3, cost_usd: 0 }, runs: [], deps: [], label: 'Working' }; }
-function harness(options: { token?: string | null; hash?: string } = {}) {
+function harness(options: { token?: string | null; hash?: string; wide?: boolean } = {}) {
   const doc = new Document();
   for (const id of ['app', 'toast']) { const n = doc.createElement('div'); n.setAttribute('id', id); doc.body.append(n); }
   for (const id of ['tpl-main', 'tpl-gate']) {
@@ -129,6 +132,7 @@ function harness(options: { token?: string | null; hash?: string } = {}) {
   const timers = new Map<number, { fn: Function; ms: number }>(); let nextTimer = 1;
   let respond: (method: string, params: any) => any = method => method === 'board.status' ? board() : method === 'registry.list' ? snapshot() : method === 'task.get' ? detail() : '';
   const context: any = { document: doc, Node: Element, URLSearchParams, Date, console,
+    ...(options.wide ? { matchMedia: () => ({ matches: true, addEventListener() {} }) } : {}),
     location: { hash: options.hash || '', pathname: '/' }, history: { replaceState() { context.location.hash = ''; } },
     localStorage: { getItem: (k: string) => storage.get(k) || null, setItem: (k: string, v: string) => storage.set(k, v), removeItem: (k: string) => storage.delete(k) },
     setTimeout(fn: Function, ms: number) { const id = nextTimer++; timers.set(id, { fn, ms }); return id; }, clearTimeout(id: number) { timers.delete(id); },
@@ -228,36 +232,94 @@ test('connection records stay folded until one needs a look, and name each agent
   assert.equal(h.$('conn-summary').textContent, 'Could not refresh');
 });
 
-test('task detail shows stage, changed files, the full request and history, and keeps opened sections and the log across refreshes', async () => {
+test('task detail opens on the tab its state calls for and keeps the chosen tab, the log and focus across refreshes', async () => {
   const h = harness(); await h.api.refresh();
   const wt = '/home/fixture/work/ym-managed/shop-1a2b3c/t-one';
   const full = { ...detail(), label: 'Checking', task: { ...detail().task, status: 'verifying', title: 'Exact fixture task', prompt: 'Exact fixture task. Then a second sentence with the detail.', budget_usd: 3, cost_usd: 1.2,
-      started_at: now - 20 * 60_000, branch: 'yardmaster/t-one', base_sha: 'bf5811951c3f618a8a43c5648eae95f7014215cc', worktree: wt },
+      started_at: now - 20 * 60_000, branch: 'yardmaster/t-one', base_sha: 'bf5811951c3f618a8a43c5648eae95f7014215cc', worktree: wt, project_id: 'p-one' },
     runs: [{ role: 'implement', agent: 'claude', model: 'opus', effort: 'high', phase: 'verify', cost_estimated: true, touched: ['src/a.ts', 'src/b.ts'] }],
     events: [{ id: 1, ts: now - 60_000, message: 'claude (opus) started "Exact fixture task"' }] };
-  h.respond(method => method === 'task.get' ? full : method === 'task.logs' ? `16:24 tool Bash cd "${wt}"; npm test\n16:25 edit Write ${wt}/src/a.ts` : method === 'registry.list' ? snapshot() : board());
+  h.respond(method => method === 'task.get' ? full : method === 'task.logs' ? `16:24 tool Bash cd "${wt}"; npm test\n16:25 edit Write ${wt}/src/a.ts` : method === 'registry.list' ? snapshot() : method === 'task.diff' ? null : board());
   await h.api.showTask('t-one'); await new Promise(resolve => setImmediate(resolve));
   assert.equal(h.$('d-title').textContent, 'Exact fixture task');
+  assert.equal(h.$('d-crumb').textContent, 'Fixture / t-one');
   assert.equal(h.$('d-status').textContent, 'CheckingRunning checks');
   assert.deepEqual(h.$('d-track').children.map(node => node.className), ['past', 'past', 'now', '', '']);
-  assert.match(h.$('d-facts').textContent, /Agentclaude · opus · high effort.*Cost\$1\.20 of \$3 \(estimated\).*Taskt-one/);
-  assert.match(h.$('d-body').textContent, /Files changed so far · 2src\/a\.tssrc\/b\.tsFull requestExact fixture task\. Then a second sentence[\s\S]*History[\s\S]*Technical details[\s\S]*git diff bf5811951c3f\.\.\.yardmaster\/t-one/);
+  assert.match(h.$('d-facts').textContent, /Agentclaude · opus · high effort.*Cost\$1\.20 of \$3 \(estimated\)Attempt1 of 3$/);
+  assert.match(h.$('panel-details').textContent, /Taskt-oneBranchyardmaster\/t-one/);
+  // A task being checked opens on its live activity; everything else is one tab away.
+  assert.equal(h.$('panel-activity').hidden, false); assert.equal(h.$('panel-changes').hidden, true);
+  assert.equal(h.$('tab-activity').getAttribute('aria-selected'), 'true');
+  assert.equal(h.$('tab-changes').textContent, 'Changes2');
+  assert.match(h.$('panel-changes').textContent, /Files changed so far · 2src\/a\.tssrc\/b\.ts/);
+  assert.match(h.$('panel-request').textContent, /Full requestExact fixture task\. Then a second sentence/);
+  assert.match(h.$('panel-history').textContent, /claude \(opus\) started "Exact fixture task"/);
+  assert.match(h.$('panel-details').textContent, /git diff bf5811951c3f\.\.\.yardmaster\/t-one/);
   assert.equal(h.$('d-log').textContent, '16:24 tool Bash npm test\n16:25 edit Write src/a.ts');
-  const sections = h.$('d-body').children.filter(node => node.tagName === 'DETAILS');
-  const technical = sections.find(node => node.textContent.startsWith('Technical details'))!;
-  assert.equal(technical.hasAttribute('open'), false);
-  technical.open = true; await technical.dispatch('toggle');
+  assert.equal(h.calls.filter(c => c.method === 'task.diff').length, 0);
+  await h.$('tab-details').dispatch('click');
+  assert.equal(h.$('panel-details').hidden, false); assert.equal(h.$('panel-activity').hidden, true);
   h.$('d-log').scrollHeight = 500; h.$('d-log').clientHeight = 100; h.$('d-log').scrollTop = 40;
-  technical.children[0]!.focus();
+  h.$('tab-details').focus();
   await h.api.showTask('t-one', true);
-  // Focus follows the rebuilt summary instead of dropping to the page behind the dialog.
-  assert.equal(h.doc.activeElement.textContent, 'Technical details'); assert.equal(h.doc.activeElement.isConnected, true);
-  const reopened = h.$('d-body').children.filter(node => node.tagName === 'DETAILS').find(node => node.textContent.startsWith('Technical details'))!;
-  assert.equal(reopened.hasAttribute('open'), true);
+  // The chosen tab, the focused control and the log position survive the rebuild.
+  assert.equal(h.$('panel-details').hidden, false); assert.equal(h.$('panel-activity').hidden, true);
+  assert.equal(h.doc.activeElement.id, 'tab-details'); assert.equal(h.doc.activeElement.isConnected, true);
   assert.equal(h.$('d-log').textContent, '16:24 tool Bash npm test\n16:25 edit Write src/a.ts');
   assert.equal(h.$('d-log').scrollTop, 40);
+  // Opening the change asks the hub for it once.
+  await h.$('tab-changes').dispatch('click'); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.calls.filter(c => c.method === 'task.diff').length, 1);
   h.api.showEntry('run:r-one');
   assert.equal(h.$('d-status').textContent, ''); assert.equal(h.$('d-track').hidden, true);
+});
+
+test('the change tab shows each changed file and its lines, read once from the hub', async () => {
+  const h = harness(); await h.api.refresh();
+  const ready = { ...detail(), label: 'Ready to merge', runs: [{ role: 'implement', agent: 'claude', touched: ['src/a.ts'] }],
+    task: { ...detail().task, status: 'ready', attention: 'Checks and review passed. Waiting for your approval.', base_sha: 'b'.repeat(40), head_sha: 'c'.repeat(40), branch: 'yardmaster/t-one' } };
+  const patch = 'diff --git a/src/a.ts b/src/a.ts\nindex 1111111..2222222 100644\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,2 +1,2 @@\n keep\n-old line\n+new line\n';
+  h.respond(method => method === 'task.get' ? ready : method === 'task.diff' ? { source: 'artifact', files: [{ path: 'src/a.ts', added: 1, removed: 1 }], patch, truncated: false, note: null } : method === 'registry.list' ? snapshot() : board());
+  await h.api.showTask('t-one'); await new Promise(resolve => setImmediate(resolve));
+  // A finished change opens on the change itself, next to the approval it is waiting for.
+  assert.equal(h.$('panel-changes').hidden, false);
+  assert.ok(h.$('d-acts').querySelectorAll('[data-focus]').some(node => node.textContent === 'Approve and merge'));
+  const change = h.$('d-change');
+  assert.match(change.textContent, /^1 file · \+1 −1src\/a\.ts\+1 −1src\/a\.ts@@ -1,2 \+1,2 @@ keep-old line\+new line/);
+  assert.deepEqual(all(change, 'ad').map(node => node.textContent), ['+new line']);
+  assert.deepEqual(all(change, 'dl').map(node => node.textContent), ['-old line']);
+  assert.doesNotMatch(change.textContent, /index 1111111|\+\+\+ b\//);
+  await h.api.showTask('t-one', true); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.calls.filter(c => c.method === 'task.diff').length, 1);
+  assert.match(h.$('d-change').textContent, /\+new line/);
+});
+
+test('keys move through the list beside the open task, and approving takes a second press', async () => {
+  const h = harness({ wide: true });
+  const running = { id: 't-two', title: 'Running fixture', status: 'running' };
+  const ready = { id: 't-one', title: 'Approval fixture', status: 'ready', needsApproval: true };
+  const details: Record<string, any> = {
+    't-one': { ...detail('t-one'), label: 'Ready to merge', task: { ...detail('t-one').task, status: 'ready', attention: 'Waiting for your approval.' } },
+    't-two': detail('t-two'),
+  };
+  h.respond((method, params) => method === 'board.status' ? { ...board(), active: [running, ready], attention: [{ id: 't-one', title: 'Approval fixture', status: 'ready', why: 'Waiting for your approval.' }] }
+    : method === 'registry.list' ? snapshot([]) : method === 'task.get' ? details[params.id] : method === 'task.diff' ? null : '');
+  await h.api.refresh();
+  const press = async (key: string) => { for (const fn of h.doc.listeners.get('keydown') || []) await fn({ key, target: h.doc.body, preventDefault() {} }); await new Promise(resolve => setImmediate(resolve)); };
+  await press('j');
+  // Wide screens show the task beside the list instead of covering it.
+  assert.equal(h.api.state().openTask, 't-one'); assert.equal(h.$('drawer').open, true); assert.equal(h.$('overview').hidden, true);
+  assert.deepEqual(all(h.$('board'), 'sel').map(node => node.getAttribute('data-focus')), ['task:t-one']);
+  await press('j'); assert.equal(h.api.state().openTask, 't-two');
+  await press('k'); assert.equal(h.api.state().openTask, 't-one');
+  await press('a');
+  assert.equal(h.calls.filter(c => c.method === 'task.control').length, 0);
+  assert.match(h.$('toast').textContent, /Press A again/);
+  await press('a');
+  assert.deepEqual(h.calls.filter(c => c.method === 'task.control').map(c => [c.params.id, c.params.action]), [['t-one', 'approve']]);
+  await press('Escape');
+  assert.equal(h.$('drawer').open, false); assert.equal(h.$('overview').hidden, false);
+  assert.equal(all(h.$('board'), 'sel').length, 0);
 });
 
 test('a task stopped for touching other files can have its allowed files widened from its detail', async () => {
@@ -268,7 +330,9 @@ test('a task stopped for touching other files can have its allowed files widened
   await h.api.showTask('t-one');
   // The last run's phase is history once the task has stopped.
   assert.equal(h.$('d-status').textContent, 'Needs you');
-  const section = h.$('d-body').children.find(node => node.tagName === 'DETAILS' && node.textContent.startsWith('Files it may change'))!;
+  const section = h.$('panel-changes').children.find(node => node.tagName === 'DETAILS' && node.textContent.startsWith('Files it may change'))!;
+  // A stopped task opens on its change, where the allowed files are edited.
+  assert.equal(h.$('panel-changes').hidden, false);
   assert.equal(section.hasAttribute('open'), true);
   // Files a pattern already allows are not reported again.
   assert.match(section.textContent, /stopped for changing 2 files outside this list: docs\/ledger\.md, src\/privacy\/map\.ts/);

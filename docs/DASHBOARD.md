@@ -2,6 +2,22 @@
 
 The dashboard serves one trusted owner from their personal hub. Two iterations are recorded here, newest first. The second replaced the layout of the first after the first real trial; the data and interaction contracts of the first still hold unless this section says otherwise.
 
+## Iteration 3: console (0.9.2)
+
+**Evidence.** The owner opened the departure-board build and said it "looks the same" as the old dashboard. The structure had changed, but the colors, header, type and cards had not, so at a glance nothing had. Three rendered directions were shown (Console, Tracks, Briefing); the owner picked Console.
+
+**Direction.** A three-pane operator console, dark, with no page scrolling on wide screens. The list stays in place while the right pane switches between the hub overview and the selected task, so reading one task after another is J, J, J rather than open, close, open.
+
+**What changed.**
+- Left rail: brand, project, stage counts, machines, today's spend, pause and the live indicator.
+- Middle: the work list. Groups: Needs you (stopped work), In progress (closest to merging first), Up next, Finished. A filter matches task names, agents and ids.
+- Right: the overview (status sentence, Needs you with its buttons, heads up, what just happened, cleanup, agents and connections), or the selected task.
+- Task: status pill and stage track, the facts that decide the next click (agent, time, cost, attempt, reviews), the actions, then tabs. The default tab follows the state: Changes once there is a change or the task was stopped, Activity while it runs or is checked, Request while it waits. The chosen tab is kept per task across refreshes.
+- Changes reads `task.diff`: per-file added and removed counts, then the patch with additions and removals marked. The committed artifact is shown once it exists, so what the owner reads is what approval merges. Before that, the working copy is shown, with a note that it can still change and that new files appear once saved.
+- Narrow screens: one column in the order status, Needs you, the list, then history and housekeeping. A task opens as a full-screen dialog with the same tabs.
+
+**Contracts kept.** Every behavior covered by the iteration 2 tests stays: one row per task, approval counted once, approve from Needs you, folded connections that open on trouble, the allowed-files editor, kept drafts, log position and focus across refreshes, the feed toggle, registry rules and owner-only RPCs.
+
 ## Iteration 2: departure board (0.9.2)
 
 ### Evidence
