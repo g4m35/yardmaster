@@ -408,7 +408,7 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
     for (const command of config.worktree.setup) {
       await api['run.update']({ runId, patch: { phase: 'setup:spawning' } });
       attemptReaped = false;
-      const r = await runShell(command, { cwd: wt, timeoutMs: config.verifyTimeoutMinutes * 60_000, signal: ctx.signal, onSpawn: async ({ pid, startedAt }) => { await api['run.update']({ runId, patch: { phase: 'setup', pid, proc_started: startedAt } }); } });
+      const r = await runShell(command, { cwd: wt, env: cleanEnv({ CI: '1' }, { pass: config.env.checks.pass }), timeoutMs: config.verifyTimeoutMinutes * 60_000, signal: ctx.signal, onSpawn: async ({ pid, startedAt }) => { await api['run.update']({ runId, patch: { phase: 'setup', pid, proc_started: startedAt } }); } });
       attemptReaped = r.reaped;
       if (!r.reaped) { attemptReaped = false; await api['run.update']({ runId, patch: { status: 'cleanup_failed' } }); return finishNeedsHuman(ctx, 'A setup process survived cleanup; work is held for recovery.'); }
       await api['run.update']({ runId, patch: { phase: 'prepare', pid: null, proc_started: null } });
@@ -596,7 +596,7 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
   finalUsageRecorded = false;
   coding = startOwnedProcess(spec.command, spec.args, {
     cwd: wt, env: cleanEnv({ ...spec.env, YARDMASTER_TASK_ID: task.id, YARDMASTER_ATTEMPT: String(task.attempts),
-      YARDMASTER_GENERATION: String(task.generation), YARDMASTER_PROJECT_ID: task.project_id }),
+      YARDMASTER_GENERATION: String(task.generation), YARDMASTER_PROJECT_ID: task.project_id }, { agent: ctx.agent, pass: config.env.pass }),
     stdin: spec.stdin, signal: ctx.signal,
     onSpawn: async ({ pid, startedAt }) => {
       await api['run.update']({ runId, patch: { phase: 'agent', pid, proc_started: startedAt } });
@@ -801,7 +801,7 @@ async function runNativeArtifact(ctx: RunContext, runId: string, log: LogBuffer,
   for (const command of config.worktree.setup) {
     await api['run.update']({ runId, patch: { phase: 'setup:spawning' } });
     setAttemptReaped(false);
-    const result = await runShell(command, { cwd: wt, timeoutMs: config.verifyTimeoutMinutes * 60_000, signal: ctx.signal,
+    const result = await runShell(command, { cwd: wt, env: cleanEnv({ CI: '1' }, { pass: config.env.checks.pass }), timeoutMs: config.verifyTimeoutMinutes * 60_000, signal: ctx.signal,
       onSpawn: async ({ pid, startedAt }) => { await api['run.update']({ runId, patch: { phase: 'setup', pid, proc_started: startedAt } }); } });
     setAttemptReaped(result.reaped);
     if (!result.reaped) { await api['run.update']({ runId, patch: { status: 'cleanup_failed' } }); return finishNeedsHuman(ctx, 'Native setup process requires recovery.'); }
@@ -858,6 +858,7 @@ async function acceptArtifact(ctx: RunContext, wt: string, baseSha: string, file
     phase('collect');
     const result = await ctx.verifySlots.use(() => runVerify(wt, commands, config.verifyTimeoutMinutes, ctx.signal,
       async ({ pid, startedAt }) => { await api['run.update']({ runId, patch: { phase: 'verify', pid, proc_started: startedAt } }); }, {
+        envPass: config.env.checks.pass,
         ...serviceVerificationHooks(config.services, { projectId: task.project_id, taskId: task.id, runId },
           (level, kind, message, data) => event(ctx, level, kind, message, data), {
             begin: intent => api['run.service']({ runId, taskId: task.id, owner: claimOwner(task), action: { kind: 'begin', ...intent } }),

@@ -110,6 +110,8 @@ const node = process.execPath;
 const fixture = join(dir, 'agent.mjs');
 writeFileSync(fixture, `
 import { writeFileSync, renameSync } from 'node:fs';
+// Match prompt-driven CLIs: output starts only after process registration delivers stdin.
+for await (const chunk of process.stdin) {}
 const mode = process.env.FIXTURE_MODE;
 const pidFile = process.env.FIXTURE_PID;
 if (pidFile) { writeFileSync(pidFile + '.tmp', String(process.pid)); renameSync(pidFile + '.tmp', pidFile); }

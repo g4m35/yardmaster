@@ -49,3 +49,26 @@ that speak ACP as background workers) is a natural plugin.
 ## Native session identity
 
 A working directory is not proof that two clients are the same session. Every hook uses its server-returned canonical project/machine-scoped ID; each MCP connection has an independent identity by default. If one interactive client should share reservations between its hooks and MCP tools, launch it with a unique `YARDMASTER_SESSION` inherited by both. If the client filters MCP environment variables, explicitly forward that value in its MCP configuration. Do not reuse it across independently editing clients. Release a conflicting MCP reservation before a hook edit when those identities are intentionally separate. Existing matching legacy registration IDs keep their locks and task claims.
+
+## Subprocess environment configuration
+
+Managed coding agents, plans and reviews inherit the normal environment after secret filtering. Setup and verification shell commands use the same filter, without agent authentication exceptions. Proxy addresses, locale, PATH and CA certificate settings remain available unless their name or value matches a secret rule. Provider subprocesses retain their separate restricted environment.
+
+The filter removes token/secret/key names, password/credential names, `AWS_*`, `AZURE_*`, and URLs containing `user:password@` credentials (including `DATABASE_URL`). It always removes `YARDMASTER_TOKEN`, `YARDMASTER_HUB` and inherited Git worktree overrides. Variable values are never logged by this filter.
+
+Authentication exceptions belong to the selected adapter: Claude gets `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN`; Codex gets `OPENAI_API_KEY`, `OPENAI_ORG_ID`, `OPENAI_PROJECT_ID` and `CODEX_*`; Cursor gets `CURSOR_API_KEY`; Gemini gets `GEMINI_API_KEY`, `GOOGLE_API_KEY` and `GOOGLE_APPLICATION_CREDENTIALS`; OpenCode gets `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY` and `OPENCODE_*`. Other provider credentials, custom adapters and authenticated proxy URLs need an explicit exception.
+
+Region, profile and endpoint names (`AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_PROFILE`, `AZURE_OPENAI_ENDPOINT` and similar) are not treated as secrets, and neither is a URL that names only a user (`ssh://git@github.com/...`). Cloud sign-in for an agent passes through when that agent is set up to use it: Claude Code keeps `AWS_*` when `CLAUDE_CODE_USE_BEDROCK` is set, and keeps `GOOGLE_APPLICATION_CREDENTIALS`, `ANTHROPIC_VERTEX_PROJECT_ID` and `CLOUD_ML_REGION` when `CLAUDE_CODE_USE_VERTEX` is set. Codex keeps `AZURE_OPENAI_API_KEY`.
+
+Set named exceptions in global configuration or the project's `yardmaster.json`. `env.pass` applies to agents (including plans/reviews); `env.checks.pass` applies to setup and verification commands. Entries are exact, case-sensitive variable names, without values or wildcard expansion. Lists default to empty. A hub administrator token cannot be passed through either list.
+
+```json
+{
+  "env": {
+    "pass": ["PROJECT_API_TOKEN"],
+    "checks": { "pass": ["DATABASE_URL", "NPM_TOKEN"] }
+  }
+}
+```
+
+Only pass credentials the selected processes actually need. Environment filtering reduces accidental inheritance; agents and commands still run as your user and can access files allowed by their sandbox.

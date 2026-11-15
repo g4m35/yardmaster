@@ -4,6 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import { removeFast } from './fastfs.ts';
 import { LEASE_MS, type Coordinator } from './coordinator.ts';
 import { paths } from './paths.ts';
+import { fromLiteralPattern } from './scope.ts';
 import { git, gitOut, isAncestor, isClean, isLinkedWorktreeOf, listWorktrees, removeWorktree, revParse } from './git.ts';
 import { isAlive, processStartTime, terminateRecordedProcess } from './proc.ts';
 import { recoverUtilities, runUtilityKey, taskHasPendingUtilities, utilitiesStopped, PENDING_UTILITY_SQL } from './utility-records.ts';
@@ -68,7 +69,7 @@ export async function planCleanup(coord: Coordinator, projectId?: string, opts: 
 
   const now = Date.now();
   for (const lock of coord.db.prepare('SELECT id, pattern, holder, lease_until FROM locks WHERE lease_until <= ?').all(now) as { id: string; pattern: string; holder: string }[]) {
-    plan.remove.push({ kind: 'lock', target: lock.id, reason: `expired reservation of ${lock.pattern} by ${lock.holder}` });
+    plan.remove.push({ kind: 'lock', target: lock.id, reason: `expired reservation of ${fromLiteralPattern(lock.pattern)} by ${lock.holder}` });
   }
   for (const s of coord.db.prepare('SELECT id, last_seen FROM sessions WHERE last_seen < ?').all(now - 2 * 3600_000) as { id: string }[]) {
     plan.remove.push({ kind: 'session', target: s.id, reason: 'agent session inactive for 2+ hours' });

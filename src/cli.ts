@@ -18,13 +18,13 @@ import { isAlive, run, which } from './proc.ts';
 import { ago, clip, formatUsd, taskTitle } from './text.ts';
 import { STATUS_LABEL, type Task } from './types.ts';
 import { WorkerLoop } from './worker.ts';
-import { connectWorker, fleetClient, joinFleet, normalizeHubUrl, workerCredentialDirectory } from './fleet-client.ts';
+import { connectWorker, fleetClient, joinFleet, isLoopbackHub, normalizeHubUrl, workerCredentialDirectory } from './fleet-client.ts';
 import { resolveEffort, describeEffort } from './effort.ts';
 import { Semaphore } from './runner.ts';
 import { httpTransport } from './transport.ts';
 import { applyConnect, connectPlan, hookPlan, installHooks, installSkill, selfCommand } from './connect.ts';
 import { HOOK_EVENTS, runHook } from './hook.ts';
-import { hookClient } from './hookclient.ts';
+import { hookClient, hubCredential } from './hookclient.ts';
 import { creatorPrompt, loadPlugins, scaffoldPlugin, testPlugin } from './plugins.ts';
 import { PlanError, planGoal } from './planner.ts';
 import { VERSION } from './version.ts';
@@ -71,7 +71,7 @@ function parseArgs(argv: string[]): Args {
 }
 
 const SHORT: Record<string, string> = { f: 'follow', n: 'lines', y: 'yes', j: 'json', h: 'help' };
-const BOOLEAN_FLAGS = new Set(['confirm-stopped', 'remote', 'adopt-legacy-journal', 'scan', 'dedupe', 'restore', 'purge', 'with-hooks', 'no-hooks', 'experimental', 'no-skill', 'now', 'version', 'follow', 'yes', 'json', 'help', 'all', 'dry-run', 'foreground', 'force', 'no-changes-ok', 'watch', 'with-hook', 'no-hub', 'open', 'draft', 'quiet', 'hooks-path']);
+const BOOLEAN_FLAGS = new Set(['confirm-stopped', 'remote', 'adopt-legacy-journal', 'scan', 'dedupe', 'restore', 'purge', 'with-hooks', 'no-hooks', 'experimental', 'no-skill', 'now', 'version', 'follow', 'yes', 'json', 'help', 'all', 'dry-run', 'foreground', 'force', 'no-changes-ok', 'watch', 'with-hook', 'no-hub', 'open', 'draft', 'quiet', 'hooks-path', 'private-network']);
 
 const flag = (a: Args, k: string) => (typeof a.flags[k] === 'string' ? (a.flags[k] as string) : undefined);
 const list = (a: Args, k: string) => flag(a, k)?.split(',').map((s) => s.trim()).filter(Boolean);
@@ -132,13 +132,22 @@ async function startHubInBackground(extra: string[] = []): Promise<string> {
 /** Remote hub if configured, the local running hub if any, otherwise direct database access. */
 async function getClient(a: Args, opts: { needHub?: boolean } = {}): Promise<Client> {
   const remote = flag(a, 'hub') ?? process.env.YARDMASTER_HUB;
-  if (remote) return remoteClient(remote, flag(a, 'token') ?? process.env.YARDMASTER_TOKEN ?? hubToken());
+  if (remote) {
+    const opts = { privateNetwork: a.flags['private-network'] === true || flag(a, 'private-network') === 'true' || process.env.YARDMASTER_PRIVATE_NETWORK === '1' };
+    const explicit = flag(a, 'token') ?? process.env.YARDMASTER_TOKEN;
+    const hubUrl = normalizeHubUrl(remote, opts);
+    const projectId = !explicit && !isLoopbackHub(hubUrl)
+      ? flag(a, 'project') ?? await projectIdFor(await mainRepoRoot(process.cwd()) ?? process.cwd()).catch(() => undefined) : undefined;
+    const { hub, token } = hubCredential(hubUrl, explicit, { ...opts, projectId, machineId: projectId ? machineId() : undefined });
+    if (!token) throw new Error('No local hub token. Start the local hub first.');
+    return remoteClient(hub, token, opts);
+  }
   let url = await runningHubUrl();
   if (!url && opts.needHub && !a.flags['no-hub']) {
     url = await startHubInBackground();
     console.log(dim(`Started the Yardmaster hub in the background (${url}).`));
   }
-  if (url) return remoteClient(url, hubToken());
+  if (url) return remoteClient(url, hubToken(), { ownerLocal: true });
   const coord = new Coordinator(openDb());
   return localClient(buildMethods(coord, { machineId: machineId(), cleanPlan: (p) => planCleanup(coord, p), cleanRun: async (p) => runCleanup(coord, await planCleanup(coord, p)) }));
 }
@@ -664,7 +673,7 @@ async function cmdPair(a: Args) {
     const explicit = flag(a, 'token') ?? process.env.YARDMASTER_TOKEN;
     const local = readHubInfo();
     const localUrl = local ? normalizeHubUrl(local.url, { privateNetwork }) : null;
-    const token = explicit ?? (hub === localUrl ? hubToken() : die('Remote owner operations require an explicit owner credential. Prefer running ym pair invite/list/revoke on the owner hub machine.'));
+    const token = explicit ?? (isLoopbackHub(hub) && hub === localUrl ? hubToken() : die('Remote owner operations require an explicit owner credential. Prefer running ym pair invite/list/revoke on the owner hub machine.'));
     client = fleetClient(hub, token, { privateNetwork });
   } else client = await getClient(a);
   const identity = await client['fleet.identity']({});
@@ -792,13 +801,13 @@ async function cmdMcp(a: Args) {
   // The MCP server needs a hub to run background work; start one quietly if needed.
   const remote = flag(a, 'hub') ?? process.env.YARDMASTER_HUB;
   let client: Client;
-  if (remote) client = remoteClient(remote, flag(a, 'token') ?? process.env.YARDMASTER_TOKEN ?? hubToken());
+  if (remote) client = await getClient(a);
   else {
     // Inside a background task the hub is whoever launched it; never start a stray one (on a remote worker there is
     // no local hub, and the agent's tools then just say so).
     if (process.env.YARDMASTER_TASK_ID && !(await runningHubUrl())) die('No Yardmaster hub on this machine for this background task.');
     const url = (await runningHubUrl()) ?? (await startHubInBackground());
-    client = remoteClient(url, hubToken());
+    client = remoteClient(url, hubToken(), { ownerLocal: true });
   }
   // Loaded only for this command: the MCP SDK is the slowest import, and every other command skips it.
   const { runMcp } = await import('./mcp.ts');
@@ -965,7 +974,7 @@ async function cmdVerify(a: Args) {
   try {
     const receipts: string[] = [];
     const result = await verifyArtifact(cwd, config.verify, config.verifyTimeoutMinutes, stop.signal, undefined, {
-      services: config.services, onServiceResult: run => { receipts.push(run.receiptPath); },
+      envPass: config.env.checks.pass, services: config.services, onServiceResult: run => { receipts.push(run.receiptPath); },
     });
     console.log(JSON.stringify({ ...result, receipts }, null, 2));
     if (!result.ok) process.exitCode = 1;
@@ -1015,7 +1024,7 @@ async function cmdDoctor(a: Args) {
       if (remote) {
         const explicit = flag(a, 'token') ?? process.env.YARDMASTER_TOKEN;
         const local = readHubInfo();
-        if (explicit || (local && normalizeHubUrl(local.url, { privateNetwork }) === url)) client = fleetClient(url, explicit ?? hubToken(), { privateNetwork });
+        if (explicit || (isLoopbackHub(url) && local && normalizeHubUrl(local.url, { privateNetwork }) === url)) client = fleetClient(url, explicit ?? hubToken(), { privateNetwork });
         else {
           const projectId = flag(a, 'project') ?? (root ? await projectIdFor(root) : undefined);
           if (!projectId) throw new Error('Pass --project ID or run from the paired repo to check this worker channel.');

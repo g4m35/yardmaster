@@ -1,3 +1,4 @@
+import { RunPatchSchema, ScopePattern, LiteralPath, TouchedSchema } from './run-schema.ts';
 import { submitSessionHandoff } from './handoff.ts';
 import * as z from 'zod/v4';
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
@@ -15,7 +16,7 @@ import { addLesson, creditLessons, lessonFromFix, lessonsFor, listLessons, markU
 import { coupling, filesIn } from './imports.ts';
 import { PairingStore } from './pairing.ts';
 import { buildRegistry } from './registry.ts';
-import { normalizePattern } from './scope.ts';
+import { literalPattern, normalizePattern } from './scope.ts';
 import { tx } from './transaction.ts';
 import { WORKER_ACTIVE_STATUSES, WORKER_FINALIZE_STATUSES } from './worker-policy.ts';
 import { recordUtility, runUtilityKey, utilitiesStopped, utilities, taskHasPendingUtilities } from './utility-records.ts';
@@ -291,7 +292,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
     'task.adminUpdate': method(z.object({ id: TaskId, patch: z.record(z.string(), z.unknown()) }), (p) => coord.updateTask(p.id, p.patch as TaskPatch, { requestEdit: true })),
     // The owner's answer to "it changed files outside its scope": widen (or correct) what the task may touch.
     // A running attempt keeps the list it started with; the new list applies from the next attempt.
-    'task.setScope': method(z.object({ id: TaskId, scope: z.array(z.string().trim().min(1).max(300)).max(200), by: z.string().default('you') }), (p) => tx(coord.db, () => {
+    'task.setScope': method(z.object({ id: TaskId, scope: z.array(ScopePattern.transform(p => p.trim()).pipe(z.string().min(1).max(300))).max(200), by: z.string().default('you') }), (p) => tx(coord.db, () => {
       const task = coord.getTask(p.id);
       if (!task) throw new Error(`No task ${p.id}`);
       if (task.status === 'done' || task.status === 'canceled') throw new Error(`"${clip(task.title, 60)}" is ${STATUS_LABEL[task.status].toLowerCase()}; its files can no longer change.`);
@@ -361,7 +362,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       return coord.withRunOwner(p.runId ?? '', p.owner && { ...p.owner, statuses: WORKER_FINALIZE_STATUSES },
         () => { throw new Error('Unsequenced task usage is no longer accepted. Upgrade the worker to run.usage absolute snapshots.'); }, p.id);
     }),
-    'task.touched': method(z.object({ taskId: TaskId, runId: RunId, files: z.array(z.string()).max(2000), owner: Owner.optional() }), (p) => checkLiveOverlap(coord, p.taskId, p.runId, p.files, p.owner)),
+    'task.touched': method(z.object({ taskId: TaskId, runId: RunId, files: TouchedSchema, owner: Owner.optional() }), (p) => checkLiveOverlap(coord, p.taskId, p.runId, p.files, p.owner)),
     'task.event': method(
       z.object({ projectId: z.string().nullable(), taskId: z.string().nullable(), level: z.enum(['info', 'warn', 'error', 'success']), kind: z.string(), message: z.string(), data: z.unknown().optional(), owner: Owner.optional() }),
       (p) => tx(coord.db, () => {
@@ -386,7 +387,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
 
     // Hook operations stay small; canonical session registration is a separate identity step.
     'hook.check': method(z.object({ projectId: Id, paths: z.array(z.string()).min(1).max(50), cwd: z.string(), sessionId: Id }), (p) => {
-      const holders = coord.whoHas(p.projectId, p.paths);
+      const holders = coord.whoHas(p.projectId, p.paths, { literal: true });
       if (!holders.length) return null;
       // A folder is shared workspace, not proof that two native clients are the same session.
       const registered = coord.db.prepare('SELECT id FROM sessions WHERE id = ? AND project_id = ?').get(p.sessionId, p.projectId);
@@ -394,7 +395,8 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
     }),
     'hook.reserve': method(z.object({ projectId: Id, sessionName: Id, cwd: z.string(), paths: z.array(z.string()).min(1).max(50), machineId: z.string().nullish() }), (p) => {
       const sessionId = coord.registerSession(p.sessionName, 'hooked-agent', p.projectId, p.cwd, p.machineId ?? null);
-      return coord.claimLocks(p.projectId, sessionId, p.paths, 'edited in an interactive session', 20);
+      // Edited files are names, not patterns: a file literally called src/*.ts must not reserve every .ts file.
+      return coord.claimLocks(p.projectId, sessionId, p.paths.map(literalPattern), 'edited in an interactive session', 20);
     }),
     'board.status': method(z.object({ projectId: z.string().nullish() }), (p) => boardSummary(coord, p.projectId, hooks.supervisor)),
     'board.text': method(z.object({ projectId: z.string().nullish() }), (p) => boardText(coord, p.projectId, hooks.supervisor)),
@@ -418,11 +420,12 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
     ),
 
     'lock.claim': method(
-      z.object({ projectId: Id, holder: Id, patterns: z.array(z.string()).min(1).max(100), reason: z.string().nullish(), ttlMinutes: z.number().min(1).max(24 * 60).default(30) }),
+      z.object({ projectId: Id, holder: Id, patterns: z.array(ScopePattern).min(1).max(100), reason: z.string().nullish(), ttlMinutes: z.number().min(1).max(24 * 60).default(30) }),
       (p) => coord.claimLocks(p.projectId, p.holder, p.patterns, p.reason ?? null, p.ttlMinutes),
     ),
-    'lock.release': method(z.object({ projectId: Id, holder: Id, patterns: z.array(z.string()).optional() }), (p) => coord.releaseLocks(p.projectId, p.holder, p.patterns)),
-    'lock.check': method(z.object({ projectId: Id, paths: z.array(z.string()).min(1).max(200) }), (p) => coord.whoHas(p.projectId, p.paths)),
+    'lock.release': method(z.object({ projectId: Id, holder: Id, patterns: z.array(ScopePattern).max(200).optional() }), (p) => coord.releaseLocks(p.projectId, p.holder, p.patterns)),
+    // Each path is compared with every reservation and active scope on the shared event loop; keep a request small.
+    'lock.check': method(z.object({ projectId: Id, paths: z.array(ScopePattern).min(1).max(50) }), (p) => coord.whoHas(p.projectId, p.paths)),
 
     'session.register': method(z.object({ name: Id, agent: z.string().nullish(), projectId: z.string().nullish(), cwd: z.string().nullish(), machineId: z.string().nullish() }), (p) =>
       coord.registerSession(p.name, p.agent ?? null, p.projectId ?? null, p.cwd ?? null, p.machineId ?? null),
@@ -519,7 +522,7 @@ export function buildMethods(coord: Coordinator, hooks: HubHooks) {
       for (const issue of p.reviewIssues) addLesson(coord, task.project_id, `A reviewer flagged, and the fix was accepted: ${issue}`, 'review', task.scope, task.id);
       return null;
     }),
-    'run.update': method(z.object({ runId: RunId, patch: z.record(z.string(), z.unknown()), owner: Owner.optional(), launch: z.boolean().optional() }), (p) => {
+    'run.update': method(z.object({ runId: RunId, patch: RunPatchSchema, owner: Owner.optional(), launch: z.boolean().optional() }), (p) => {
       if (p.launch) {
         if (Object.keys(p.patch).length) throw new Error('Launch authorization cannot update a run.');
         return coord.launchBudget(p.runId, p.owner);
