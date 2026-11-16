@@ -304,6 +304,18 @@ test('a high load average does not hold the first task, so a busy machine with n
   assert(!calls.includes('task.event'), 'no busy notice while nothing is running');
 });
 
+test('a process held for recovery is not idle: high load still holds new work', async () => {
+  const s = sandbox({ resources: { maxLoadPerCpu: 0.9, minFreeMemMb: 0 } });
+  const calls: string[] = [];
+  const client = new Proxy({}, { get: (_t, name: string) => name === 'then' ? undefined : async () => { calls.push(name); return null; } }) as Client;
+  const loop = new WorkerLoop({ client, machineId: 'm-held', repos: () => ({}), agents: () => ['mock'], localConfig: () => loadConfig(s.repo),
+    verifySlots: new Semaphore(1), loadPerCpu: () => 20, sampleMemory: async () => ({ availableMb: 9000, pressure: 'normal', sampledAt: Date.now() }) });
+  // Recovery leaves a process it could not confirm stopped here; it may still be running.
+  (loop as unknown as { held: Set<string> }).held = new Set(['t-unconfirmed']);
+  await loop.tick();
+  assert(!calls.includes('worker.claim'), 'no claim while a held process may still be running under high load');
+});
+
 test('leases survive hub restarts: a live holder keeps its slot, a crashed one is freed by the next hub', async () => {
   const s = appRepo(), marker = join(s.home, 'holder-ready'), release = join(s.home, 'holder-release');
   const wait = `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(marker)},'1');const p=process.ppid;setInterval(()=>{if(fs.existsSync(${JSON.stringify(release)})||process.ppid!==p)process.exit(0)},50);`;

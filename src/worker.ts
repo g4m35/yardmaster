@@ -144,8 +144,10 @@ export class WorkerLoop {
     if (!(await this.diskOk())) return false;
     // Memory is checked before the first task too, because other programs share this machine and running out of it
     // hurts all of them. Load is not: a load average lags and stays high on busy machines (and macOS counts threads
-    // waiting on I/O), so holding the first task on it can stall a machine indefinitely with nothing running.
-    const load = this.active.size > 0 ? this.loadPerCpu() : 0;
+    // waiting on I/O), so holding the first task on it can stall a machine indefinitely with nothing running. A process
+    // held for recovery may still be running, so it counts as running here.
+    const idle = this.active.size === 0 && this.held.size === 0;
+    const load = idle ? 0 : this.loadPerCpu();
     const memory = await this.sampleMemory();
     const why = load > cfg.resources.maxLoadPerCpu ? `load ${load.toFixed(2)}/cpu` : memoryHold(memory, cfg.resources);
     if (!why) return true;
