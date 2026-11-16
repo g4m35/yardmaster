@@ -13,7 +13,7 @@ import { Integrator } from '../src/integrator.ts';
 import { openDb } from '../src/db.ts';
 import { Semaphore } from '../src/runner.ts';
 import type { Project } from '../src/types.ts';
-import { sandbox, sh } from './helpers.ts';
+import { sandbox, sh, afterChanges } from './helpers.ts';
 
 function command(bin: string, name: string, program: string): void {
   fs.mkdirSync(bin, { recursive: true });
@@ -23,10 +23,11 @@ function command(bin: string, name: string, program: string): void {
 function fixture() {
   const box = sandbox(); const root = join(box.root, 'worktrees'); const source = join(box.repo, 'node_modules');
   fs.mkdirSync(source); fs.writeFileSync(join(source, 'package'), Buffer.alloc(512 * 1024, 1));
-  const clone = (name: string) => cloneDependency(source, join(root, name, 'node_modules'), async () => {
+  const settled = afterChanges(source);
+  const clone = async (name: string) => { await settled; return cloneDependency(source, join(root, name, 'node_modules'), async () => {
     fs.cpSync(source, join(root, name, 'node_modules'), { recursive: true });
     return { ok: true, method: 'cp-reflink', ms: 0 };
-  });
+  }); };
   return { ...box, root, source, clone };
 }
 

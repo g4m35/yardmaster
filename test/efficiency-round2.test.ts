@@ -13,7 +13,7 @@ import { Integrator } from '../src/integrator.ts';
 import { openDb } from '../src/db.ts';
 import { Semaphore } from '../src/runner.ts';
 import type { Project } from '../src/types.ts';
-import { sandbox, sh, until } from './helpers.ts';
+import { sandbox, sh, until, afterChanges } from './helpers.ts';
 
 for (const change of ['removed', 'replaced', 'rewritten'] as const) test(`clones retain one charged install when their source is ${change}`, async () => {
   const box = sandbox();
@@ -21,6 +21,7 @@ for (const change of ['removed', 'replaced', 'rewritten'] as const) test(`clones
   const source = join(root, 'a/node_modules');
   mkdirSync(source, { recursive: true });
   writeFileSync(join(source, 'package'), Buffer.alloc(512 * 1024, 1));
+  await afterChanges(source);
   for (const name of ['b', 'c']) {
     const target = join(root, name, 'node_modules');
     await cloneDependency(source, target, async () => {
