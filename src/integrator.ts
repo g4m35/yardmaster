@@ -11,7 +11,7 @@ import { verifyArtifact, hasVerification, serviceVerificationHooks } from './ver
 import { boundEvidence, recordDeviceEvidence } from './device-evidence.ts';
 import { cleanEnv, runShell, terminateRecordedProcess, withProcessScope, UtilityProcessError, type OwnedRunOptions } from './proc.ts';
 import { integrationUtilityKey, utilityHooks, recoverUtilities, forgetStoppedUtilities, taskHasPendingUtilities, utilitiesStopped } from './utility-records.ts';
-import { lockHash, refreshDeps, siblingWorktrees } from './warmstart.ts';
+import { dependencyHash, refreshDeps, siblingWorktrees } from './warmstart.ts';
 import { clip, errorFingerprint, tail } from './text.ts';
 import { randomUUID } from 'node:crypto';
 import type { Config } from './config.ts';
@@ -282,7 +282,7 @@ export class Integrator {
     try {
       const r = await refreshDeps(project.root, path, config, this.coord.getMeta(key), [...prefer, ...siblingWorktrees(path)]);
       if (!r) return;
-      const hash = await lockHash(path, config.worktree.shareDirs);
+      const hash = await dependencyHash(path, config.worktree.shareDirs);
       if (hash !== null) this.coord.setMeta(key, hash);
       for (const skipped of r.skipped) this.coord.event(project.id, null, 'warn', 'integration.deps_skipped', skipped.why);
       if (r.stale && r.cloned.length) this.coord.event(project.id, null, 'warn', 'integration.deps_unverified', 'Dependencies were reused without tracked lockfiles; compatibility could not be verified. Add a worktree setup command such as "npm ci".');

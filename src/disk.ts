@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readdirSync, rmSync, statfsSync, statSync, lstatSync } from 'node:fs';
+import { lstat, readdir } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import { run } from './proc.ts';
 import { git } from './git.ts';
@@ -34,9 +35,10 @@ export async function dirBytes(path: string, maxAgeMs = 60_000, exclude: string[
     const masks = exclude.map(name => name.replace(/[\\*?\[\]]/g, '\\$&'));
     const ex = masks.flatMap((e) => (process.platform === 'darwin' ? ['-I', e] : [`--exclude=${e}`]));
     const r = await run('du', ['-sk', ...ex, path], { timeoutMs: 60_000 }).catch(() => null);
-    const kb = Number(r?.stdout.trim().split(/\s+/)[0]);
-    bytes = Number.isFinite(kb) ? kb * 1024 : walkBytes(path, exclude);
-  } else bytes = walkBytes(path, exclude);
+    const value = r?.stdout.trim().match(/^(\d+)\s/)?.[1];
+    const kb = value === undefined ? NaN : Number(value);
+    bytes = Number.isFinite(kb) ? kb * 1024 : await walkBytes(path, exclude);
+  } else bytes = await walkBytes(path, exclude);
   sizeCache.set(key, { at: Date.now(), bytes });
   return bytes;
 }
@@ -53,27 +55,30 @@ export async function dirBytesMany(paths: string[], maxAgeMs = 60_000): Promise<
   for (let offset = 0; offset < paths.length; offset += 128) {
     const batch = paths.slice(offset, offset + 128);
     const result = process.platform === 'win32' ? null : await run('du', ['-skc', ...batch], { timeoutMs: 60_000 }).catch(() => null);
-    const total = result?.code === 0 ? Number(result.stdout.trim().split('\n').at(-1)?.split(/\s+/)[0]) : NaN;
-    bytes += Number.isFinite(total) ? total * 1024 : batch.reduce((sum, path) => sum + walkBytes(path), 0);
+    const value = result?.stdout.trim().split('\n').at(-1)?.match(/^\s*(\d+)\s/)?.[1];
+    const total = value === undefined ? NaN : Number(value);
+    if (Number.isFinite(total)) bytes += total * 1024;
+    else for (const path of batch) bytes += await walkBytes(path);
   }
   sizeCache.set(key, { at: Date.now(), bytes });
   return bytes;
 }
 
-function walkBytes(path: string, exclude: string[] = []): number {
+async function walkBytes(path: string, exclude: string[] = []): Promise<number> {
   let total = 0;
   const stack = [path];
   while (stack.length) {
     const p = stack.pop()!;
     let st;
     try {
-      st = lstatSync(p);
+      st = await lstat(p);
     } catch {
       continue;
     }
     if (st.isSymbolicLink()) continue;
     if (st.isDirectory()) {
-      for (const e of safeReaddir(p)) if (!exclude.includes(e)) stack.push(join(p, e));
+      const entries = await readdir(p).catch(() => []);
+      for (const e of entries) if (!exclude.includes(e)) stack.push(join(p, e));
     }
     else total += st.size;
   }

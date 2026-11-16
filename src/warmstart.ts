@@ -41,6 +41,10 @@ export const LOCKFILES = [
   'Podfile.lock', 'composer.lock', 'poetry.lock', 'uv.lock', 'go.sum', 'Pipfile.lock', 'mix.lock', 'pubspec.lock',
 ];
 
+const MANIFESTS = ['package.json', 'Cargo.toml', 'Gemfile', 'pyproject.toml', 'go.mod', 'composer.json', 'Pipfile',
+  'requirements.txt', 'requirements-dev.txt', 'setup.py', 'setup.cfg', 'mix.exs', 'pubspec.yaml', 'Podfile',
+  'Package.swift', 'build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts', 'pom.xml'];
+
 function availableIn(source: string, worktree: string, rel: string): boolean {
   if (source === worktree) return true;
   const parts = rel.split('/');
@@ -52,10 +56,10 @@ function availableIn(source: string, worktree: string, rel: string): boolean {
 }
 
 /** Only tracked inputs can identify the install a fresh worktree is expected to have. */
-export async function lockHash(dir: string, shareDirs = ['node_modules', 'vendor', '.bundle', 'target', '.gradle', 'Pods'], populatedIn = dir): Promise<string | null> {
+async function trackedHash(dir: string, names: readonly string[], shareDirs: string[], populatedIn = dir): Promise<string | null> {
   try {
     const listed = await git(dir, ['ls-files', '-z', '--recurse-submodules'], { timeoutMs: 30_000 });
-    const locks = listed.stdout.split('\0').filter(path => path && LOCKFILES.includes(basename(path)) &&
+    const locks = listed.stdout.split('\0').filter(path => path && names.includes(basename(path)) &&
       !path.split('/').slice(0, -1).some(part => shareDirs.includes(part))).sort();
     if (!locks.length) return '';
     const h = createHash('sha1');
@@ -70,6 +74,18 @@ export async function lockHash(dir: string, shareDirs = ['node_modules', 'vendor
     if (err instanceof UtilityProcessError) throw err;
     return null;
   }
+}
+
+export function lockHash(dir: string, shareDirs = ['node_modules', 'vendor', '.bundle', 'target', '.gradle', 'Pods'], populatedIn = dir): Promise<string | null> {
+  return trackedHash(dir, LOCKFILES, shareDirs, populatedIn);
+}
+
+export async function dependencyHash(dir: string, shareDirs: string[]): Promise<string | null> {
+  const locks = await lockHash(dir, shareDirs);
+  if (locks !== '') return locks;
+  // Manifests detect lockless updates without claiming that an install is pinned for reuse.
+  const manifests = await trackedHash(dir, MANIFESTS, shareDirs);
+  return manifests ? `manifests:${manifests}` : manifests;
 }
 
 export interface WarmStartResult {
@@ -172,8 +188,8 @@ export async function warmStart(repoRoot: string, worktree: string, config: Conf
  * matching ones. Returns null when nothing needed doing.
  */
 export async function refreshDeps(repoRoot: string, worktree: string, config: Config, knownHash: string | null, candidates: string[]): Promise<WarmStartResult | null> {
-  const now = await lockHash(worktree, config.worktree.shareDirs);
-  if (now !== null && knownHash === now && (now !== '' || config.worktree.setup.length === 0)) return null;
+  const now = await dependencyHash(worktree, config.worktree.shareDirs);
+  if (now !== null && knownHash === now) return null;
   // An unreadable tracked input cannot authorize removing an existing install either.
   if (now === null) return warmStart(repoRoot, worktree, config, { candidates });
   const trash = join(dirname(dirname(worktree)), '.trash');

@@ -1,7 +1,7 @@
 import { watch, rmSync, type FSWatcher, type Dirent } from 'node:fs';
-import { lstat, readdir, mkdtemp, writeFile, rm, mkdir } from 'node:fs/promises';
+import { lstat, readdir, mkdtemp, writeFile, rm, mkdir, utimes } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
-import { tmpdir } from 'node:os';
+import { yardHome } from './paths.ts';
 import { run, UtilityProcessError } from './proc.ts';
 import { dirBytes, dirBytesMany, invalidateSize, diskSizeRevision } from './disk.ts';
 import type { CloneResult } from './fastfs.ts';
@@ -15,6 +15,7 @@ interface Source {
   uncertain: boolean;
   users: number;
   marker: string;
+  checkedAt: number;
   ready: Promise<void>;
   stop(): void;
   invalidate(at?: bigint, uncertain?: boolean): void;
@@ -29,6 +30,7 @@ interface Clone {
 }
 const clones = new Map<string, Clone>();
 const sources = new Map<string, Source>();
+const acquisitions = new Map<string, Promise<Source>>();
 const proofs = new Set<string>();
 process.once('exit', () => { for (const proof of proofs) rmSync(proof, { recursive: true, force: true }); });
 let sourceEpoch = 0;
@@ -45,7 +47,7 @@ function changed(path: string): void {
   invalidateSize(path); totals.clear(); revision++;
 }
 
-async function monitor(path: string, since: bigint, invalidate: (at?: bigint, uncertain?: boolean) => void): Promise<() => void> {
+async function monitor(path: string, since: bigint, invalidate: (at?: bigint, uncertain?: boolean) => void, inclusive = false): Promise<() => void> {
   const watchers: FSWatcher[] = [];
   let closed = false;
   const stop = () => { closed = true; for (const watcher of watchers.splice(0)) watcher.close(); };
@@ -60,7 +62,7 @@ async function monitor(path: string, since: bigint, invalidate: (at?: bigint, un
         if (err.code === 'ENOENT') return lstat(dirname(file), { bigint: true });
         throw err;
       }).then(st => {
-        if (st.ctimeNs > since) fail(st.ctimeNs);
+        if (inclusive ? st.ctimeNs >= since : st.ctimeNs > since) fail(st.ctimeNs);
       }, (err: NodeJS.ErrnoException) => { fail(undefined, err.code !== 'ENOENT'); });
     });
     watcher.on('error', () => fail(undefined, true)); watcher.on('close', () => fail(undefined, true));
@@ -97,6 +99,7 @@ async function verifySource(source: Source): Promise<boolean> {
       const at = await lstat(path, { bigint: true }).then(st => st.ctimeNs, () => undefined);
       source.invalidate(at); return false;
     }
+    source.checkedAt = Date.now();
     return !source.dirty;
   } catch (err) {
     source.invalidate(undefined, (err as NodeJS.ErrnoException).code !== 'ENOENT');
@@ -105,21 +108,36 @@ async function verifySource(source: Source): Promise<boolean> {
   }
 }
 
-async function acquireSource(path: string): Promise<Source> {
+function acquireSource(path: string): Promise<Source> {
   path = resolve(path);
+  let pending = acquisitions.get(path);
+  if (!pending) {
+    pending = Promise.resolve().then(() => createSource(path)).finally(() => acquisitions.delete(path));
+    acquisitions.set(path, pending);
+  }
+  return pending.then(source => { source.users++; return source; });
+}
+
+async function createSource(path: string): Promise<Source> {
   const current = await stamp(path);
   const previous = sources.get(path);
   if (previous && previous.stamp === current && await verifySource(previous)) {
-    previous.users++; await previous.ready; return previous;
+    await previous.ready; return previous;
   }
   previous?.invalidate();
-  const proof = await mkdtemp(join(tmpdir(), 'yardmaster-clone-proof-'));
+  const state = join(yardHome(), 'clone-proofs');
+  await mkdir(state, { recursive: true });
+  const proof = await mkdtemp(join(state, 'source-'));
   proofs.add(proof);
   const marker = join(proof, 'started');
   await writeFile(marker, '');
   const since = (await lstat(marker, { bigint: true })).mtimeNs;
+  // find is strict; move its reference before this tick so equal-ctime writes are included too.
+  const before = Number(since / 1000n - 1n) / 1e6;
+  await utimes(marker, before, before);
+  if ((await lstat(marker, { bigint: true })).mtimeNs >= since) throw new Error('Cannot establish an inclusive source clock');
   const cleanup = () => { void rm(proof, { recursive: true, force: true }).then(() => proofs.delete(proof), () => {}); };
-  const source: Source = { path, stamp: current, id: ++sourceEpoch, dirty: false, uncertain: false, users: 1, marker,
+  const source: Source = { path, stamp: current, id: ++sourceEpoch, dirty: false, uncertain: false, users: 0, marker, checkedAt: 0,
     ready: Promise.resolve(), stop: () => {}, invalidate: (at, uncertain = false) => {
       if (source.dirty) return;
       source.dirty = true; source.changedAt = at; source.uncertain = uncertain; source.stop(); cleanup();
@@ -127,7 +145,7 @@ async function acquireSource(path: string): Promise<Source> {
       changed(path);
     } };
   sources.set(path, source);
-  source.ready = monitor(path, since, source.invalidate).then(stop => { source.stop = () => { stop(); cleanup(); }; });
+  source.ready = monitor(path, since, source.invalidate, true).then(stop => { source.stop = () => { stop(); cleanup(); }; });
   await source.ready;
   return source;
 }
@@ -197,7 +215,7 @@ export async function worktreeBytes(root: string, shareDirs: string[]): Promise<
   const cached = totals.get(key);
   if (!cached || cached.revision !== diskSizeRevision() || Date.now() - cached.at >= 60_000) {
     const relevant = new Set([...clones].filter(([path]) => path.startsWith(root + '/')).map(([, record]) => record.source));
-    for (const source of relevant) await verifySource(source);
+    for (const source of relevant) if (Date.now() - source.checkedAt >= 10 * 60_000) await verifySource(source);
   }
   const started = revision;
   const exempt = new Set<string>();
