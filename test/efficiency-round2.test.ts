@@ -108,6 +108,7 @@ test('losing a clone exemption invalidates an earlier empty-root measurement', a
   assert.ok(await worktreeBytes(root, ['node_modules']) < 128 * 1024);
   const source = join(box.repo, 'node_modules'); mkdirSync(source);
   writeFileSync(join(source, 'package'), Buffer.alloc(512 * 1024, 1));
+  await afterChanges(source);
   const target = join(root, 'task/node_modules');
   await cloneDependency(source, target, async () => {
     cpSync(source, target, { recursive: true }); return { ok: true, method: 'cp-reflink', ms: 0 };
@@ -128,6 +129,7 @@ test('Linux monitoring uses one watch per directory and shares the source monito
     const path = join(source, 'pkg' + dir); mkdirSync(path);
     for (let file = 0; file < 10; file++) writeFileSync(join(path, 'file' + file), 'fixture');
   }
+  await afterChanges(source);
   const before = count(); const rss = process.memoryUsage().rss; const start = performance.now();
   for (const name of ['b', 'c']) {
     const target = join(root, name, 'node_modules');

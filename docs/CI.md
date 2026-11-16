@@ -69,7 +69,7 @@ jobs:
       skip: ${{ steps.guard.outputs.skip }}
     steps:
       - id: guard
-        uses: g4m35/yardmaster@<commit sha> # v0.9.3
+        uses: g4m35/yardmaster@<commit sha> # v0.9.4
 
   test:                        # 2. every expensive job
     needs: guard
@@ -86,7 +86,7 @@ jobs:
       - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
         run: exit 1
       - if: needs.guard.outputs.skip != 'true' && !contains(needs.*.result, 'skipped')
-        uses: g4m35/yardmaster@<commit sha> # v0.9.3
+        uses: g4m35/yardmaster@<commit sha> # v0.9.4
         with: { mode: record }
 ```
 

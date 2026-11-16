@@ -1,7 +1,7 @@
 #!/bin/sh
 # Installs the standalone Yardmaster binary (no Node or npm needed).
 #   curl -fsSL https://raw.githubusercontent.com/g4m35/yardmaster/main/install.sh | sh
-# Options: YARDMASTER_VERSION=v0.9.3 (default: latest), YARDMASTER_INSTALL_DIR=~/bin (default: ~/.local/bin)
+# Options: YARDMASTER_VERSION=v0.9.4 (default: latest), YARDMASTER_INSTALL_DIR=~/bin (default: ~/.local/bin)
 set -eu
 
 repo="g4m35/yardmaster"
