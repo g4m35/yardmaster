@@ -304,6 +304,18 @@ test('a high load average does not hold the first task, so a busy machine with n
   assert(!calls.includes('task.event'), 'no busy notice while nothing is running');
 });
 
+test('a worker with a task running still holds further work under high load', async () => {
+  const s = sandbox({ resources: { maxLoadPerCpu: 0.9, minFreeMemMb: 0 } });
+  const calls: string[] = [];
+  const client = new Proxy({}, { get: (_t, name: string) => name === 'then' ? undefined : async () => { calls.push(name); return null; } }) as Client;
+  const loop = new WorkerLoop({ client, machineId: 'm-busy', repos: () => ({}), agents: () => ['mock'], localConfig: () => loadConfig(s.repo),
+    verifySlots: new Semaphore(1), loadPerCpu: () => 20, sampleMemory: async () => ({ availableMb: 9000, pressure: 'normal', sampledAt: Date.now() }) });
+  (loop.active as unknown as Map<string, unknown>).set('t-running', { task: { id: 't-running' }, agent: 'mock' });
+  await loop.tick();
+  assert(!calls.includes('worker.claim'), 'one running task under load 20/cpu must not admit another (maxParallel is 3)');
+  assert(calls.includes('task.event'), 'the busy notice explains the hold');
+});
+
 test('a process held for recovery is not idle: high load still holds new work', async () => {
   const s = sandbox({ resources: { maxLoadPerCpu: 0.9, minFreeMemMb: 0 } });
   const calls: string[] = [];
