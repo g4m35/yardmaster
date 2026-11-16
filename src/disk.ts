@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readdirSync, rmSync, statfsSync, statSync, lstatSync } from 'node:fs';
+import { lstat, readdir } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import { run } from './proc.ts';
 import { git } from './git.ts';
@@ -16,6 +17,10 @@ export function freeGb(path: string): number {
   }
 }
 
+let sizeRevision = 0;
+
+export function diskSizeRevision(): number { return sizeRevision; }
+
 const sizeCache = new Map<string, { at: number; bytes: number }>();
 
 /** Disk used by a directory tree. Uses `du` (fast, handles hard links) with a JS fallback; cached for a minute. */
@@ -27,28 +32,54 @@ export async function dirBytes(path: string, maxAgeMs = 60_000, exclude: string[
   if (!existsSync(path)) bytes = 0;
   else if (process.platform !== 'win32') {
     // BSD du (macOS) excludes with -I, GNU du with --exclude.
-    const ex = exclude.flatMap((e) => (process.platform === 'darwin' ? ['-I', e] : [`--exclude=${e}`]));
+    const masks = exclude.map(name => name.replace(/[\\*?\[\]]/g, '\\$&'));
+    const ex = masks.flatMap((e) => (process.platform === 'darwin' ? ['-I', e] : [`--exclude=${e}`]));
     const r = await run('du', ['-sk', ...ex, path], { timeoutMs: 60_000 }).catch(() => null);
-    const kb = Number(r?.stdout.trim().split(/\s+/)[0]);
-    bytes = Number.isFinite(kb) ? kb * 1024 : walkBytes(path);
-  } else bytes = walkBytes(path);
+    const value = r?.stdout.trim().match(/^(\d+)\s/)?.[1];
+    const kb = value === undefined ? NaN : Number(value);
+    bytes = Number.isFinite(kb) ? kb * 1024 : await walkBytes(path, exclude);
+  } else bytes = await walkBytes(path, exclude);
   sizeCache.set(key, { at: Date.now(), bytes });
   return bytes;
 }
 
-function walkBytes(path: string): number {
+export async function dirBytesMany(paths: string[], maxAgeMs = 60_000): Promise<number> {
+  if (!paths.length) return 0;
+  if (paths.length === 1) return dirBytes(paths[0]!, maxAgeMs);
+  paths = [...paths].sort();
+  const key = paths.join('\0') + '\0batch';
+  const hit = sizeCache.get(key);
+  if (hit && Date.now() - hit.at < maxAgeMs) return hit.bytes;
+  let bytes = 0;
+  // Bound argv size, and let du account for hard links across siblings without descending into exempt paths.
+  for (let offset = 0; offset < paths.length; offset += 128) {
+    const batch = paths.slice(offset, offset + 128);
+    const result = process.platform === 'win32' ? null : await run('du', ['-skc', ...batch], { timeoutMs: 60_000 }).catch(() => null);
+    const value = result?.stdout.trim().split('\n').at(-1)?.match(/^\s*(\d+)\s/)?.[1];
+    const total = value === undefined ? NaN : Number(value);
+    if (Number.isFinite(total)) bytes += total * 1024;
+    else for (const path of batch) bytes += await walkBytes(path);
+  }
+  sizeCache.set(key, { at: Date.now(), bytes });
+  return bytes;
+}
+
+async function walkBytes(path: string, exclude: string[] = []): Promise<number> {
   let total = 0;
   const stack = [path];
   while (stack.length) {
     const p = stack.pop()!;
     let st;
     try {
-      st = lstatSync(p);
+      st = await lstat(p);
     } catch {
       continue;
     }
     if (st.isSymbolicLink()) continue;
-    if (st.isDirectory()) for (const e of safeReaddir(p)) stack.push(join(p, e));
+    if (st.isDirectory()) {
+      const entries = await readdir(p).catch(() => []);
+      for (const e of entries) if (!exclude.includes(e)) stack.push(join(p, e));
+    }
     else total += st.size;
   }
   return total;
@@ -63,7 +94,12 @@ function safeReaddir(p: string): string[] {
 }
 
 export function invalidateSize(path: string): void {
-  for (const k of sizeCache.keys()) if (k === path || k.startsWith(path + '/') || k.startsWith(path + '\0')) sizeCache.delete(k);
+  sizeRevision++;
+  for (const key of sizeCache.keys()) {
+    const parts = key.split('\0');
+    const measured = parts.at(-1) === 'batch' ? parts.slice(0, -1) : [parts[0]!];
+    if (measured.some(root => root === path || root.startsWith(path + '/') || path.startsWith(root + '/'))) sizeCache.delete(key);
+  }
 }
 
 export interface ArtifactDir {

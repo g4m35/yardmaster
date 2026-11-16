@@ -319,6 +319,7 @@ test('warm start never copies a Python virtualenv; quick checks never replace th
   const repo = tempDir('ym-venv-');
   sh(repo, 'git', ['init', '-q', '-b', 'main']);
   writeFileSync(join(repo, '.gitignore'), '.venv/\nnode_modules/\n');
+  writeFileSync(join(repo, 'package-lock.json'), '{}');
   sh(repo, 'git', ['add', '-A']);
   sh(repo, 'git', ['-c', 'user.name=a', '-c', 'user.email=a@a', 'commit', '-qm', 'i']);
   mkdirSync(join(repo, '.venv', 'bin'), { recursive: true });
@@ -326,7 +327,7 @@ test('warm start never copies a Python virtualenv; quick checks never replace th
   mkdirSync(join(repo, 'node_modules', 'x'), { recursive: true });
   writeFileSync(join(repo, 'node_modules', 'x', 'i.js'), '1');
   const wt = join(tempDir('ym-venv-wt-'), 'wt');
-  mkdirSync(wt);
+  sh(repo, 'git', ['worktree', 'add', '-qb', 'venv-fixture', wt]);
   // Even when someone lists .venv explicitly, it is skipped with an explanation.
   const cfg = resolveConfig([{ worktree: { shareDirs: ['node_modules', '.venv'] } }]);
   const r = await warmStart(repo, wt, cfg);

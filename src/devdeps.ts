@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, statSync, writeFileSync, type Dirent } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { dirBytes } from './disk.ts';
 import { cloneTree, removeFast } from './fastfs.ts';
 import { yardHome } from './paths.ts';
-import { clonesAreFree, lockHash } from './warmstart.ts';
+import { clonesAreFree, LOCKFILES } from './warmstart.ts';
 
 /**
  * Duplicate dependency installs across every project on this machine, and a recoverable way to share them.
@@ -78,6 +79,22 @@ function findNodeModules(roots: string[], maxDepth: number): string[] {
   return [...new Set(out)];
 }
 
+// Disk deduplication compares existing installs, including projects that are not Git worktrees.
+async function diskLockHash(project: string): Promise<string | null> {
+  const hash = createHash('sha1');
+  let found = false;
+  for (const name of LOCKFILES) {
+    try {
+      const contents = await readFile(join(project, name));
+      hash.update(name).update('\0').update(contents).update('\0');
+      found = true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return null;
+    }
+  }
+  return found ? hash.digest('hex').slice(0, 16) : '';
+}
+
 function installedHash(nodeModules: string): string | null {
   for (const f of INSTALL_STATE) {
     const p = join(nodeModules, f);
@@ -131,7 +148,7 @@ export async function scanDeps(roots: string[], opts: { maxDepth?: number; onPro
     while (next < paths.length) {
       const p = paths[next++]!;
       const project = dirname(p);
-      dirs.push({ path: p, project, lock: lockHash(project), installed: installedHash(p), bytes: await dirBytes(p, 0) });
+      dirs.push({ path: p, project, lock: (await diskLockHash(project)) ?? '', installed: installedHash(p), bytes: await dirBytes(p, 0) });
       opts.onProgress?.(++done, paths.length);
     }
   };
@@ -198,7 +215,7 @@ export async function dedupeGroup(g: DepsGroup, opts: { dryRun?: boolean } = {})
       skipped.push({ path: d.path, why: 'on a different disk, so it cannot share blocks' });
       continue;
     }
-    if (installedHash(d.path) !== keep.installed || lockHash(d.project) !== keep.lock) {
+    if (installedHash(d.path) !== keep.installed || (await diskLockHash(d.project)) !== keep.lock) {
       skipped.push({ path: d.path, why: 'changed since the scan' });
       continue;
     }

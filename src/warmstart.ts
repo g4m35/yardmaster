@@ -1,6 +1,9 @@
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
+import { git } from './git.ts';
+import { cloneDependency } from './dependency-disk.ts';
 import { createHash } from 'node:crypto';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import type { Config } from './config.ts';
 import { dirBytes, findArtifacts, gb } from './disk.ts';
 import { cloneTree, removeFast } from './fastfs.ts';
@@ -32,23 +35,57 @@ async function supportsCow(dir: string): Promise<boolean> {
   return ok;
 }
 
-/** Lockfiles that pin a dependency install. Only the ones at the repo root are compared (monorepos keep them there). */
+/** Lockfiles that pin a dependency install. */
 export const LOCKFILES = [
   'package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb', 'Cargo.lock', 'Gemfile.lock',
   'Podfile.lock', 'composer.lock', 'poetry.lock', 'uv.lock', 'go.sum', 'Pipfile.lock', 'mix.lock', 'pubspec.lock',
 ];
 
-/** One hash over every lockfile at the root of `dir`; "" when there are none. */
-export function lockHash(dir: string): string {
-  const h = createHash('sha1');
-  let any = false;
-  for (const f of LOCKFILES) {
-    const p = join(dir, f);
-    if (!existsSync(p)) continue;
-    any = true;
-    h.update(f).update('\0').update(readFileSync(p)).update('\0');
+const MANIFESTS = ['package.json', 'Cargo.toml', 'Gemfile', 'pyproject.toml', 'go.mod', 'composer.json', 'Pipfile',
+  'requirements.txt', 'requirements-dev.txt', 'setup.py', 'setup.cfg', 'mix.exs', 'pubspec.yaml', 'Podfile',
+  'Package.swift', 'build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts', 'pom.xml'];
+
+function availableIn(source: string, worktree: string, rel: string): boolean {
+  if (source === worktree) return true;
+  const parts = rel.split('/');
+  for (let depth = 1; depth < parts.length; depth++) {
+    const prefix = parts.slice(0, depth).join('/');
+    if (existsSync(join(source, prefix, '.git')) && !existsSync(join(worktree, prefix, '.git'))) return false;
   }
-  return any ? h.digest('hex').slice(0, 16) : '';
+  return true;
+}
+
+/** Only tracked inputs can identify the install a fresh worktree is expected to have. */
+async function trackedHash(dir: string, names: readonly string[], shareDirs: string[], populatedIn = dir): Promise<string | null> {
+  try {
+    const listed = await git(dir, ['ls-files', '-z', '--recurse-submodules'], { timeoutMs: 30_000 });
+    const locks = listed.stdout.split('\0').filter(path => path && names.includes(basename(path)) &&
+      !path.split('/').slice(0, -1).some(part => shareDirs.includes(part))).sort();
+    if (!locks.length) return '';
+    const h = createHash('sha1');
+    let found = false;
+    for (const path of locks) {
+      if (!availableIn(dir, populatedIn, path)) continue;
+      h.update(path).update('\0').update(await readFile(join(dir, path))).update('\0');
+      found = true;
+    }
+    return found ? h.digest('hex').slice(0, 16) : '';
+  } catch (err) {
+    if (err instanceof UtilityProcessError) throw err;
+    return null;
+  }
+}
+
+export function lockHash(dir: string, shareDirs = ['node_modules', 'vendor', '.bundle', 'target', '.gradle', 'Pods'], populatedIn = dir): Promise<string | null> {
+  return trackedHash(dir, LOCKFILES, shareDirs, populatedIn);
+}
+
+export async function dependencyHash(dir: string, shareDirs: string[]): Promise<string | null> {
+  const locks = await lockHash(dir, shareDirs);
+  if (locks !== '') return locks;
+  // Manifests detect lockless updates without claiming that an install is pinned for reuse.
+  const manifests = await trackedHash(dir, MANIFESTS, shareDirs);
+  return manifests ? `manifests:${manifests}` : manifests;
 }
 
 export interface WarmStartResult {
@@ -58,7 +95,7 @@ export interface WarmStartResult {
   ms: number;
   /** Where the dependencies came from. */
   source: string | null;
-  /** True when no source had matching lockfiles, so the reused dependencies may be out of date. */
+  /** True when reuse was rejected, or dependencies were reused without lockfile verification. */
   stale: boolean;
 }
 
@@ -80,19 +117,18 @@ export function siblingWorktrees(worktree: string, limit = 8): string[] {
     .map((x) => x.p);
 }
 
-async function pickSource(worktree: string, sources: string[], shareDirs: string[]): Promise<{ source: string; stale: boolean } | null> {
-  const want = lockHash(worktree);
-  const usable: string[] = [];
+async function pickSource(worktree: string, sources: string[], shareDirs: string[], allowUnpinned: boolean): Promise<{ source: string | null; stale: boolean }> {
+  const want = await lockHash(worktree, shareDirs);
+  let stale = false;
   for (const s of sources) {
     if (!existsSync(s) || s === worktree) continue;
-    if (!shareDirs.some((d) => existsSync(join(s, d)))) {
-      // Monorepos keep node_modules in packages too; the deeper search below finds them.
-      if ((await findArtifacts(s, shareDirs, 3, { sizes: false })).length === 0) continue;
-    }
-    usable.push(s);
-    if (lockHash(s) === want) return { source: s, stale: false };
+    if ((await findArtifacts(s, shareDirs, 3, { sizes: false })).length === 0) continue;
+    const have = await lockHash(s, shareDirs, worktree);
+    if (want && have === want) return { source: s, stale: false };
+    if (want === '' && have === '' && allowUnpinned) return { source: s, stale: true };
+    stale = true;
   }
-  return usable[0] ? { source: usable[0], stale: want !== '' } : null;
+  return { source: null, stale };
 }
 
 export async function warmStart(repoRoot: string, worktree: string, config: Config, opts: { candidates?: string[] } = {}): Promise<WarmStartResult> {
@@ -100,13 +136,18 @@ export async function warmStart(repoRoot: string, worktree: string, config: Conf
   const out: WarmStartResult = { cloned: [], skipped: [], copied: [], ms: 0, source: null, stale: false };
   const cfg = config.worktree;
   if (cfg.warmStart === 'clone') {
-    const picked = await pickSource(worktree, [repoRoot, ...(opts.candidates ?? [])], cfg.shareDirs);
-    if (picked) {
+    const picked = await pickSource(worktree, [repoRoot, ...(opts.candidates ?? [])], cfg.shareDirs, cfg.setup.length === 0);
+    out.stale = picked.stale;
+    if (picked.stale && !picked.source) out.skipped.push({ rel: '*', why: 'No checkout has verifiable matching tracked lockfiles; dependencies were not reused. Add a worktree setup command such as "npm ci" to install them.' });
+    if (picked.source) {
       out.source = picked.source;
-      out.stale = picked.stale;
       const dirs = await findArtifacts(picked.source, cfg.shareDirs, 3, { sizes: false });
       const cow = dirs.length ? await supportsCow(dirname(worktree)) : false;
       for (const d of dirs) {
+        if (!availableIn(picked.source, worktree, d.rel)) {
+          out.skipped.push({ rel: d.rel, why: 'The destination submodule is not initialized; run project setup first' });
+          continue;
+        }
         const target = join(worktree, d.rel);
         if (existsSync(target)) continue;
         // Even if configured: a virtualenv copy keeps pointing at (and installing into) the original environment.
@@ -120,8 +161,11 @@ export async function warmStart(repoRoot: string, worktree: string, config: Conf
           out.skipped.push({ rel: d.rel, why: `${gb(bytes)} and this disk can't clone copy-on-write` });
           continue;
         }
-        const r = await cloneTree(d.path, target, { allowPlainCopy: !cow });
-        if (r.ok) out.cloned.push({ rel: d.rel, bytes, method: r.method });
+        const copy = () => cloneTree(d.path, target, { allowPlainCopy: !cow });
+        const r = cow ? await cloneDependency(d.path, target, copy) : await copy();
+        if (r.ok) {
+          out.cloned.push({ rel: d.rel, bytes, method: r.method });
+        }
         else out.skipped.push({ rel: d.rel, why: `copy failed: ${r.error ?? 'unknown error'}` });
       }
     }
@@ -144,14 +188,16 @@ export async function warmStart(repoRoot: string, worktree: string, config: Conf
  * matching ones. Returns null when nothing needed doing.
  */
 export async function refreshDeps(repoRoot: string, worktree: string, config: Config, knownHash: string | null, candidates: string[]): Promise<WarmStartResult | null> {
-  const now = lockHash(worktree);
-  if (knownHash !== null && knownHash === now) return null;
+  const now = await dependencyHash(worktree, config.worktree.shareDirs);
+  if (now !== null && knownHash === now) return null;
+  // An unreadable tracked input cannot authorize removing an existing install either.
+  if (now === null) return warmStart(repoRoot, worktree, config, { candidates });
   const trash = join(dirname(dirname(worktree)), '.trash');
   for (const d of await findArtifacts(worktree, config.worktree.shareDirs, 3, { sizes: false })) removeFast(d.path, trash);
   return warmStart(repoRoot, worktree, config, { candidates });
 }
 
-/** Whether folders cloned into worktrees under `dir` share disk blocks with the originals (so don't count them). */
+/** Clone capability alone cannot establish how many blocks an existing dependency tree still shares. */
 export async function clonesAreFree(dir: string): Promise<boolean> {
   return supportsCow(dir).catch((err) => { if (err instanceof UtilityProcessError) throw err; return false; });
 }

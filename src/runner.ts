@@ -410,7 +410,7 @@ async function runAttemptInner(ctx: RunContext): Promise<RunOutcome> {
       await event(ctx, 'info', 'task.warm_start', `Ready in ${(warm.ms / 1000).toFixed(1)}s with ${[...warm.cloned.map((c) => c.rel), ...warm.copied].join(', ')} from ${from} (no reinstall needed)`);
     }
     if (warm.stale && warm.cloned.length) {
-      await event(ctx, 'info', 'task.warm_start_stale', `No checkout has this task's exact lockfiles, so its dependencies may be out of date. If checks fail on missing packages, add a worktree "setup" command such as "npm ci".`);
+      await event(ctx, 'info', 'task.warm_start_stale', `Dependencies were reused without tracked lockfiles; compatibility could not be verified. Add a worktree "setup" command such as "npm ci".`);
     }
     for (const sk of warm.skipped) await event(ctx, 'info', 'task.warm_start_skipped', `Didn't bring over ${sk.rel}: ${sk.why}`);
     for (const command of config.worktree.setup) {

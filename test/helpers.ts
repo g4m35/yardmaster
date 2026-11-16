@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, mkdirSync, realpathSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, realpathSync, rmSync, lstatSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -73,6 +73,31 @@ console.log('checks ok');
   sh(repo, 'git', ['add', '-A']);
   sh(repo, 'git', ['commit', '-q', '-m', 'init']);
   return { root, home, repo };
+}
+
+/**
+ * Waits until the inode change clock has moved past the newest change under `path`. Linux stamps ctime from a coarse
+ * clock, and dependency cloning conservatively treats a source change in the same tick as its start marker as a
+ * change, so a fixture written just before cloning would otherwise lose its clone exemption at random.
+ */
+export async function afterChanges(path: string): Promise<void> {
+  const newest = (p: string): bigint => {
+    const st = lstatSync(p, { bigint: true });
+    if (!st.isDirectory()) return st.ctimeNs;
+    let max = st.ctimeNs;
+    for (const name of readdirSync(p)) { const c = newest(join(p, name)); if (c > max) max = c; }
+    return max;
+  };
+  const limit = newest(path);
+  const probe = join(path, '..', `.clock-probe-${process.pid}`);
+  for (let i = 0; i < 200; i++) {
+    writeFileSync(probe, String(i));
+    const now = lstatSync(probe, { bigint: true }).ctimeNs;
+    rmSync(probe, { force: true });
+    if (now > limit) return;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  throw new Error(`The ctime clock did not advance past ${path}`);
 }
 
 export async function until<T>(fn: () => T | Promise<T>, pred: (v: T) => boolean, timeoutMs = 30_000, label = 'condition'): Promise<T> {

@@ -672,6 +672,7 @@
   function loseAuth() {
     if (authFailed) return;
     authFailed = true;
+    updatePolling();
     localStorage.removeItem('ym-token');
     clearInterval(logTimer);
     if ($('drawer').open) $('drawer').close();
@@ -996,7 +997,7 @@
   let refreshAgain = false;
   let refreshTimer = null;
   function scheduleRefresh() {
-    if (authFailed || refreshTimer !== null) return;
+    if (authFailed || document.hidden || refreshTimer !== null) return;
     refreshTimer = setTimeout(() => { refreshTimer = null; refresh(); }, 250);
   }
   async function refresh() {
@@ -1065,6 +1066,8 @@
         if (res.status === 401) { loseAuth(); return; }
         if (!res.ok || !res.body) throw new Error('Stream unavailable');
         streamConnected = true;
+        updatePolling();
+        scheduleRefresh();
         renderConnectionNotice();
         conn.className = 'conn live'; conn.lastElementChild.textContent = 'Live';
         const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
@@ -1078,6 +1081,7 @@
           while ((i = buf.indexOf('\n\n')) >= 0) {
             const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
             const data = chunk.split('\n').filter((l) => l.startsWith('data: ')).map((l) => l.slice(6)).join('');
+            if (chunk.startsWith('event: refresh')) { scheduleRefresh(); continue; }
             if (!data || chunk.startsWith('event: hello')) continue;
             const evs = JSON.parse(data);
             if (Array.isArray(evs) && evs.length) {
@@ -1090,6 +1094,7 @@
       } catch {}
       if (authFailed) return;
       streamConnected = false;
+      updatePolling();
       conn.className = 'conn'; conn.lastElementChild.textContent = 'Reconnecting';
       renderConnectionNotice();
       await new Promise((r) => setTimeout(r, 2000));
@@ -1218,7 +1223,7 @@
     if (!quiet) presentDrawer();
     restoreFocus(savedFocus, drawer);
     const loadLog = async () => {
-      if (openTask !== id || logInFlight || authFailed) return;
+      if (document.hidden || openTask !== id || logInFlight || authFailed) return;
       logInFlight = true;
       const target = $('d-log');
       try {
@@ -1576,9 +1581,21 @@
     refresh(); rpc('events.since', { after: 0, limit: 60, projectId: scope || null }).then(events => { if (scope === projectId) pushEvents(events); }).catch(() => {});
   });
 
+  let pollTimer = null;
+  function updatePolling() {
+    const enabled = !authFailed && !streamConnected && !document.hidden;
+    if (enabled && pollTimer === null) pollTimer = setInterval(refresh, 10000);
+    else if (!enabled && pollTimer !== null) { clearInterval(pollTimer); pollTimer = null; }
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      if (refreshTimer !== null) { clearTimeout(refreshTimer); refreshTimer = null; }
+    } else scheduleRefresh();
+    updatePolling();
+  });
   refresh();
   stream();
-  setInterval(refresh, 10000);
+  updatePolling();
 })();
 </script>
 </body>

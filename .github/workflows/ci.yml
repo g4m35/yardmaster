@@ -42,8 +42,8 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
-      - run: npm ci
-      - run: npm run typecheck
+      - run: npm ci --ignore-scripts
+      # Build performs the job's single type check and produces the assets used by tests.
       - run: npm run build
       - run: npm test
   performance:

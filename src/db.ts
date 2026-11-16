@@ -137,6 +137,7 @@ const MIGRATIONS: string[] = [
   `,
   // The holder's boot: a PID recorded before a reboot never names a live holder afterwards.
   `ALTER TABLE resource_leases ADD COLUMN boot_id TEXT;`,
+  `CREATE INDEX tasks_status_finished ON tasks(status, finished_at DESC);`,
 ];
 
 export type Db = DatabaseSync;
