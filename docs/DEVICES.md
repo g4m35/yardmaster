@@ -217,8 +217,10 @@ project's `yardmaster.json` can lower them for its own requests, never raise the
   takes a free slot. `holdAtPressure` is the macOS kernel pressure level at which
   heavy work waits (`warn`, `critical` or `off`); `minFreeMemMb` uses memory the
   OS can actually hand out. Swap is not a signal: it records the past.
-- `resources.holdAtPressure` (default `critical`) and the existing load and memory
-  limits now apply before the first task as well as later ones.
+- `resources.holdAtPressure` (default `critical`) and the memory limit apply before
+  the first task as well as later ones. The load limit (`maxLoadPerCpu`) applies
+  only once a task is running, so a busy machine with nothing running still
+  makes progress.
 - Holders renew their lease. A lease is freed only when its holder's process is
   gone: PID plus process start time, so a reused PID does not count, and the
   machine's boot identity, so a PID from before a reboot never counts. No lease
