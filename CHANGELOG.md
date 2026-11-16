@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.9.5
+- Fixed: a high load average held the first task too, so a busy machine with nothing running could wait indefinitely (GitHub's macOS runners report a load of 11 to 18 per CPU, and `ym demo` never started there). Memory limits still apply before the first task; the load limit applies once a task is running, as it did before 0.9.4.
+
+0.9.4 was tagged but never published: its macOS binary failed the release smoke test on this bug. Its changes, listed below, ship in 0.9.5. CI now runs that smoke test on macOS as well as Linux before anything is tagged.
+
 ## 0.9.4
 
 ### iPhone apps on the simulator

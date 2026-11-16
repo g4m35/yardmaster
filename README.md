@@ -4,7 +4,7 @@ Yardmaster runs several coding agents at once (Claude Code, Codex, Cursor, OpenC
 
 It is for developers who already use a coding agent and want to give it parallel work. You drive it from inside your agent or from the terminal, and see everything on one local dashboard. One person runs one private hub; other machines can join it as workers with project-scoped credentials.
 
-**Try it in a few minutes:** [install](#install), then run `ym demo`. It starts a sandbox with a fake agent and spends no tokens. Yardmaster is early software (0.9.4); see [Status](#status) for what is and isn't tested.
+**Try it in a few minutes:** [install](#install), then run `ym demo`. It starts a sandbox with a fake agent and spends no tokens. Yardmaster is early software (0.9.5); see [Status](#status) for what is and isn't tested.
 
 - **Stay where you work.** Yardmaster adds a few tools to your agent over MCP. In Claude Code, Codex, Cursor, OpenCode, Gemini CLI, or T3 Code, say *"split this into parallel tasks with yardmaster"* and keep working.
 - **Coordinate file ownership.** Declared overlapping tasks wait; live checks pause conflicting managed work. Native edit hooks respect each session's reservations. Hooks fail open when the hub is unavailable, and unbridged clients are outside this coordination. Your own branch and checkout are preserved.
@@ -264,7 +264,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). For the research behind it (Ga
 
 ## Status
 
-Early (0.9.4). Tested end to end with deterministic agents and real git repositories, including the CI gate, guard, budget and audit against a mock GitHub API and real git pushes, policies, cross-model review rounds, lessons, critical-path ordering, races, merge trains, import-graph coupling, hooks, the minimal MCP profile, parallel scheduling, scopes, dependencies, loops, budgets, retries, conflicts, edit-time overlap, approval, cleanup safety, two-machine execution (simulated on one host over real HTTP), the MCP server, pause/redirect, supervisor warnings, disk holds and artifact trimming. JEV tests cover routing, fallback, manual effort, retry escalation, shutdown/cancellation and worker-local configuration with fake subprocesses. Earlier releases were smoke-tested with real Claude Code and Codex; this JEV integration has no measured task-level savings claim.
+Early (0.9.5). Tested end to end with deterministic agents and real git repositories, including the CI gate, guard, budget and audit against a mock GitHub API and real git pushes, policies, cross-model review rounds, lessons, critical-path ordering, races, merge trains, import-graph coupling, hooks, the minimal MCP profile, parallel scheduling, scopes, dependencies, loops, budgets, retries, conflicts, edit-time overlap, approval, cleanup safety, two-machine execution (simulated on one host over real HTTP), the MCP server, pause/redirect, supervisor warnings, disk holds and artifact trimming. JEV tests cover routing, fallback, manual effort, retry escalation, shutdown/cancellation and worker-local configuration with fake subprocesses. Earlier releases were smoke-tested with real Claude Code and Codex; this JEV integration has no measured task-level savings claim.
 
 Known gaps:
 
