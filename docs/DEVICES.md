@@ -319,7 +319,7 @@ for you.
 | `install.uninstallAfter` | Remove the app afterwards, only if this run installed it fresh. Default `false`. A copy that existed before the run is never removed. |
 | `launch` | Launch the app, confirm it is running and screenshot it (default `true`). |
 | `settleSeconds` | How long the app gets to draw before the launch screenshot (default 4). |
-| `tests` | As for the simulator. `build`, `device`, `install`, `launch`, `crash-reports` and `uninstall` are reserved names. |
+| `tests` | As for the simulator. `build`, `device`, `install`, `launch`, `stop`, `crash-reports` and `uninstall` are reserved names. |
 | `requiredEnv` | As for the simulator. |
 
 A run holds the `physical` lease from discovery to the end, and records the

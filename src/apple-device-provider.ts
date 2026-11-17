@@ -12,7 +12,7 @@ import { machineId, yardHome } from './paths.ts';
 import { cleanupOwnedSimulators, exec, resolveTool, transcript, type ExecResult, type ToolContext } from './simctl.ts';
 
 /** Names of the built-in phases; a user test may not reuse them and hide among them. */
-const PHASES = ['build', 'device', 'install', 'launch', 'crash-reports', 'uninstall'];
+const PHASES = ['build', 'device', 'install', 'launch', 'stop', 'crash-reports', 'uninstall'];
 
 /** Per-project recipe for the built-in physical Apple device provider (docs/DEVICES.md). */
 export const AppleDeviceOptionsSchema = z.object({
@@ -250,6 +250,13 @@ async function onDevice(options: AppleDeviceOptions, ctx: DeviceRunContext, ctl:
   if (before && 'error' in before) return unavailable('install', `Cannot read installed apps: ${before.error}.`);
   let installedByRun = false;
   let app: InstalledApp | null = before;
+  /** Only an app this run installed fresh is ever removed, and only when configured. */
+  const removeIfOwned = async () => {
+    if (!installedByRun || !options.install.uninstallAfter) return;
+    const { r, error } = await ctl.uninstall(phone.udid, options.bundleId);
+    rec.checks.push({ name: 'uninstall', runner: 'devicectl', status: r.ok && !error ? 'passed' : 'unknown', durationMs: r.durationMs,
+      detail: r.ok && !error ? `Removed ${options.bundleId}, which this run installed.` : failed('uninstall', r, error), log: null });
+  };
   if (installPath) {
     if (before && !options.install.replaceExisting) {
       return unavailable('install', `${options.bundleId} is already installed on ${phone.model} (${before.version ?? '?'} build ${before.build ?? '?'}) and this run did not install it. Remove it yourself, set install.replaceExisting, or drop build to test the installed copy.`);
@@ -262,7 +269,11 @@ async function onDevice(options: AppleDeviceOptions, ctx: DeviceRunContext, ctl:
     if (!ok) return result;
     installedByRun = !before;
     const after = await ctl.app(phone.udid, options.bundleId);
-    if (!after || 'error' in after) { result.problem = `${options.bundleId} is not listed on the device after installing it.`; return result; }
+    if (!after || 'error' in after) {
+      result.problem = `${options.bundleId} is not listed on the device after installing it.`;
+      await removeIfOwned();
+      return result;
+    }
     app = after;
   } else if (!before) {
     return unavailable('install', `${options.bundleId} is not installed on ${phone.model}. Install it, or set build.app to a device-signed build for this run to install.`);
@@ -274,6 +285,7 @@ async function onDevice(options: AppleDeviceOptions, ctx: DeviceRunContext, ctl:
   try {
     const crashesBefore = await ctl.crashLogs(phone.udid);
     let pid: number | null = null;
+    let executable = bundleUrl;
     let attachedRun: { done: boolean; result: Promise<ExecResult> } | null = null;
     const stopConsole = new AbortController();
     const running = async (cancel = true): Promise<{ pid: number; executable: string }[]> => {
@@ -296,7 +308,8 @@ async function onDevice(options: AppleDeviceOptions, ctx: DeviceRunContext, ctl:
       void attached.then(() => { attachedRun!.done = true; });
       for (let i = 0; i < 60 && pid === null && !attachedRun.done && !tool.signal?.aborted; i++) {
         await sleep(500, tool.signal);
-        pid = (await running())[0]?.pid ?? null;
+        const [first] = await running();
+        if (first) { pid = first.pid; executable = first.executable; }
       }
       const detail = pid !== null ? `Launched ${options.bundleId} (pid ${pid}); it is running.`
         : attachedRun.done ? `${options.bundleId} exited during launch: ${tail(transcript(await attached), 600)}`
@@ -334,12 +347,17 @@ async function onDevice(options: AppleDeviceOptions, ctx: DeviceRunContext, ctl:
     // ---- stop what this run launched; the console ends with the app ----
     if (attachedRun) {
       // Runs after a cancel too: what this run launched is stopped either way.
-      for (const proc of await running(false)) await ctl.terminate(phone.udid, proc.pid);
+      const stopProblems: string[] = [];
+      for (const proc of await running(false)) {
+        const { error } = await ctl.terminate(phone.udid, proc.pid);
+        if (error) stopProblems.push(`terminating pid ${proc.pid}: ${error}`);
+      }
       // The timer must not outlive the race: a pending one keeps the CLI process alive after the run.
       const grace = new AbortController();
       const ended = await Promise.race([attachedRun.result.then(() => true), sleep(20_000, grace.signal).then(() => false)]);
       grace.abort();
-      if (!ended) stopConsole.abort('the app did not stop after terminate');
+      if (!ended) { stopConsole.abort('the app did not stop after terminate'); stopProblems.push('the app was still attached 20 s after terminate'); }
+      if (stopProblems.length) rec.checks.push({ name: 'stop', runner: 'devicectl', status: 'unknown', durationMs: null, detail: `Stopping the app this run launched was not confirmed: ${stopProblems.join('; ')}.`, log: null });
       const r = rec.track(await attachedRun.result);
       rec.saveLog('app-console.log', transcript(r));
     }
@@ -349,7 +367,8 @@ async function onDevice(options: AppleDeviceOptions, ctx: DeviceRunContext, ctl:
     if ('error' in crashesBefore || 'error' in crashesAfter) {
       rec.checks.push({ name: 'crash-reports', runner: 'devicectl', status: 'skipped', durationMs: null, detail: `Crash reports could not be read: ${'error' in crashesAfter ? crashesAfter.error : (crashesBefore as { error: string }).error}.`, log: null });
     } else {
-      const exe = bundleUrl.split('/').at(-1)?.replace(/\.app$/, '') ?? '';
+      // Crash reports are named after the process: the executable, which can differ from the bundle's name.
+      const exe = executable === bundleUrl ? bundleUrl.split('/').at(-1)?.replace(/\.app$/, '') ?? '' : executable.split('/').at(-1) ?? '';
       const known = new Set(crashesBefore.map(c => c.name));
       const fresh = crashesAfter.filter(c => !known.has(c.name) && exe && (c.name.startsWith(`${exe}-`) || c.name.startsWith(`${exe}.`))).slice(0, 10);
       const dir = join(ctx.evidenceDir, 'crashes');
@@ -366,11 +385,7 @@ async function onDevice(options: AppleDeviceOptions, ctx: DeviceRunContext, ctl:
   } catch (error) {
     result.problem = `Device run failed: ${(error as Error).message}.`;
   } finally {
-    if (installedByRun && options.install.uninstallAfter) {
-      const { r, error } = await ctl.uninstall(phone.udid, options.bundleId);
-      rec.checks.push({ name: 'uninstall', runner: 'devicectl', status: r.ok && !error ? 'passed' : 'unknown', durationMs: r.durationMs,
-        detail: r.ok && !error ? `Removed ${options.bundleId}, which this run installed.` : failed('uninstall', r, error), log: null });
-    }
+    await removeIfOwned();
   }
   return result;
 }

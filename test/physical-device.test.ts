@@ -191,6 +191,16 @@ test('a failing smoke test fails the physical check, and the app is still stoppe
   assert.deepEqual(p.state().running, []); assert.equal(leasesNow().length, 0);
 });
 
+test('an app that cannot be confirmed stopped makes the run unknown, never a pass', async () => {
+  const s = appRepo(), p = fakePhone({ config: { fail: 'device process terminate' } });
+  const run = await runAppleDevice(options({ tests: [] }), context(s, p));
+  const e = run.result.data.evidence;
+  assert.equal(run.result.status, 'unknown'); assert.equal(e.status.physical, 'unknown');
+  assert.match(e.checks.find(c => c.name === 'stop')!.detail, /terminating pid \d+: devicectl failed .*still attached 20 s after terminate/);
+  assert.equal(run.execution.reaped, true, 'the local console process was stopped');
+  assert.equal(leasesNow().length, 0);
+});
+
 test('a crash during the run is a failure, and its crash report is kept without hardware identifiers', async () => {
   const s = appRepo(), p = fakePhone({ config: { crashAfterMs: 300 } });
   const ctx = context(s, p);
