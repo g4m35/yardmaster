@@ -319,7 +319,7 @@ for you.
 | `install.uninstallAfter` | Remove the app afterwards, only if this run installed it fresh. Default `false`. A copy that existed before the run is never removed. |
 | `launch` | Launch the app, confirm it is running and screenshot it (default `true`). |
 | `settleSeconds` | How long the app gets to draw before the launch screenshot (default 4). |
-| `tests` | As for the simulator. `build`, `device`, `install`, `launch`, `stop`, `crash-reports` and `uninstall` are reserved names. |
+| `tests` | As for the simulator. `build`, `device`, `install`, `launch`, `app-running`, `stop`, `crash-reports` and `uninstall` are reserved names. |
 | `requiredEnv` | As for the simulator. |
 
 A run holds the `physical` lease from discovery to the end, and records the
@@ -331,7 +331,8 @@ when `limits.physical` is raised for several devices. In order it:
    now (unplugged), Developer Mode off, a locked device, one that does not answer, several candidates with none configured, or a
    missing `devicectl` are each reported **unavailable** with the reason. That is
    never a pass.
-2. **Installs** the configured build, if any, from the run's own hashed copy. It
+2. **Installs** the configured build, if any, from the run's own hashed copy, after
+   checking its `Info.plist` bundle ID matches `bundleId` (also for an IPA's Payload app). It
    never installs over an app it did not install unless `install.replaceExisting`
    says so, and never removes one. In installed-app mode, `bundleId` must already
    be installed. No other app on the device is touched.
@@ -341,9 +342,11 @@ when `limits.physical` is raised for several devices. In order it:
    screenshot`). The app's stdout and stderr become `app-console.log`.
 4. **Runs your tests** with `YARDMASTER_DEVICE_KIND=physical` and the real UDID in
    `YARDMASTER_DEVICE_UDID` and `{udid}`, so tools can address the device.
-5. **Stops** the app it launched, takes a final screenshot, and copies any crash
+5. **Confirms** the launched process is still running before intentional shutdown,
+   takes a final screenshot, stops the app, and copies any crash
    report the app wrote during the run (`devicectl device copy from --domain-type
-   systemCrashLogs`). A new crash report fails the run.
+   systemCrashLogs`). An unexpected app exit or a new crash report fails the run.
+   App termination and console cleanup also run when saving evidence fails.
 
 `devicectl` also offers `sysdiagnose` and app-container copies. Yardmaster does
 not collect them: both are large and hold personal data from the whole device or
@@ -387,6 +390,13 @@ so its evidence says so (`installed app 1.0 (20), not built from this commit`)
 and **cannot accept a commit**: acceptance requires a build of the commit for a
 physical pass. Such a run is still useful as a device smoke check through
 `ym providers run device.test`.
+
+The same restriction applies to `build.app` without `build.command`: the prebuilt
+artifact can be installed and smoke-tested, but has no demonstrated commit binding.
+Physical acceptance requires `artifact.builtFromCommit` to match the requested commit.
+Before running a build, Yardmaster discovers device identifiers so build transcripts
+are redacted even if the build fails. Saved text is scrubbed and rehashed again after
+device discovery.
 
 ## Limits
 

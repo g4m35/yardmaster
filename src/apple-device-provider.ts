@@ -12,7 +12,7 @@ import { machineId, yardHome } from './paths.ts';
 import { cleanupOwnedSimulators, exec, resolveTool, transcript, type ExecResult, type ToolContext } from './simctl.ts';
 
 /** Names of the built-in phases; a user test may not reuse them and hide among them. */
-const PHASES = ['build', 'device', 'install', 'launch', 'stop', 'crash-reports', 'uninstall'];
+const PHASES = ['build', 'device', 'install', 'launch', 'app-running', 'stop', 'crash-reports', 'uninstall'];
 
 /** Per-project recipe for the built-in physical Apple device provider (docs/DEVICES.md). */
 export const AppleDeviceOptionsSchema = z.object({
@@ -77,7 +77,7 @@ export async function runAppleDevice(options: AppleDeviceOptions, ctx: DeviceRun
   const track = (r: ExecResult) => { if (!r.reaped) { reaped = false; if (r.process) unreaped.push(r.process); } return r; };
   const secrets = options.requiredEnv.map(name => ctx.env[name]).filter((v): v is string => !!v).sort((a, b) => b.length - a.length);
   // Hardware identifiers (UDID, serial, ECID) leave saved text; unlike credentials they never cause a file to be dropped.
-  const identifiers: string[] = [];
+  const identifiers: string[] = [options.device.udid, options.device.name].filter((v): v is string => !!v);
   const redact = (text: string) => redactText(redactText(text, secrets), identifiers);
   const omitted: DeviceEvidence['omitted'] = [];
   const keep = (file: string, kind: Files[number]['kind']) => {
@@ -114,6 +114,21 @@ export async function runAppleDevice(options: AppleDeviceOptions, ctx: DeviceRun
   // ---- artifact (optional): built or existing, hashed and installed from this run's own copy ----
   const scratch = join(yardHome(), 'tmp', `device-${ctx.requestId}`);
   let installPath: string | null = null;
+  // Build tools can print a device's identity before the run reaches its physical lease.
+  // Discover redaction values first, including on build failure; never persist an unsanitized build transcript.
+  if (!problem && options.build) {
+    const ctl = new Devicectl(tool, scratch);
+    try {
+      const listed = await ctl.list();
+      if ('error' in listed) problem = `Cannot discover device identifiers before building: ${listed.error}.`;
+      else {
+        for (const phone of listed) identifiers.push(...deviceIdentifiers(phone));
+        const choice = chooseDevice(listed, options.device);
+        if ('unavailable' in choice) problem = `${choice.unavailable}.`;
+      }
+      identifiers.sort((a, b) => b.length - a.length);
+    } finally { ctl.dispose(); }
+  }
   if (!problem && options.build) {
     const appPath = resolve(ctx.cwd, options.build.app);
     let built: { path: string; sha256: string } | null = null;
@@ -143,6 +158,9 @@ export async function runAppleDevice(options: AppleDeviceOptions, ctx: DeviceRun
       else {
         installPath = taken.path;
         artifact = { path: appPath, sha256: taken.sha256, bundleId: options.bundleId, source: options.build.command ? 'built' : 'existing', fingerprint: null, builtFromCommit: options.build.command ? sha : null };
+        const identity = await artifactBundleId(tool, installPath, scratch, track);
+        if ('error' in identity) problem = identity.error;
+        else if (identity.bundleId !== options.bundleId) problem = `Artifact bundle ID ${identity.bundleId} does not match configured bundle ID ${options.bundleId}; nothing was installed.`;
       }
     }
   }
@@ -190,6 +208,11 @@ export async function runAppleDevice(options: AppleDeviceOptions, ctx: DeviceRun
     : physical !== 'passed' ? `Checks on ${what} did not complete: ${ran.filter(c => c.status !== 'passed').map(c => `${c.name} ${c.status}`).join(', ') || 'none configured'}.`
     : `Physical device passed on ${what}.${!artifact && deviceApp ? ` It tested the copy of ${deviceApp.bundleId} already installed (${deviceApp.version ?? '?'} build ${deviceApp.build ?? '?'}), not a build of this commit.` : ''}`;
   for (const check of checks) check.detail = redact(check.detail);
+  // Discovery can add identifiers after a build log was written. Keep its digest bound to the scrubbed file.
+  for (const file of files) if (isTextFile(file.path)) {
+    scrubFile(file.path, identifiers);
+    file.sha256 = fileSha256(file.path);
+  }
   const evidence: DeviceEvidence = { kind: 'yardmaster.device-evidence', version: 1, requestId: ctx.requestId,
     projectId: ctx.context.projectId ?? null, taskId: ctx.context.taskId ?? null, commit: sha, requirement,
     status: { code: ctx.context.codeChecks === 'passed' ? 'passed' : 'not-run', simulator: 'not-run', physical, overall },
@@ -198,6 +221,28 @@ export async function runAppleDevice(options: AppleDeviceOptions, ctx: DeviceRun
   writeFileSync(join(ctx.evidenceDir, 'device-evidence.json'), JSON.stringify(evidence, null, 2), { mode: 0o600 });
   return { dispatched: !!xcrun && parsedInput.success, execution: { end: canceled ? 'aborted' : 'exit', code: canceled ? null : 0, reaped },
     result: { status: overall, summary, artifacts: [join(ctx.evidenceDir, 'device-evidence.json'), ...files.map(f => f.path)].slice(0, 100), costUsd: null, data: { evidence } } };
+}
+
+/** Read the identity of the exact snapshot that will be installed, before any device mutation. */
+async function artifactBundleId(tool: ToolContext, app: string, scratch: string, track: (r: ExecResult) => ExecResult): Promise<{ bundleId: string } | { error: string }> {
+  let plist = join(app, 'Info.plist');
+  if (app.endsWith('.ipa')) {
+    const unzip = resolveTool('unzip', tool.cwd, tool.env);
+    if (!unzip) return { error: 'unzip is required to validate an IPA before installation.' };
+    const listed = track(await exec(tool, unzip, ['-Z1', app], { timeoutMs: 30_000 }));
+    const entries = listed.stdout.split('\n').filter(p => /^Payload\/[^/]+\.app\/Info\.plist$/.test(p));
+    if (!listed.ok || entries.length !== 1) return { error: 'The IPA must contain exactly one Payload app with Info.plist; nothing was installed.' };
+    const dir = join(scratch, 'artifact-identity');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const extracted = track(await exec(tool, unzip, ['-j', app, entries[0]!, '-d', dir], { timeoutMs: 30_000 }));
+    if (!extracted.ok) return { error: 'Cannot read the IPA Info.plist; nothing was installed.' };
+    plist = join(dir, 'Info.plist');
+  }
+  const plutil = resolveTool('plutil', tool.cwd, tool.env);
+  if (!plutil) return { error: 'plutil is required to validate the artifact bundle ID before installation.' };
+  const r = track(await exec(tool, plutil, ['-extract', 'CFBundleIdentifier', 'raw', '-o', '-', plist], { timeoutMs: 30_000 }));
+  const bundleId = r.stdout.trim();
+  return r.ok && /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(bundleId) ? { bundleId } : { error: 'Cannot read a valid CFBundleIdentifier from the artifact Info.plist; nothing was installed.' };
 }
 
 /** Nothing was created on the device under the lease, so freeing it only waits for commands confirmed stopped. */
@@ -282,16 +327,40 @@ async function onDevice(options: AppleDeviceOptions, ctx: DeviceRunContext, ctl:
   // The app's process is recognized by its executable inside the installed bundle.
   const bundleUrl = (app!.url ?? '').replace(/\/$/, '');
 
+  let pid: number | null = null;
+  let executable = bundleUrl;
+  let attachedRun: { done: boolean; result: Promise<ExecResult> } | null = null;
+  const stopConsole = new AbortController();
+  const running = async (cancel = true): Promise<{ pid: number; executable: string }[]> => {
+    const list = await ctl.processes(phone.udid, cancel);
+    if ('error' in list) throw new Error(list.error);
+    return !bundleUrl ? [] : list.filter(p => p.executable.startsWith(`${bundleUrl}/`));
+  };
+  const stopApp = async () => {
+    if (!attachedRun) return;
+    const attached = attachedRun;
+    const stopProblems: string[] = [];
+    try {
+      for (const proc of await running(false)) {
+        const { r, error } = await ctl.terminate(phone.udid, proc.pid);
+        rec.track(r);
+        if (error) stopProblems.push(`terminating pid ${proc.pid}: ${error}`);
+      }
+    } catch (error) { stopProblems.push(`querying or terminating the app: ${(error as Error).message}`); }
+    // Always join the local console, including when evidence writes or process queries throw.
+    const grace = new AbortController();
+    try {
+      const ended = await Promise.race([attached.result.then(() => true), sleep(20_000, grace.signal).then(() => false)]);
+      if (!ended) { stopConsole.abort('the app did not stop after terminate'); stopProblems.push('the app was still attached 20 s after terminate'); }
+    } finally { grace.abort(); }
+    const r = rec.track(await attached.result);
+    attachedRun = null;
+    if (stopProblems.length) rec.checks.push({ name: 'stop', runner: 'devicectl', status: 'unknown', durationMs: null,
+      detail: `Stopping the app this run launched was not confirmed: ${stopProblems.join('; ')}.`, log: null });
+    rec.saveLog('app-console.log', transcript(r));
+  };
   try {
     const crashesBefore = await ctl.crashLogs(phone.udid);
-    let pid: number | null = null;
-    let executable = bundleUrl;
-    let attachedRun: { done: boolean; result: Promise<ExecResult> } | null = null;
-    const stopConsole = new AbortController();
-    const running = async (cancel = true): Promise<{ pid: number; executable: string }[]> => {
-      const list = await ctl.processes(phone.udid, cancel);
-      return 'error' in list || !bundleUrl ? [] : list.filter(p => p.executable.startsWith(`${bundleUrl}/`));
-    };
     const shot = async (name: string) => {
       const file = join(ctx.evidenceDir, `${name}.png`);
       const { r } = await ctl.screenshot(phone.udid, file);
@@ -305,7 +374,8 @@ async function onDevice(options: AppleDeviceOptions, ctx: DeviceRunContext, ctl:
       const attached = exec({ ...tool, signal: AbortSignal.any([stopConsole.signal, ...(tool.signal ? [tool.signal] : [])]) }, tool.xcrun,
         ['devicectl', 'device', 'process', 'launch', '--device', phone.udid, '--terminate-existing', '--console', options.bundleId], { timeoutMs: 6 * 3600_000 });
       attachedRun = { done: false, result: attached };
-      void attached.then(() => { attachedRun!.done = true; });
+      const state = attachedRun;
+      void attached.then(() => { state.done = true; });
       for (let i = 0; i < 60 && pid === null && !attachedRun.done && !tool.signal?.aborted; i++) {
         await sleep(500, tool.signal);
         const [first] = await running();
@@ -344,23 +414,17 @@ async function onDevice(options: AppleDeviceOptions, ctx: DeviceRunContext, ctl:
     }
     if (!tool.signal?.aborted && (options.launch || options.tests.length)) await shot('final');
 
-    // ---- stop what this run launched; the console ends with the app ----
-    if (attachedRun) {
-      // Runs after a cancel too: what this run launched is stopped either way.
-      const stopProblems: string[] = [];
-      for (const proc of await running(false)) {
-        const { error } = await ctl.terminate(phone.udid, proc.pid);
-        if (error) stopProblems.push(`terminating pid ${proc.pid}: ${error}`);
-      }
-      // The timer must not outlive the race: a pending one keeps the CLI process alive after the run.
-      const grace = new AbortController();
-      const ended = await Promise.race([attachedRun.result.then(() => true), sleep(20_000, grace.signal).then(() => false)]);
-      grace.abort();
-      if (!ended) { stopConsole.abort('the app did not stop after terminate'); stopProblems.push('the app was still attached 20 s after terminate'); }
-      if (stopProblems.length) rec.checks.push({ name: 'stop', runner: 'devicectl', status: 'unknown', durationMs: null, detail: `Stopping the app this run launched was not confirmed: ${stopProblems.join('; ')}.`, log: null });
-      const r = rec.track(await attachedRun.result);
-      rec.saveLog('app-console.log', transcript(r));
+    if (attachedRun && pid !== null && !tool.signal?.aborted) {
+      const list = await ctl.processes(phone.udid);
+      const alive = !('error' in list) && list.some(p => p.pid === pid && p.executable === executable);
+      if (!alive || attachedRun.done) rec.checks.push({ name: 'app-running', runner: 'devicectl',
+        status: 'error' in list || alive ? 'unknown' : 'failed', durationMs: null,
+        detail: 'error' in list ? `Cannot confirm the launched app is still running: ${list.error}.`
+          : alive ? 'The app console detached unexpectedly before shutdown.' : 'The launched app exited before intentional shutdown.', log: null });
     }
+
+    // ---- stop what this run launched; the console ends with the app ----
+    await stopApp();
 
     // ---- crash reports this app wrote during the run ----
     const crashesAfter = await ctl.crashLogs(phone.udid);
@@ -385,7 +449,10 @@ async function onDevice(options: AppleDeviceOptions, ctx: DeviceRunContext, ctl:
   } catch (error) {
     result.problem = `Device run failed: ${(error as Error).message}.`;
   } finally {
-    await removeIfOwned();
+    try { await stopApp(); }
+    catch (error) { result.problem = `${result.problem ?? ''} App cleanup failed: ${(error as Error).message}.`.trim(); }
+    try { await removeIfOwned(); }
+    catch (error) { result.problem = `${result.problem ?? ''} Uninstall cleanup failed: ${(error as Error).message}.`.trim(); }
   }
   return result;
 }

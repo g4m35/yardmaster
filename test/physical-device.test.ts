@@ -27,6 +27,7 @@ function fakePhone(over: { devices?: unknown[]; apps?: Record<string, unknown[]>
   const bin = tempDir('ym-fake-devicectl-');
   copyFileSync(join(import.meta.dirname, 'fixtures/fake-devicectl.mjs'), join(bin, 'fake-devicectl.mjs'));
   writeFileSync(join(bin, 'xcrun'), `#!/bin/sh\nexec "${process.execPath}" "${join(bin, 'fake-devicectl.mjs')}" "$@"\n`, { mode: 0o755 });
+  writeFileSync(join(bin, 'plutil'), `#!/bin/sh\nexec "${process.execPath}" "${join(bin, 'fake-devicectl.mjs')}" plutil "$@"\n`, { mode: 0o755 });
   writeFileSync(join(bin, 'phone-state.json'), JSON.stringify({ devices: over.devices ?? [PHONE], apps: over.apps ?? { [PHONE.udid]: [FOREIGN] }, running: [], crashes: {},
     config: { bundleId: 'dev.yardmaster.smoke', ...over.config } }));
   return { bin, PATH: `${bin}:${process.env.PATH}`,
@@ -37,7 +38,8 @@ function fakePhone(over: { devices?: unknown[]; apps?: Record<string, unknown[]>
 type Phone = ReturnType<typeof fakePhone>;
 const devicectlCalls = (p: Phone, sub: string) => p.log().filter(a => a[0] === 'devicectl' && a.slice(1, 4).join(' ').startsWith(sub));
 
-const BUILD = `const fs=require('node:fs');fs.mkdirSync('build/Smoke.app',{recursive:true});fs.writeFileSync('build/Smoke.app/Smoke','device build of '+require('node:child_process').execSync('git rev-parse HEAD'));`;
+const plist = (bundleId: string) => `<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>${bundleId}</string></dict></plist>`;
+const BUILD = `const fs=require('node:fs');fs.mkdirSync('build/Smoke.app',{recursive:true});fs.writeFileSync('build/Smoke.app/Info.plist',${JSON.stringify(plist('dev.yardmaster.smoke'))});fs.writeFileSync('build/Smoke.app/Smoke','device build of '+require('node:child_process').execSync('git rev-parse HEAD'));`;
 /** Passes only when given the real device UDID, the physical kind and the bundle ID; echoes the UDID so redaction is tested. */
 const SMOKE = `const e=process.env;if(e.YARDMASTER_DEVICE_KIND!=='physical'||e.YARDMASTER_DEVICE_UDID!==${JSON.stringify(PHONE.udid)}||!e.YARDMASTER_BUNDLE_ID)process.exit(9);console.log('smoke on '+e.YARDMASTER_DEVICE_UDID+' serial ${PHONE.serial}');console.log(${JSON.stringify('device name ' + PHONE.name)});require('node:fs').writeFileSync(e.YARDMASTER_ARTIFACT_DIR+'/result.txt','ok '+e.YARDMASTER_DEVICE_UDID);`;
 const hang = (marker: string) => `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(marker)},'held');const p=process.ppid;setInterval(()=>{if(process.ppid!==p)process.exit(0)},100);setTimeout(()=>process.exit(0),60000);`;
@@ -140,6 +142,93 @@ test('a build never replaces a copy the run did not install unless configured, a
   assert.equal(devicectlCalls(p, 'device install').length, 1);
   assert.equal(devicectlCalls(p, 'device uninstall').length, 0, 'a copy that existed before the run is never removed');
   assert(!replaced.result.data.evidence.checks.some(c => c.name === 'uninstall'));
+});
+
+test('artifact identity is validated before any install, including a different already-installed bundle', async () => {
+  const s = appRepo(), p = fakePhone();
+  for (const info of [plist(FOREIGN.bundleIdentifier), '<plist><dict></dict></plist>']) {
+    mkdirSync(join(s.repo, 'build/Wrong.app'), { recursive: true });
+    writeFileSync(join(s.repo, 'build/Wrong.app/Info.plist'), info);
+    const run = await runAppleDevice(options({ bundleId: 'dev.yardmaster.smoke', build: { app: 'build/Wrong.app' } }), context(s, p));
+    assert.equal(run.result.status, 'unknown');
+    assert.match(run.result.summary, /bundle ID .* does not match|Cannot read a valid CFBundleIdentifier/);
+    assert.equal(devicectlCalls(p, 'device install').length, 0);
+    assert.deepEqual(p.state().apps[PHONE.udid], [FOREIGN]);
+    assert.equal(leasesNow().length, 0);
+  }
+});
+
+test('an unrelated prebuilt app can smoke-test but cannot accept the current commit', async () => {
+  const s = appRepo(), p = fakePhone();
+  sh(s.repo, process.execPath, ['-e', BUILD]);
+  const run = await runAppleDevice(built({ build: { app: 'build/Smoke.app' }, install: { uninstallAfter: true } }), context(s, p));
+  const e = run.result.data.evidence;
+  assert.equal(e.status.physical, 'passed', run.result.summary);
+  assert.equal(e.artifact!.builtFromCommit, null);
+  assert.match(evidenceProblem(e, s.sha, 'physical')!, /not built from this commit/);
+  const wrongCommit = { ...e, artifact: { ...e.artifact!, builtFromCommit: 'a'.repeat(40) } };
+  assert.match(evidenceProblem(wrongCommit, s.sha, 'physical')!, /not built from this commit/);
+});
+
+test('an IPA with a different Payload bundle ID is refused before installation', async () => {
+  const s = appRepo(), p = fakePhone();
+  const dir = join(s.repo, 'build');
+  mkdirSync(join(dir, 'Payload/Other.app'), { recursive: true });
+  writeFileSync(join(dir, 'Payload/Other.app/Info.plist'), plist(FOREIGN.bundleIdentifier));
+  sh(dir, 'zip', ['-q', '-r', 'Other.ipa', 'Payload']);
+  const run = await runAppleDevice(options({ bundleId: 'dev.yardmaster.smoke', build: { app: 'build/Other.ipa' } }), context(s, p));
+  assert.equal(run.result.status, 'unknown');
+  assert.match(run.result.summary, /Artifact bundle ID com.owner.app does not match/);
+  assert.equal(devicectlCalls(p, 'device install').length, 0);
+  assert.deepEqual(p.state().apps[PHONE.udid], [FOREIGN]);
+});
+
+test('a build is not started when device identifiers cannot be discovered safely', async () => {
+  const s = appRepo(), p = fakePhone({ devices: [] });
+  const run = await runAppleDevice(built(), context(s, p));
+  assert.equal(run.result.status, 'unknown');
+  assert.match(run.result.summary, /a paired iPhone or iPad is not known/);
+  assert(!existsSync(join(s.repo, 'build/Smoke.app')));
+  assert.equal(run.result.data.evidence.files.length, 0);
+});
+
+test('evidence-write failures still stop the app, join its console and release the lease', async () => {
+  const s = appRepo(), p = fakePhone();
+  const sabotage = `require('node:fs').mkdirSync(require('node:path').resolve(process.env.YARDMASTER_ARTIFACT_DIR,'../../test-smoke.log'));`;
+  const run = await runAppleDevice(options({ tests: [{ name: 'smoke', runner: 'command', command: [process.execPath, '-e', sabotage] }] }), context(s, p));
+  assert.equal(run.result.status, 'unknown');
+  assert.match(run.result.summary, /Device run failed.*EISDIR/);
+  assert.deepEqual(p.state().running, []);
+  const launches = readFileSync(join(p.bin, 'phone-log.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line))
+    .filter(call => call.args.includes('--console'));
+  assert.equal(launches.length, 1);
+  assert.throws(() => process.kill(launches[0].pid, 0), { code: 'ESRCH' });
+  assert.equal(run.execution.reaped, true);
+  assert.equal(leasesNow().length, 0);
+});
+
+test('an app that exits without a crash report before intentional shutdown fails', async () => {
+  const s = appRepo(), p = fakePhone({ config: { exitAfterMs: 800 } });
+  const run = await runAppleDevice(options({ settleSeconds: 2, tests: [] }), context(s, p));
+  assert.equal(run.result.status, 'failed', run.result.summary);
+  assert.match(run.result.data.evidence.checks.find(c => c.name === 'app-running')!.detail, /exited before intentional shutdown/);
+  assert.equal(run.result.data.evidence.checks.find(c => c.name === 'crash-reports')!.status, 'passed');
+  assert.deepEqual(p.state().running, []);
+  assert.equal(leasesNow().length, 0);
+});
+
+test('build transcripts are redacted and hashed even when the build fails before device checks', async () => {
+  const s = appRepo(), p = fakePhone();
+  const ids = [PHONE.udid, PHONE.identifier, PHONE.serial, String(PHONE.ecid), PHONE.name].join(' ');
+  for (const fail of [false, true]) {
+    const ctx = context(s, p);
+    const command = [process.execPath, '-e', `${BUILD}console.log(${JSON.stringify(ids)});process.exit(${fail ? 1 : 0});`];
+    const run = await runAppleDevice(built({ build: { command, app: 'build/Smoke.app' }, install: { uninstallAfter: true } }), ctx);
+    assert.equal(run.result.status, fail ? 'failed' : 'passed', run.result.summary);
+    assertNoHardwareIds(ctx.evidenceDir);
+    const log = run.result.data.evidence.files.find(f => f.path.endsWith('build.log'))!;
+    assert.equal(log.sha256, artifactSha256(log.path));
+  }
 });
 
 for (const [label, setup, reason] of [

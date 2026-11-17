@@ -22,6 +22,12 @@ function withState(fn) {
 let args = process.argv.slice(2);
 appendFileSync(join(here, 'phone-log.jsonl'), JSON.stringify({ t: Date.now(), pid: process.pid, args }) + '\n');
 const read = () => JSON.parse(readFileSync(stateFile, 'utf8'));
+const bundleIdAt = path => readFileSync(join(path, 'Info.plist'), 'utf8').match(/<key>CFBundleIdentifier<\/key>\s*<string>([^<]+)<\/string>/)?.[1];
+if (args[0] === 'plutil') {
+  const id = readFileSync(args.at(-1), 'utf8').match(/<key>CFBundleIdentifier<\/key>\s*<string>([^<]+)<\/string>/)?.[1];
+  if (!id) process.exit(1);
+  process.stdout.write(id + '\n'); process.exit(0);
+}
 if (args[0] === 'xcodebuild' && args[1] === '-version') { process.stdout.write('Xcode 99.0\nBuild version 99A1\n'); process.exit(0); }
 if (args[0] === '--find') {
   if (args[1] === 'devicectl' && !read().config.noDevicectl) { process.stdout.write('/fake/devicectl\n'); process.exit(0); }
@@ -71,13 +77,15 @@ if (cmd === 'list devices') {
 } else if (cmd === 'device install app') {
   const path = args[3];
   if (!path || !existsSync(path)) fail('install path missing');
+  const bundleId = bundleIdAt(path);
+  if (!bundleId) fail('artifact identity missing');
   withState(s => {
     const apps = s.apps[phone.udid] ??= [];
-    const at = apps.findIndex(a => a.bundleIdentifier === s.config.bundleId);
-    const app = { bundleIdentifier: s.config.bundleId, name: 'Smoke', version: '2.0', bundleVersion: '7', url: `file:///private/var/containers/Bundle/Application/NEW/Smoke.app/`, installedFrom: path };
+    const at = apps.findIndex(a => a.bundleIdentifier === bundleId);
+    const app = { bundleIdentifier: bundleId, name: 'Smoke', version: '2.0', bundleVersion: '7', url: `file:///private/var/containers/Bundle/Application/NEW/Smoke.app/`, installedFrom: path };
     if (at >= 0) apps[at] = app; else apps.push(app);
   });
-  write({ installedApplications: [{ bundleID: read().config.bundleId, installationURL: 'file:///private/var/containers/Bundle/Application/NEW/Smoke.app/' }] });
+  write({ installedApplications: [{ bundleID: bundleId, installationURL: 'file:///private/var/containers/Bundle/Application/NEW/Smoke.app/' }] });
 } else if (cmd === 'device uninstall app') {
   const bundle = args[3];
   withState(s => { s.apps[phone.udid] = (s.apps[phone.udid] ?? []).filter(a => a.bundleIdentifier !== bundle); });
@@ -106,6 +114,12 @@ if (cmd === 'list devices') {
   for (;;) {
     sleep(100);
     const now = read();
+    if (now.config.exitAfterMs && Date.now() - started > now.config.exitAfterMs) {
+      withState(s => { s.running = s.running.filter(p => p.pid !== pid); });
+      process.stdout.write('App exited with code 1.\n');
+      write({ process: { processIdentifier: pid }, terminationResult: { exitCode: 1 } });
+      process.exit(0);
+    }
     if (now.config.crashAfterMs && Date.now() - started > now.config.crashAfterMs) {
       withState(s => { s.running = s.running.filter(p => p.pid !== pid); (s.crashes[phone.udid] ??= []).push(`${exeOf(app).split('/').at(-1)}-2026-11-16-223000.ips`); });
       process.stdout.write('App terminated due to signal 6.\n');

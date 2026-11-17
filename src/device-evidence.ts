@@ -178,6 +178,9 @@ export function evidenceProblem(e: DeviceEvidence, sha: string | null, required:
   if (e.status.physical === 'passed' && !e.artifact && e.deviceApp && !e.deviceApp.installedByRun) {
     return `it tested the copy of ${e.deviceApp.bundleId} already installed on the device${e.deviceApp.version ? ` (${e.deviceApp.version}${e.deviceApp.build ? ` build ${e.deviceApp.build}` : ''})` : ''}, not a build of this commit`;
   }
+  if (e.status.physical === 'passed' && e.artifact && (!sha || e.artifact.builtFromCommit !== sha)) {
+    return 'the physical-device artifact was not built from this commit; a prebuilt app is smoke evidence only';
+  }
   if (required === 'simulator' && e.status.simulator !== 'passed' && e.status.physical !== 'passed') return 'no device check passed';
   return null;
 }
