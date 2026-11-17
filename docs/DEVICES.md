@@ -327,8 +327,8 @@ device (by its hashed key) on the lease, so two runs never share one device even
 when `limits.physical` is raised for several devices. In order it:
 
 1. **Discovers** the device (`devicectl list devices`, `device info lockState`).
-   No device, an unpaired or untrusted one, Developer Mode off, a locked device,
-   one that does not answer, several candidates with none configured, or a
+   No device, an unpaired or untrusted one, one that is paired but not reachable
+   now (unplugged), Developer Mode off, a locked device, one that does not answer, several candidates with none configured, or a
    missing `devicectl` are each reported **unavailable** with the reason. That is
    never a pass.
 2. **Installs** the configured build, if any, from the run's own hashed copy. It

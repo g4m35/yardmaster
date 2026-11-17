@@ -51,7 +51,7 @@ if (cmd === 'list devices') {
       properties: { hardware: { udid: d.udid, marketingName: d.model, productType: d.productType, platform: 'iOS', reality: 'physical', serialNumber: d.serial, ecid: d.ecid },
         software: { osVersionNumber: { stringValue: d.os }, osBuildVersions: { buildVersion: { name: d.build } } },
         state: { name: d.name, bootState: 'booted', developerModeStatus: d.developerMode ? { enabled: { mode: 1 } } : { disabled: {} } },
-        connection: { pairingState: d.pairing, transportType: 'wired' } } })) ] });
+        connection: d.unreachable ? { pairingState: d.pairing, state: 'unavailable' } : { pairingState: d.pairing, transportType: 'wired', state: 'disconnected' } } })) ] });
 } else if (cmd === 'device info lockState') {
   if (phone.unreachable) fail('The device is not connected.');
   write({ deviceIdentifier: phone.identifier, passcodeRequired: !!phone.locked, unlockedSinceBoot: true });

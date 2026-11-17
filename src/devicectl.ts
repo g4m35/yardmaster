@@ -19,11 +19,11 @@ const DeviceSchema = z.object({
     hardware: z.object({ udid: Str, marketingName: Str, productType: Str, platform: Str, reality: Str, serialNumber: Str, ecid: z.number().optional() }).partial().optional(),
     software: z.object({ osVersionNumber: z.object({ stringValue: Str }).optional(), osBuildVersions: z.object({ buildVersion: z.object({ name: Str }).optional() }).optional() }).optional(),
     state: z.object({ name: Str, bootState: Str, developerModeStatus: z.union([z.string(), z.record(z.string(), z.unknown())]).optional() }).optional(),
-    connection: z.object({ pairingState: Str, transportType: Str }).optional(),
+    connection: z.object({ pairingState: Str, transportType: Str, state: Str }).optional(),
   }).optional(),
   hardwareProperties: z.object({ udid: Str, marketingName: Str, productType: Str, platform: Str, reality: Str, serialNumber: Str, ecid: z.number().optional() }).optional(),
   deviceProperties: z.object({ name: Str, osVersionNumber: Str, osBuildUpdate: Str, bootState: Str, developerModeStatus: Str }).optional(),
-  connectionProperties: z.object({ pairingState: Str, transportType: Str }).optional(),
+  connectionProperties: z.object({ pairingState: Str, transportType: Str, tunnelState: Str }).optional(),
 });
 const Envelope = <T extends z.ZodType>(result: T) => z.object({ info: z.object({ outcome: z.string() }), result });
 const ListSchema = Envelope(z.object({ devices: z.array(DeviceSchema) }));
@@ -39,6 +39,8 @@ export interface PhysicalDevice {
   identifier: string; udid: string; name: string; model: string; modelIdentifier: string | null; platform: string;
   osVersion: string | null; osBuild: string | null; pairing: string | null; developerMode: 'enabled' | 'disabled' | 'unknown';
   bootState: string | null; transport: string | null; serial: string | null; ecid: string | null;
+  /** `unavailable` when CoreDevice cannot reach it now (unplugged, asleep off-network); `disconnected` is normal before use. */
+  connection: string | null;
 }
 export interface InstalledApp { bundleId: string; name: string | null; version: string | null; build: string | null; url: string | null }
 
@@ -58,7 +60,8 @@ function normalize(d: z.infer<typeof DeviceSchema>): PhysicalDevice | null {
     pairing: d.properties?.connection?.pairingState ?? d.connectionProperties?.pairingState ?? null, developerMode,
     bootState: d.properties?.state?.bootState ?? d.deviceProperties?.bootState ?? null,
     transport: d.properties?.connection?.transportType ?? d.connectionProperties?.transportType ?? null,
-    serial: hw.serialNumber ?? null, ecid: hw.ecid !== undefined ? String(hw.ecid) : null };
+    serial: hw.serialNumber ?? null, ecid: hw.ecid !== undefined ? String(hw.ecid) : null,
+    connection: d.properties?.connection?.state ?? d.connectionProperties?.tunnelState ?? null };
 }
 
 /**
@@ -82,6 +85,7 @@ export function chooseDevice(devices: PhysicalDevice[], want: { udid?: string; n
   if (wanted.length > 1) return { unavailable: `${wanted.length} devices match ${want.name ? `the name "${want.name}"` : 'and none is configured'}; set options.device.udid` };
   const device = wanted[0]!;
   if (device.pairing !== 'paired') return { unavailable: `${device.model} is not paired with this Mac (${device.pairing ?? 'unknown'}): unlock it, connect it and tap Trust` };
+  if (device.connection === 'unavailable') return { unavailable: `${device.model} is paired but not reachable now: connect it with a cable (or join the same network), unlock it and keep it awake` };
   if (device.developerMode !== 'enabled') return { unavailable: `${device.model} does not have Developer Mode enabled (Settings > Privacy & Security > Developer Mode)` };
   if (device.bootState && device.bootState !== 'booted') return { unavailable: `${device.model} is not booted (${device.bootState})` };
   return { device };
@@ -166,5 +170,5 @@ function failure(r: ExecResult, raw: unknown): string {
   const description = info.success ? info.data.error?.userInfo?.NSLocalizedDescription : undefined;
   const message = typeof description === 'object' && description && 'string' in description ? String((description as { string: unknown }).string)
     : typeof description === 'string' ? description : (r.stderr || r.stdout).trim().split('\n').filter(Boolean).at(-1) ?? '';
-  return `devicectl ${r.end}${r.code !== null ? ` (exit ${r.code})` : ''}${message ? `: ${message.slice(0, 300)}` : ''}`;
+  return `devicectl ${r.end === 'exit' ? 'failed' : r.end}${r.code !== null ? ` (exit ${r.code})` : ''}${message ? `: ${message.slice(0, 300)}` : ''}`;
 }

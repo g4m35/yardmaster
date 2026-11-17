@@ -185,6 +185,7 @@ export async function runAppleDevice(options: AppleDeviceOptions, ctx: DeviceRun
     : failedBuild ? 'The app build failed; nothing ran on the device.'
     : !reaped ? 'A device-test process survived cleanup. Inspect owned processes before retrying.'
     : problem ? redact(problem)
+    : unavailable ? redact(checks.find(c => c.status === 'unavailable' && (c.name === 'device' || c.name === 'install'))!.detail)
     : physical === 'failed' ? `Checks failed on ${what}: ${ran.filter(c => c.status === 'failed').map(c => c.name).join(', ')}.`
     : physical !== 'passed' ? `Checks on ${what} did not complete: ${ran.filter(c => c.status !== 'passed').map(c => `${c.name} ${c.status}`).join(', ') || 'none configured'}.`
     : `Physical device passed on ${what}.${!artifact && deviceApp ? ` It tested the copy of ${deviceApp.bundleId} already installed (${deviceApp.version ?? '?'} build ${deviceApp.build ?? '?'}), not a build of this commit.` : ''}`;

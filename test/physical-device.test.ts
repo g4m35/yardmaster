@@ -144,7 +144,8 @@ test('a build never replaces a copy the run did not install unless configured, a
 for (const [label, setup, reason] of [
   ['no device is connected', { devices: [] }, /a paired iPhone or iPad is not known to this Mac/],
   ['the device is locked', { devices: [{ ...PHONE, locked: true }] }, /is locked/],
-  ['the device does not answer', { devices: [{ ...PHONE, unreachable: true }] }, /did not answer/],
+  ['the device is unplugged or out of reach', { devices: [{ ...PHONE, unreachable: true }] }, /paired but not reachable now/],
+  ['the device does not answer', { config: { fail: 'device info lockState' } }, /did not answer \(devicectl failed \(exit 1\): forced failure/],
   ['the device is not trusted', { devices: [{ ...PHONE, pairing: 'unpaired' }] }, /a paired iPhone or iPad is not known/],
   ['Developer Mode is off', { devices: [{ ...PHONE, developerMode: false }] }, /Developer Mode/],
   ['two devices and none chosen', { devices: [PHONE, { ...PHONE, identifier: 'X2', udid: '00008150-0001632136400BB2', name: 'Second' }] }, /2 devices match and none is configured/],
@@ -155,7 +156,7 @@ for (const [label, setup, reason] of [
   const run = await runAppleDevice(options(), context(s, p));
   const e = run.result.data.evidence;
   assert.equal(run.result.status, 'unknown'); assert.equal(e.status.overall, 'unknown'); assert.equal(e.status.physical, 'untested');
-  assert.match(`${e.summary} ${e.checks.map(c => c.detail).join(' ')}`, reason);
+  assert.match(e.summary, reason, 'the summary gives the reason');
   assert(e.checks.every(c => c.status === 'unavailable' || c.status === 'passed'));
   assert.equal(devicectlCalls(p, 'device process launch').length, 0);
   assert.equal(leasesNow().length, 0);
@@ -164,11 +165,12 @@ for (const [label, setup, reason] of [
 
 test('a configured device is chosen by UDID or name; an unknown one is reported by its hashed key', () => {
   const a = { identifier: 'A', udid: '00008150-AAAAAAAAAAAAAAAA', name: 'Lab A', model: 'iPhone 17', modelIdentifier: 'iPhone18,3', platform: 'iOS', osVersion: '27.0', osBuild: null,
-    pairing: 'paired', developerMode: 'enabled', bootState: 'booted', transport: 'wired', serial: null, ecid: null } satisfies PhysicalDevice;
+    pairing: 'paired', developerMode: 'enabled', bootState: 'booted', transport: 'wired', serial: null, ecid: null, connection: 'disconnected' } satisfies PhysicalDevice;
   const b = { ...a, identifier: 'B', udid: '00008150-BBBBBBBBBBBBBBBB', name: 'Lab B' };
   assert.equal((chooseDevice([a, b], { udid: b.udid.toLowerCase() }) as { device: PhysicalDevice }).device.name, 'Lab B');
   assert.equal((chooseDevice([a, b], { name: 'Lab A' }) as { device: PhysicalDevice }).device.udid, a.udid);
   const missing = chooseDevice([a], { udid: '00008150-CCCCCCCCCCCCCCCC' }) as { unavailable: string };
+  assert.match((chooseDevice([{ ...a, connection: 'unavailable' }], {}) as { unavailable: string }).unavailable, /not reachable now/);
   assert.match(missing.unavailable, /^device d-[a-f0-9]{20} is not known/); assert(!missing.unavailable.includes('CCCC'));
   assert.equal(deviceKey(a.udid), deviceKey(a.udid.toLowerCase()), 'the key is stable whatever the case');
 });
