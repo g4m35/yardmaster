@@ -32,8 +32,14 @@ can offer the same job.
 
 A missing browser/device provider is unavailable, not a simulated test pass.
 For iPhone apps, the built-in `apple-simulator` provider runs `device.test` on a
-simulator it creates under a machine-wide lease and records device evidence; see
-[DEVICES.md](DEVICES.md).
+simulator it creates under a machine-wide lease, and the built-in `apple-device`
+provider runs it on a paired iPhone or iPad under the `physical` lease. Both
+record device evidence; see [DEVICES.md](DEVICES.md). A provider plugin for
+another device lab reports physical results the same way: `data.evidence` with
+`device.kind: "physical"` and `status.physical`, an `artifact` with the sha256 of
+the build it tested (evidence without one cannot accept a commit when it sets
+`deviceApp`), and a hashed device key rather than the hardware UDID in
+`device.udid`.
 Adapters must follow the user's session rules. In T3, use its bound device
 commands; generic command execution is not permission to launch another
 browser or take a different session's device.

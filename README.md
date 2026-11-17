@@ -151,7 +151,7 @@ Each worker keeps its own provider logins and local configuration. `ym token` de
 
 ## iPhone apps and devices
 
-Yardmaster can check an iPhone app on a simulator as part of accepting a task, with no cloud account: it builds with your existing command, takes a machine-wide simulator slot so parallel agents and projects never fight over simulators, installs and launches the app, runs your smoke test (Maestro, `xcodebuild test` or any command), records evidence tied to the commit and the app's checksum, and deletes only the simulator it created. A simulator pass never counts as a physical-device pass. Setup for Swift, Expo/React Native and Flutter: [docs/DEVICES.md](docs/DEVICES.md).
+Yardmaster can check an iPhone app on a simulator, or on a paired iPhone or iPad, as part of accepting a task, with no cloud account: it builds with your existing command, takes a machine-wide simulator slot so parallel agents and projects never fight over simulators, installs and launches the app, runs your smoke test (Maestro, `xcodebuild test` or any command), records evidence tied to the commit and the app's checksum, and deletes only the simulator it created. The opt-in `apple-device` provider does the same on a real device through Xcode's `devicectl` under a machine-wide device lease, and never installs over or removes an app it did not install. A simulator pass never counts as a physical-device pass. Setup for Swift, Expo/React Native and Flutter: [docs/DEVICES.md](docs/DEVICES.md).
 
 ## Supervision
 
@@ -271,7 +271,7 @@ Known gaps:
 - The Cursor and Gemini adapters follow their documented stream formats but haven't been run against live sessions yet.
 - Yardmaster is not published to npm yet. Use the standalone binary or install from GitHub.
 - CI runs on macOS and Linux only. Windows is not tested.
-- Device checks run on iOS simulators. Physical iPhone testing is not implemented yet; a physical-device requirement stays "untested" until it is. Only the Swift sample is exercised in CI; the Expo/React Native and Flutter recipes in docs/DEVICES.md are documented but not run.
+- Physical-device checks (`apple-device`) are tested against a stand-in `devicectl` in CI and were run by hand on one iPhone (iOS 27, Xcode 27.2); CI has no iPhone. XCTest UI tests on a device need someone to enter the device passcode once after each restart. Only the Swift sample is exercised in CI; the Expo/React Native and Flutter recipes in docs/DEVICES.md are documented but not run.
 
 ## Help
 

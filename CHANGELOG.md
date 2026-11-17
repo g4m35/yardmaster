@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### iPhone apps on a real device
+- Safety: validate the artifact's actual bundle ID before installing, reject unbound prebuilt apps for commit acceptance, detect unexpected app exit without a crash report, redact build transcripts before persistence, and guarantee app/console cleanup when evidence writes fail.
+- New built-in `apple-device` provider (opt-in, `device.test`, macOS with Xcode): tests on a paired iPhone or iPad through `xcrun devicectl`, holding the machine-wide `physical` lease for the whole run. It finds the configured device (UDID or name) or the only paired one; a missing, unpaired, locked, unreachable or Developer-Mode-off device, several candidates, or a missing `devicectl` is unavailable with the reason, never a pass. It installs only a build you configure, from the run's own hashed copy, never over a copy it did not install unless `install.replaceExisting` is set, and removes only what it installed fresh, only with `install.uninstallAfter`. Without a build it tests the copy already installed. It launches the app attached to its console (stdout and stderr become `app-console.log`), confirms the process is running, takes screenshots, runs your smoke commands with the device's UDID, stops what it launched, and fails the run on a new crash report from the app, which it keeps. See [docs/DEVICES.md](docs/DEVICES.md#physical-devices).
+- Physical evidence: `device.kind: "physical"`, model, model identifier, iOS version and build, and `physical: passed|failed|unknown|untested`, bound to the commit, artifact sha256 and Xcode version like simulator evidence. The device is identified by a stable hashed key; the UDID, serial number, ECID, CoreDevice identifier and the device's own name are redacted from every saved text file. New `deviceApp` field records the app's version on the device and whether the run installed it. Acceptance does not accept a physical pass of an app that was already installed, since it is not a build of the commit.
+- A lease now records the device it uses, so two runs never share one device when `limits.physical` allows several.
+- `examples/ios-device-runner`: a small XCUITest runner that drives any installed app by bundle ID (foreground, tap, find text with scrolling, permission alert, Home, screenshots), built once with your development team, plus `stays-running.mjs`, a smoke check that needs no UI automation.
+- Dashboard Details show the app found on the device and whether it was built from the commit.
+
 ## 0.9.6
 - Fixed: a killed or crashed Yardmaster process left its dependency-reuse proof folders in `~/.yardmaster/clone-proofs`. Proof folders now carry their owner's process ID, and the next process to share dependencies removes folders whose owner is gone (including the unnamed ones earlier releases left behind).
 - Docs: `docs/JEV.md` says that the JEV router this integration was built against is not publicly released.

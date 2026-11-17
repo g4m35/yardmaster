@@ -17,5 +17,12 @@ export function builtinProviders(): ProviderPlugin[] {
       service: 'device', command: [...selfCommand(), '__apple-simulator-provider'],
       locality: 'local', cost: 'free', timeoutMs: 86_400_000,
     } },
+  }), ProviderPluginSchema.parse({
+    kind: 'provider', apiVersion: 1, name: 'apple-device', label: 'Apple device (paired iPhone or iPad, local Xcode)',
+    setupHint: 'Enable apple-device with options.bundleId, and route device.test to it. Needs macOS with Xcode and a paired, unlocked device with Developer Mode on. Holds the machine-wide physical-device lease; installs only a build you configure and never removes apps it did not install. See docs/DEVICES.md.',
+    capabilities: { 'device.test': {
+      service: 'device', command: [...selfCommand(), '__apple-device-provider'],
+      locality: 'local', cost: 'free', timeoutMs: 86_400_000,
+    } },
   })];
 }

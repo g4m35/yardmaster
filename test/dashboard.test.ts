@@ -673,6 +673,25 @@ test('task details show device evidence as separate code, simulator and physical
   assert.equal(h.$('d-devices'), null);
 });
 
+test('a physical-device pass shows the device, its hashed identity stays out of view, and an installed copy is labeled', async () => {
+  const h = harness();
+  const evidence = { kind: 'yardmaster.device-evidence', version: 1, requestId: 'r', projectId: 'p-one', taskId: 't-one', commit: 'c'.repeat(40), requirement: 'physical',
+    status: { code: 'not-run', simulator: 'not-run', physical: 'passed', overall: 'passed' }, artifact: null,
+    environment: { machineId: 'm-one', os: 'darwin 27.2', arch: 'arm64', xcode: 'Xcode 27.2' },
+    device: { kind: 'physical', name: 'iPhone 17', model: 'iPhone 17', modelIdentifier: 'iPhone18,3', runtime: 'iOS 27.0', runtimeIdentifier: 'iOS 27.0 (24A435)', udid: 'd-0123456789abcdef0123', createdByYardmaster: false },
+    deviceApp: { bundleId: 'com.example.app', name: 'Example', version: '1.0.0', build: '20', installedByRun: false },
+    checks: [{ name: 'device', runner: 'devicectl', status: 'passed', durationMs: 1, detail: '', log: null }, { name: 'launch', runner: 'devicectl', status: 'passed', durationMs: 1, detail: '', log: null }],
+    files: [], lease: { id: 'l-1', pool: 'physical', queuedAt: 0, acquiredAt: 1, releasedAt: 2, waitedMs: 0, cleanup: 'released' }, startedAt: '', completedAt: '', summary: 'Physical device passed on iPhone 17 (iOS 27.0).' };
+  h.respond(method => method === 'task.get' ? { ...detail(), devices: [{ evidence, receiptPath: null, recordedAt: now }],
+    task: { ...detail().task, branch: 'yardmaster/t-one' } } : method === 'registry.list' ? snapshot() : board());
+  await h.api.refresh(); await h.api.showTask('t-one');
+  const view = h.$('d-devices');
+  assert.deepEqual(view.children[1]!.children[0]!.children.map(li => `${li.textContent}=${li.getAttribute('data-s')}`), ['Code not run=not-run', 'Simulator not run=not-run', 'Physical device passed=passed']);
+  assert.match(view.textContent, /DeviceiPhone 17 · iOS 27\.0 · physicalRequirementPhysical device/);
+  assert.match(view.textContent, /App on deviceExample 1\.0\.0 \(20\) · already installed, not built from this commit/);
+  assert.doesNotMatch(view.textContent, /d-0123456789abcdef0123/);
+});
+
 test('fallback polling stops on SSE connect, resumes on disconnect, and pauses while hidden', async () => {
   const h = harness();
   h.respond(method => method === 'events.since' ? [] : method === 'registry.list' ? snapshot() : board());

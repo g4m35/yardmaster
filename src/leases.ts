@@ -29,11 +29,22 @@ export const ProcessResourceSchema = z.object({
   pid: z.number().int().positive(),
   startedAt: z.number().nullable(),
 });
-export const OwnedResourceSchema = z.discriminatedUnion('kind', [SimulatorResourceSchema, ProcessResourceSchema]);
+/**
+ * A physical device in use under a lease, by its hashed key (never the raw UDID). Nothing is created on it, so there
+ * is nothing to clean; the record keeps two leases in a pool with room for several phones off the same phone.
+ */
+export const DeviceResourceSchema = z.object({
+  kind: z.literal('device'),
+  key: z.string().regex(/^d-[a-f0-9]{20}$/),
+});
+export const OwnedResourceSchema = z.discriminatedUnion('kind', [SimulatorResourceSchema, ProcessResourceSchema, DeviceResourceSchema]);
 export type OwnedResource = z.infer<typeof OwnedResourceSchema>;
 export type SimulatorResource = z.infer<typeof SimulatorResourceSchema>;
 export type ProcessResource = z.infer<typeof ProcessResourceSchema>;
-export const describeOwned = (o: OwnedResource) => o.kind === 'simulator' ? `${o.name}${o.udid ? ` ${o.udid}` : ''}` : `process ${o.pid}`;
+export type DeviceResource = z.infer<typeof DeviceResourceSchema>;
+export const describeOwned = (o: OwnedResource) => o.kind === 'simulator' ? `${o.name}${o.udid ? ` ${o.udid}` : ''}` : o.kind === 'device' ? `device ${o.key}` : `process ${o.pid}`;
+const sameResource = (a: OwnedResource, b: OwnedResource) => a.kind === b.kind && (a.kind === 'simulator' ? a.name === (b as SimulatorResource).name
+  : a.kind === 'device' ? a.key === (b as DeviceResource).key : a.pid === (b as ProcessResource).pid);
 
 export interface Lease {
   id: string; pool: LeasePool; state: LeaseState; holder: string;
@@ -153,7 +164,7 @@ async function cleanupOwned(owned: OwnedResource[], cleanup: ResourceCleanup): P
   }
   if (problems.length) return { ok: false, detail: problems.join('; ') };
   const sims = owned.filter((o): o is SimulatorResource => o.kind === 'simulator');
-  if (!sims.length) return { ok: true, detail: owned.length ? 'recorded processes confirmed stopped' : 'nothing to clean' };
+  if (!sims.length) return { ok: true, detail: owned.some(o => o.kind === 'process') ? 'recorded processes confirmed stopped' : 'nothing to clean' };
   return cleanup(sims).catch((error: Error) => ({ ok: false, detail: error.message }));
 }
 export interface ReapResult { id: string; pool: LeasePool; holder: string; outcome: 'expired-waiter' | 'released' | 'cleanup_failed'; detail: string }
@@ -259,6 +270,8 @@ export interface LeaseHandle {
   holds(): boolean;
   /** Record a resource before creating it. */
   own(resource: OwnedResource): void;
+  /** Record use of a physical device unless another lease already has it; returns that lease's holder, or null once claimed. */
+  claimDevice(key: string): string | null;
   release(): void;
   cleanupFailed(detail: string): void;
   /**
@@ -340,9 +353,19 @@ function handle(id: string, queuedAt: number, ttlMs: number, me: ProcessId): Lea
     own: resource => withDb(db => tx(db, () => {
       const row = db.prepare("SELECT owned FROM resource_leases WHERE id = ? AND state = 'held' AND pid = ?").get(id, me.pid) as { owned: string } | undefined;
       if (!row) throw new Error('This process no longer holds the lease; nothing may be created under it.');
-      const same = (o: OwnedResource) => o.kind === resource.kind && (o.kind === 'simulator' ? o.name === (resource as SimulatorResource).name : o.pid === (resource as ProcessResource).pid);
-      const owned = z.array(OwnedResourceSchema).parse(JSON.parse(row.owned)).filter(o => !same(o));
+      const owned = z.array(OwnedResourceSchema).parse(JSON.parse(row.owned)).filter(o => !sameResource(o, resource));
       db.prepare('UPDATE resource_leases SET owned = ? WHERE id = ?').run(JSON.stringify([...owned, OwnedResourceSchema.parse(resource)]), id);
+    })),
+    claimDevice: key => withDb(db => tx(db, () => {
+      const resource = DeviceResourceSchema.parse({ kind: 'device', key });
+      const rows = listLeases(db);
+      const mine = rows.find(l => l.id === id && l.state === 'held' && l.pid === me.pid);
+      if (!mine) throw new Error('This process no longer holds the lease; no device may be used under it.');
+      // Any other non-waiting lease counts, including one whose cleanup failed: its run may still be using the device.
+      const other = rows.find(l => l.id !== id && l.state !== 'waiting' && l.owned.some(o => sameResource(o, resource)));
+      if (other) return other.holder;
+      db.prepare('UPDATE resource_leases SET owned = ? WHERE id = ?').run(JSON.stringify([...mine.owned.filter(o => !sameResource(o, resource)), resource]), id);
+      return null;
     })),
     release: () => { clearInterval(renew); withDb(db => db.prepare("DELETE FROM resource_leases WHERE id = ? AND state = 'held' AND pid = ?").run(id, me.pid)); },
     cleanupFailed: detail => {
