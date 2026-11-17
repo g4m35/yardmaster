@@ -332,11 +332,11 @@ when `limits.physical` is raised for several devices. In order it:
    missing `devicectl` are each reported **unavailable** with the reason. That is
    never a pass.
 2. **Installs** the configured build, if any, from the run's own hashed copy. It
-   never installs over, terminates by bundle ID or removes an app it did not
-   install, unless `install.replaceExisting` says so. In installed-app mode,
-   `bundleId` must already be installed.
+   never installs over an app it did not install unless `install.replaceExisting`
+   says so, and never removes one. In installed-app mode, `bundleId` must already
+   be installed. No other app on the device is touched.
 3. **Launches** the app with `devicectl device process launch --console
-   --terminate-existing`, confirms its process is running, waits
+   --terminate-existing` (a running copy is restarted), confirms its process is running, waits
    `settleSeconds` and takes a screenshot (`devicectl device capture
    screenshot`). The app's stdout and stderr become `app-console.log`.
 4. **Runs your tests** with `YARDMASTER_DEVICE_KIND=physical` and the real UDID in

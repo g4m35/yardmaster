@@ -42,7 +42,8 @@ export const AppleDeviceOptionsSchema = z.object({
   launch: z.boolean().default(true),
   /** How long the launched app gets to draw before the launch screenshot. */
   settleSeconds: z.number().min(0).max(60).default(4),
-  tests: z.array(TestSchema.refine(t => !PHASES.includes(t.name), `${PHASES.join(', ')} are reserved check names`)).max(10).default([]),
+  tests: z.array(TestSchema.refine(t => !PHASES.includes(t.name), `${PHASES.join(', ')} are reserved check names`)
+    .refine(t => t.runner !== 'maestro', 'Maestro does not support physical iOS devices; use XCTest, agent-device or a command')).max(10).default([]),
   requiredEnv: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/)).default([]),
 }).strict();
 export type AppleDeviceOptions = z.infer<typeof AppleDeviceOptionsSchema>;
@@ -174,7 +175,8 @@ export async function runAppleDevice(options: AppleDeviceOptions, ctx: DeviceRun
   let physical: DeviceEvidence['status']['physical'];
   if (failedBuild || unavailable || !device) physical = 'untested';
   else if (ran.some(c => c.status === 'failed')) physical = 'failed';
-  else if (problem || canceled || !ran.length || ran.some(c => c.status !== 'passed')) physical = 'unknown';
+  // Installing and reading crash reports exercise nothing: a pass needs the app launched or a test run.
+  else if (problem || canceled || !ran.some(c => c.name === 'launch' || options.tests.some(t => t.name === c.name)) || ran.some(c => c.status !== 'passed')) physical = 'unknown';
   else physical = 'passed';
   const overall: DeviceEvidence['status']['overall'] = failedBuild || physical === 'failed' ? 'failed'
     : canceled || !reaped || problem || physical !== 'passed' ? 'unknown' : 'passed';

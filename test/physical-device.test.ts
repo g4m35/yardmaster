@@ -8,9 +8,9 @@ import { resolveConfig } from '../src/config.ts';
 import { openDb } from '../src/db.ts';
 import { AppleDeviceOptionsSchema, runAppleDevice } from '../src/apple-device-provider.ts';
 import type { DeviceRunContext } from '../src/device-provider.ts';
-import { artifactSha256, DeviceEvidenceSchema, evidenceLine, evidenceProblem } from '../src/device-evidence.ts';
+import { artifactSha256, deviceEvidence, DeviceEvidenceSchema, evidenceLine, evidenceProblem, recordDeviceEvidence } from '../src/device-evidence.ts';
 import { chooseDevice, deviceKey, type PhysicalDevice } from '../src/devicectl.ts';
-import { acquireLease, listLeases } from '../src/leases.ts';
+import { acquireLease, describeOwned, listLeases } from '../src/leases.ts';
 import type { MemorySample } from '../src/machine-pressure.ts';
 import { builtinProviders } from '../src/provider-builtins.ts';
 import { planService } from '../src/providers.ts';
@@ -18,7 +18,7 @@ import { ServicesConfigSchema } from '../src/provider-contract.ts';
 
 const PHONE = { identifier: 'ECED681C-0000-4000-8000-0000000000AA', udid: '00008150-0001632136400AA1', name: "Owner's iPhone", model: 'iPhone 17', productType: 'iPhone18,3',
   os: '27.0', build: '24A435', serial: 'G037TESTSER1', ecid: 390469271994001, pairing: 'paired', developerMode: true, locked: false };
-/** Someone else's app on the phone. No run may install over, terminate-by-bundle or remove it unless configured to. */
+/** An app someone else installed. A run may launch and stop it, never install over it (unless configured to) or remove it. */
 const FOREIGN = { bundleIdentifier: 'com.owner.app', name: 'Owner App', version: '1.0.0', bundleVersion: '20', url: 'file:///private/var/containers/Bundle/Application/OWN/Owner.app/' };
 const normal = async (): Promise<MemorySample> => ({ availableMb: 8000, pressure: 'normal', sampledAt: Date.now() });
 
@@ -95,6 +95,14 @@ test('an installed app is launched, smoke-tested, screenshotted and stopped on t
   // Text surfaces say what was tested; acceptance refuses an installed copy for a commit.
   assert.match(evidenceLine(e), /^PASSED [a-f0-9]{12}: code passed, simulator not run, physical device passed \[iPhone 17, iOS 27\.0 \(physical\)\] installed app 1\.0\.0 \(20\), not built from this commit$/);
   assert.match(evidenceProblem(e, s.sha, 'physical')!, /tested the copy of com\.owner\.app already installed on the device \(1\.0\.0 build 20\), not a build of this commit/);
+  // The record behind ym devices evidence, devices.status, yard_devices and the dashboard keeps the physical fields.
+  const db = openDb();
+  try {
+    recordDeviceEvidence(db, e, run.result.artifacts[0]!);
+    const [stored] = deviceEvidence(db, { projectId: 'p-one' });
+    assert.deepEqual(stored!.evidence.device, e.device); assert.deepEqual(stored!.evidence.deviceApp, e.deviceApp);
+    assert.equal(stored!.evidence.status.physical, 'passed');
+  } finally { db.close(); }
 });
 
 test('a configured build is installed, tested, accepted for its commit and removed only because this run installed it', async () => {
@@ -165,6 +173,14 @@ test('a configured device is chosen by UDID or name; an unknown one is reported 
   assert.equal(deviceKey(a.udid), deviceKey(a.udid.toLowerCase()), 'the key is stable whatever the case');
 });
 
+test('a run that neither launches nor tests anything is not a pass', async () => {
+  const s = appRepo(), p = fakePhone();
+  const run = await runAppleDevice(options({ launch: false, tests: [] }), context(s, p));
+  assert.equal(run.result.status, 'unknown'); assert.equal(run.result.data.evidence.status.physical, 'unknown');
+  assert.match(run.result.summary, /did not complete/);
+  assert.equal(leasesNow().length, 0);
+});
+
 test('a failing smoke test fails the physical check, and the app is still stopped and the lease released', async () => {
   const s = appRepo(), p = fakePhone();
   const run = await runAppleDevice(options({ tests: [{ name: 'smoke', runner: 'command', command: [process.execPath, '-e', 'process.exit(3)'] }] }), context(s, p));
@@ -193,6 +209,7 @@ test('the physical lease is held for the whole run and records the device; cance
   const [held] = leasesNow();
   assert.equal(held!.pool, 'physical'); assert.equal(held!.state, 'held');
   assert.deepEqual(held!.owned, [{ kind: 'device', key: deviceKey(PHONE.udid) }]);
+  assert.equal(describeOwned(held!.owned[0]!), `device ${deviceKey(PHONE.udid)}`, 'status surfaces name the device by its key');
   abort.abort('canceled by test');
   const run = await running;
   assert.equal(run.result.status, 'unknown'); assert.match(run.result.summary, /canceled/);
@@ -222,4 +239,5 @@ test('apple-device is opt-in and eligible only with xcrun present and valid opti
   assert.match(planService('device.test', cfg({ bundleId: 'com.owner.app' }), plugins, s.repo, { PATH: '/nonexistent' }).candidates[0]!.reasons.join(' '), /xcrun is missing/);
   assert.match(planService('device.test', cfg({ bundleId: 'com.owner.app', device: { udid: '00008150-0001632136400AA1', name: 'x' } }), plugins, s.repo, { PATH: p.PATH }).candidates[0]!.reasons.join(' '), /not both/);
   assert.throws(() => AppleDeviceOptionsSchema.parse({ bundleId: 'a.b', tests: [{ name: 'crash-reports', runner: 'command', command: ['true'] }] }), /reserved/);
+  assert.throws(() => AppleDeviceOptionsSchema.parse({ bundleId: 'a.b', tests: [{ name: 'flow', runner: 'maestro', flow: 'f.yaml' }] }), /Maestro does not support physical/);
 });
