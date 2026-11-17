@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.9.6
+- Fixed: a killed or crashed Yardmaster process left its dependency-reuse proof folders in `~/.yardmaster/clone-proofs`. Proof folders now carry their owner's process ID, and the next process to share dependencies removes folders whose owner is gone (including the unnamed ones earlier releases left behind).
+- Docs: `docs/JEV.md` says that the JEV router this integration was built against is not publicly released.
+
 ## 0.9.5
 - Fixed: a high load average held the first task too, so a busy machine with nothing running could wait indefinitely (GitHub's macOS runners report a load of 11 to 18 per CPU, and `ym demo` never started there). Memory limits still apply before the first task; the load limit applies once a task is running, as it did before 0.9.4.
 
