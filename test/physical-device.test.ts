@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -232,6 +233,31 @@ test('two leases in a pool with room for several phones never share one phone', 
   one.lease!.release();
   assert.equal(two.lease!.claimDevice(key), null, 'free once the first run releases it');
   two.lease!.release();
+});
+
+test('ym providers run drives the phone end to end, records evidence for ym devices evidence, and exits as soon as it is done', async () => {
+  const s = appRepo(), p = fakePhone();
+  writeFileSync(join(s.repo, 'yardmaster.json'), JSON.stringify({ services: {
+    providers: { 'apple-device': { options: { bundleId: FOREIGN.bundleIdentifier, settleSeconds: 0, tests: [{ name: 'smoke', runner: 'command', command: [process.execPath, '-e', SMOKE] }] } } },
+    routes: { 'device.test': { prefer: ['apple-device'] } } } }));
+  sh(s.repo, 'git', ['add', '-A']); sh(s.repo, 'git', ['commit', '-q', '-m', 'device config']);
+  const cli = join(import.meta.dirname, '../src/cli.ts');
+  const ym = (args: string[]) => new Promise<{ code: number | null; out: string; ms: number }>(resolve => {
+    const started = Date.now();
+    const child = spawn(process.execPath, [cli, ...args], { cwd: s.repo, env: { ...process.env, PATH: p.PATH, YARDMASTER_HOME: s.home, YARDMASTER_HUB: '', YARDMASTER_TOKEN: '' } });
+    let out = ''; child.stdout.on('data', chunk => { out += chunk; });
+    child.once('exit', code => resolve({ code, out, ms: Date.now() - started }));
+  });
+  const run = await ym(['providers', 'run', 'device.test', '--json']);
+  assert.equal(run.code, 0, run.out);
+  const e = JSON.parse(run.out).result.data.evidence;
+  assert.equal(e.status.physical, 'passed');
+  // Nothing (a pending timer included) keeps the process alive once the run has finished.
+  const runMs = Date.parse(e.completedAt) - Date.parse(e.startedAt);
+  assert(run.ms < runMs + 10_000, `the CLI exited ${run.ms - runMs} ms after the run finished`);
+  const listed = await ym(['devices', 'evidence']);
+  assert.match(listed.out, /PASSED [a-f0-9]{12}: code checks not run, simulator not run, physical device passed \[iPhone 17, iOS 27\.0 \(physical\)\] installed app 1\.0\.0 \(20\)/);
+  assert(!listed.out.includes(PHONE.udid));
 });
 
 test('apple-device is opt-in and eligible only with xcrun present and valid options', () => {

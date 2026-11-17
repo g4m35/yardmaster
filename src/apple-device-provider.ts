@@ -335,7 +335,10 @@ async function onDevice(options: AppleDeviceOptions, ctx: DeviceRunContext, ctl:
     if (attachedRun) {
       // Runs after a cancel too: what this run launched is stopped either way.
       for (const proc of await running(false)) await ctl.terminate(phone.udid, proc.pid);
-      const ended = await Promise.race([attachedRun.result.then(() => true), sleep(20_000).then(() => false)]);
+      // The timer must not outlive the race: a pending one keeps the CLI process alive after the run.
+      const grace = new AbortController();
+      const ended = await Promise.race([attachedRun.result.then(() => true), sleep(20_000, grace.signal).then(() => false)]);
+      grace.abort();
       if (!ended) stopConsole.abort('the app did not stop after terminate');
       const r = rec.track(await attachedRun.result);
       rec.saveLog('app-console.log', transcript(r));
