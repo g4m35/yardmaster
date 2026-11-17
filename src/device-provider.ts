@@ -14,10 +14,10 @@ import type { ProviderResult } from './provider-contract.ts';
 import type { ServiceContext } from './service-receipts.ts';
 import { chooseTarget, cleanupOwnedSimulators, exec, listSimulators, OwnedSimulator, resolveTool, transcript, type ExecResult, type ToolContext } from './simctl.ts';
 
-const Command = z.array(z.string().min(1)).min(1);
+export const Command = z.array(z.string().min(1)).min(1);
 /** Names of the built-in phases; a user test may not reuse them and hide among them. */
 const PHASES = ['build', 'boot', 'install', 'launch'];
-const TestSchema = z.object({
+export const TestSchema = z.object({
   name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,59}$/).refine(name => !PHASES.includes(name), 'build, boot, install and launch are reserved check names'),
   /** Labels the tool for availability checks and evidence. Commands are argument arrays, never shell strings. */
   runner: z.enum(['maestro', 'xcodebuild', 'agent-device', 'command']),
@@ -52,7 +52,7 @@ export const AppleSimulatorOptionsSchema = z.object({
   requiredEnv: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/)).default([]),
 }).strict();
 export type AppleSimulatorOptions = z.infer<typeof AppleSimulatorOptionsSchema>;
-const InputSchema = z.object({ requires: z.enum(['simulator', 'physical']).optional() }).strict();
+export const InputSchema = z.object({ requires: z.enum(['simulator', 'physical']).optional() }).strict();
 
 type Check = DeviceEvidence['checks'][number];
 type Files = DeviceEvidence['files'];
@@ -79,8 +79,8 @@ export function parseFingerprint(stdout: string): string | null {
   return lines.length === 1 && /^[A-Za-z0-9._:-]{8,200}$/.test(lines[0]!) ? lines[0]! : null;
 }
 
-const fill = (args: string[], values: Record<string, string>) => args.map(arg => arg.replace(/\{(udid|app|bundleId|artifacts|sha)\}/g, (_, key: string) => values[key] ?? ''));
-const tail = (text: string, max = 1500) => text.length > max ? text.slice(-max) : text;
+export const fill = (args: string[], values: Record<string, string>) => args.map(arg => arg.replace(/\{(udid|app|bundleId|artifacts|sha)\}/g, (_, key: string) => values[key] ?? ''));
+export const tail = (text: string, max = 1500) => text.length > max ? text.slice(-max) : text;
 
 /** Queue → build slot → simulator lease → create/boot/install → launch, screenshot, tests → evidence → cleanup. */
 export async function runAppleSimulator(options: AppleSimulatorOptions, ctx: DeviceRunContext): Promise<DeviceRun> {
@@ -235,7 +235,7 @@ export async function runAppleSimulator(options: AppleSimulatorOptions, ctx: Dev
   const evidence: DeviceEvidence = { kind: 'yardmaster.device-evidence', version: 1, requestId: ctx.requestId,
     projectId: ctx.context.projectId ?? null, taskId: ctx.context.taskId ?? null, commit: sha, requirement,
     status: { code: ctx.context.codeChecks === 'passed' ? 'passed' : 'not-run', simulator, physical, overall },
-    artifact, environment, device, checks, files: files.slice(0, 100), omitted: omitted.slice(0, 100), lease: leaseRecord, startedAt, completedAt: new Date().toISOString(), summary };
+    artifact, environment, device, deviceApp: null, checks, files: files.slice(0, 100), omitted: omitted.slice(0, 100), lease: leaseRecord, startedAt, completedAt: new Date().toISOString(), summary };
   writeFileSync(join(ctx.evidenceDir, 'device-evidence.json'), JSON.stringify(evidence, null, 2), { mode: 0o600 });
   return { dispatched: !!xcrun && parsedInput.success, execution: { end: canceled ? 'aborted' : 'exit', code: canceled ? null : 0, reaped },
     result: { status: overall, summary, artifacts: [join(ctx.evidenceDir, 'device-evidence.json'), ...files.map(f => f.path)].slice(0, 100), costUsd: null, data: { evidence } } };
@@ -330,14 +330,14 @@ async function finishLease(lease: LeaseHandle, tool: ToolContext, owned: Simulat
   return cleanup;
 }
 
-function walkFiles(dir: string, depth = 0): string[] {
+export function walkFiles(dir: string, depth = 0): string[] {
   if (depth > 6 || !existsSync(dir)) return [];
   return readdirSync(dir, { withFileTypes: true }).flatMap(entry => entry.isDirectory() ? walkFiles(join(dir, entry.name), depth + 1)
     : entry.isFile() ? [join(dir, entry.name)] : []).slice(0, 80);
 }
 
 /** Copy-on-write clone where the filesystem supports it (APFS), otherwise a plain copy. */
-function snapshot(app: string, dir: string): { path: string; sha256: string } | null {
+export function snapshot(app: string, dir: string): { path: string; sha256: string } | null {
   const target = join(dir, `${randomBytes(4).toString('hex')}-${basename(app)}`);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   cpSync(app, target, { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE });

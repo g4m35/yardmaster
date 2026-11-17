@@ -38,8 +38,15 @@ export const DeviceEvidenceSchema = z.object({
   environment: z.object({ machineId: Text(200), os: Text(200), arch: Text(40), xcode: Text(200).nullable() }),
   device: z.object({
     kind: z.enum(['simulator', 'physical']), name: Text(200), model: Text(200), modelIdentifier: Text(200).nullable(),
+    /** A simulator's UDID; for a physical device, its stable hashed key (`d-…`), never the hardware UDID. */
     runtime: Text(200), runtimeIdentifier: Text(300), udid: Text(100), createdByYardmaster: z.boolean(),
   }).nullable(),
+  /**
+   * The app as found on a physical device: its version, and whether this run installed it. With no `artifact`, the
+   * run tested a copy someone else installed, which says nothing about this commit's code.
+   */
+  deviceApp: z.object({ bundleId: Text(300), name: Text(200).nullable(), version: Text(100).nullable(), build: Text(100).nullable(), installedByRun: z.boolean() })
+    .nullable().default(null),
   checks: z.array(z.object({
     name: Text(80), runner: Text(40), status: z.enum(CHECK_STATUSES),
     durationMs: z.number().int().nonnegative().nullable(), detail: Text(2000), log: Text(4096).nullable(),
@@ -139,7 +146,8 @@ export function evidenceLine(e: DeviceEvidence): string {
   const code = e.status.code === 'passed' ? 'code passed' : 'code checks not run';
   const sim = `simulator ${e.status.simulator === 'not-run' ? 'not run' : e.status.simulator}`;
   const physical = `physical device ${e.status.physical}`;
-  const artifact = e.artifact ? ` artifact sha256 ${e.artifact.sha256.slice(0, 12)}${e.artifact.source === 'reused' ? ' (reused)' : ''}` : '';
+  const artifact = e.artifact ? ` artifact sha256 ${e.artifact.sha256.slice(0, 12)}${e.artifact.source === 'reused' ? ' (reused)' : ''}`
+    : e.deviceApp ? ` installed app ${e.deviceApp.version ?? '?'} (${e.deviceApp.build ?? '?'}), not built from this commit` : '';
   return `${e.status.overall.toUpperCase()} ${e.commit?.slice(0, 12) ?? 'uncommitted'}: ${code}, ${sim}, ${physical} [${device}]${artifact}`;
 }
 
@@ -167,6 +175,9 @@ export function evidenceProblem(e: DeviceEvidence, sha: string | null, required:
   if (e.status.simulator === 'passed' && !e.device) return 'it claims a simulator pass without naming a device';
   if (e.status.overall !== 'passed') return e.summary.trim() || `its overall status is ${e.status.overall}`;
   if (required === 'physical' && e.status.physical !== 'passed') return `physical device ${e.status.physical}; a simulator pass does not satisfy a physical-device requirement`;
+  if (e.status.physical === 'passed' && !e.artifact && e.deviceApp && !e.deviceApp.installedByRun) {
+    return `it tested the copy of ${e.deviceApp.bundleId} already installed on the device${e.deviceApp.version ? ` (${e.deviceApp.version}${e.deviceApp.build ? ` build ${e.deviceApp.build}` : ''})` : ''}, not a build of this commit`;
+  }
   if (required === 'simulator' && e.status.simulator !== 'passed' && e.status.physical !== 'passed') return 'no device check passed';
   return null;
 }
@@ -275,7 +286,7 @@ export function fileContainsSecret(file: string, secrets: string[], chunkBytes =
   } finally { closeSync(input); }
 }
 
-const TEXT_EXTENSIONS = /\.(txt|log|out|err|xml|json|jsonl|html?|csv|tsv|md|ya?ml|tap|junit|plist)$/i;
+const TEXT_EXTENSIONS = /\.(txt|log|out|err|xml|json|jsonl|html?|csv|tsv|md|ya?ml|tap|junit|plist|ips|crash)$/i;
 /**
  * Only files confidently identified as text are rewritten: an allowlisted text extension, valid UTF-8 across the
  * whole file and no NUL byte. Anything else (PNGs, protobuf reports, archives) would be corrupted by substitution.
