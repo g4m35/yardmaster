@@ -2,7 +2,7 @@ import { watch, rmSync, type FSWatcher, type Dirent } from 'node:fs';
 import { lstat, readdir, mkdtemp, writeFile, rm, mkdir, utimes } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { yardHome } from './paths.ts';
-import { run, UtilityProcessError } from './proc.ts';
+import { run, UtilityProcessError, isAlive } from './proc.ts';
 import { dirBytes, dirBytesMany, invalidateSize, diskSizeRevision } from './disk.ts';
 import type { CloneResult } from './fastfs.ts';
 
@@ -33,6 +33,7 @@ const sources = new Map<string, Source>();
 const acquisitions = new Map<string, Promise<Source>>();
 const proofs = new Set<string>();
 process.once('exit', () => { for (const proof of proofs) rmSync(proof, { recursive: true, force: true }); });
+const sweeps = new Map<string, Promise<void>>();
 let sourceEpoch = 0;
 let revision = 0;
 const totals = new Map<string, { at: number; bytes: number; revision: number }>();
@@ -127,7 +128,9 @@ async function createSource(path: string): Promise<Source> {
   previous?.invalidate();
   const state = join(yardHome(), 'clone-proofs');
   await mkdir(state, { recursive: true });
-  const proof = await mkdtemp(join(state, 'source-'));
+  await sweepProofs(state);
+  // The owner's pid in the name lets a later process remove proofs left by a crash.
+  const proof = await mkdtemp(join(state, `source-${process.pid}-`));
   proofs.add(proof);
   const marker = join(proof, 'started');
   await writeFile(marker, '');
@@ -148,6 +151,23 @@ async function createSource(path: string): Promise<Source> {
   source.ready = monitor(path, since, source.invalidate, true).then(stop => { source.stop = () => { stop(); cleanup(); }; });
   await source.ready;
   return source;
+}
+
+// A killed or crashed process never runs the exit handler above, so its proof directories outlive it.
+function sweepProofs(state: string): Promise<void> {
+  let sweep = sweeps.get(state);
+  if (!sweep) {
+    sweep = readdir(state).then(names => Promise.all(names.map(async name => {
+      if (!name.startsWith('source-')) return;
+      // Names without a pid come from releases before 0.9.6; a live owner only loses a proof and rescans.
+      const owner = /^source-(\d+)-/.exec(name)?.[1];
+      if (owner && isAlive(Number(owner))) return;
+      // Leftovers cost only an inode; failing to remove one must not block dependency reuse.
+      await rm(join(state, name), { recursive: true, force: true }).catch(() => {});
+    }))).then(() => {}, err => { sweeps.delete(state); throw err; });
+    sweeps.set(state, sweep);
+  }
+  return sweep;
 }
 
 function releaseSource(source: Source): void {

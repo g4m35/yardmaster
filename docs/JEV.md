@@ -6,7 +6,7 @@ This integration is off by default and needs no new npm dependency. It uses the 
 
 ## Configure one machine
 
-1. Install a JEV router that supports the version 1 JSON `route` command. Check it independently with its own status/validation tools. Yardmaster does not bundle the private router or its credentials.
+1. Install a JEV router that supports the version 1 JSON `route` command. The router this integration was built and tested against is not publicly released; without a compatible router, leave `effortRouting` unset and nothing changes. Check it independently with its own status/validation tools. Yardmaster does not bundle the private router or its credentials.
 2. Add `effortRouting` to **that machine's** `~/.yardmaster/config.json`. Start with shadow mode. The example binding is a placeholder: replace it with an exact model configured in `agents.<agent>.models` and effort values verified for your installed CLI/model.
 
 ```json
